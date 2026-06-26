@@ -1,0 +1,1 @@
+self.__REACT_LOADABLE_MANIFEST="{\"app/knowledge-hub/page.tsx -> mammoth\":{\"id\":\"app/knowledge-hub/page.tsx -> mammoth\",\"files\":[\"static/chunks/_app-pages-browser_node_modules_mammoth_lib_index_js.js\"]}}"

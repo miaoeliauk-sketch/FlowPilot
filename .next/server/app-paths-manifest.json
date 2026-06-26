@@ -1,0 +1,5 @@
+{
+  "/page": "app/page.js",
+  "/ip/page": "app/ip/page.js",
+  "/knowledge-hub/page": "app/knowledge-hub/page.js"
+}

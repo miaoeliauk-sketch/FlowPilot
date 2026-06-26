@@ -1,0 +1,568 @@
+"use client";
+import { useState, useRef } from "react";
+import { parseXlsxFile, SheetData, extractColumn, guessCommentColumn } from "@/lib/xlsx-parser";
+
+interface XlsxUploadPanelProps {
+  mode: "comment" | "knowledge" | "review";
+  onImport: (data: ImportedData) => void;
+  onClose?: () => void;
+}
+
+export interface ImportedData {
+  mode: "comment" | "knowledge" | "review";
+  comments?: string[];
+  knowledgeRows?: { title: string; content: string; tags: string }[];
+  reviewMetrics?: { views: string; likes: string; comments: string; favorites: string; shares: string; newFollowers: string };
+  fileName: string;
+  rowCount: number;
+}
+
+// ── 字段类型识别 ──
+type FieldRole = "title" | "content" | "tags" | "data" | "link" | "account" | "unknown";
+
+interface FieldAnalysis {
+  header: string;
+  role: FieldRole;
+  roleLabel: string;
+  sample: string;
+}
+
+// ── 资料身份识别 ──
+type MaterialScope = "global" | "ip" | "material" | "data" | "unknown";
+type MaterialConfidence = "high" | "medium" | "low";
+interface MaterialIdentity {
+  scope: MaterialScope; libraryName: string; category: string;
+  confidence: MaterialConfidence; reason: string; suggestedTags: string[];
+}
+const SCOPE_LABEL: Record<MaterialScope, string> = {
+  global: "通用知识库", ip: "当前IP语料库", material: "素材库", data: "数据表", unknown: "待确认",
+};
+
+const ROLE_PATTERNS: { role: FieldRole; label: string; patterns: string[] }[] = [
+  { role: "title",   label: "标题字段", patterns: ["标题", "名称", "视频标题", "博主名称", "达人名称", "title", "name"] },
+  { role: "content", label: "内容字段", patterns: ["内容", "文案", "逐字稿", "简介", "描述", "视频文案", "正文", "content", "desc"] },
+  { role: "tags",    label: "标签字段", patterns: ["标签", "分类", "tag", "类型"] },
+  { role: "link",    label: "链接字段", patterns: ["链接", "主页", "url", "http", "link"] },
+  { role: "account", label: "账号字段", patterns: ["账号", "抖音号", "uid", "id", "粉丝", "获赞", "作品数"] },
+  { role: "data",    label: "数据字段", patterns: ["量", "数", "率", "播放", "点赞", "评论", "收藏", "转发"] },
+];
+
+function detectRole(header: string): { role: FieldRole; label: string } {
+  const h = header.toLowerCase();
+  for (const { role, label, patterns } of ROLE_PATTERNS) {
+    if (patterns.some(p => h.includes(p.toLowerCase()))) return { role, label };
+  }
+  return { role: "unknown", label: "未识别字段" };
+}
+
+function analyzeFields(sheet: SheetData): FieldAnalysis[] {
+  return sheet.headers.map(header => {
+    const { role, label } = detectRole(header);
+    const sample = sheet.rows.slice(0, 3).map(r => r[header] || "").filter(Boolean)[0] || "";
+    return { header, role, roleLabel: label, sample };
+  });
+}
+
+// 自动生成内容列（拼接数据字段）
+function buildAutoContent(row: Record<string, string>, fields: FieldAnalysis[], titleField: string): string {
+  const parts = fields
+    .filter(f => f.header !== titleField && f.role !== "unknown")
+    .map(f => `${f.header}：${row[f.header] || "—"}`)
+    .filter(p => !p.endsWith("：—"));
+  return parts.join("，");
+}
+
+const ROLE_COLORS: Record<FieldRole, string> = {
+  title:   "bg-[#E8F5D9] text-[#3B6D11]",
+  content: "bg-[#E8F0FD] text-[#1A56DB]",
+  tags:    "bg-[#FEF3C7] text-[#92400E]",
+  data:    "bg-[#F3F4F6] text-[#374151]",
+  link:    "bg-[#EDE9FE] text-[#5B21B6]",
+  account: "bg-[#FCE7F3] text-[#9D174D]",
+  unknown: "bg-[#F3F4F6] text-[#9CA3AF]",
+};
+
+const MODE_CONFIG = {
+  comment:   { title: "从 Excel 导入评论",       desc: "自动识别评论列，支持抖音/小红书/飞瓜/蝉妈妈导出格式。",           accept: ".xlsx,.xls,.csv" },
+  knowledge: { title: "从 Excel 批量导入知识库", desc: "自动识别字段，无需手动配置，支持达人数据表、视频数据、内容表格等。", accept: ".xlsx,.xls,.csv" },
+  review:    { title: "从 Excel 导入视频数据",   desc: "导入视频指标数据，自动填充播放量、点赞、评论等字段。",             accept: ".xlsx,.xls,.csv" },
+};
+
+const REVIEW_FIELDS = [
+  { key: "views", label: "播放量" }, { key: "likes", label: "点赞" },
+  { key: "comments", label: "评论" }, { key: "favorites", label: "收藏" },
+  { key: "shares", label: "转发" }, { key: "newFollowers", label: "涨粉" },
+];
+
+type Step = "upload" | "identify" | "mapping" | "preview" | "done";
+
+export function XlsxUploadPanel({ mode, onImport, onClose }: XlsxUploadPanelProps) {
+  const [step, setStep] = useState<Step>("upload");
+  const [parsing, setParsing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sheet, setSheet] = useState<SheetData | null>(null);
+  const [sheets, setSheets] = useState<SheetData[]>([]);
+  const [selectedSheet, setSelectedSheet] = useState(0);
+  const [columnMap, setColumnMap] = useState<Record<string, string>>({});
+  const [fileName, setFileName] = useState("");
+  const [fieldAnalysis, setFieldAnalysis] = useState<FieldAnalysis[]>([]);
+  const [identity, setIdentity] = useState<MaterialIdentity | null>(null);
+  const [confirmedScope, setConfirmedScope] = useState<MaterialScope | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const config = MODE_CONFIG[mode];
+
+  // ── 解析文件 ──
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null); setParsing(true); setSheet(null); setSheets([]);
+    const result = await parseXlsxFile(file);
+    setParsing(false);
+    if (result.error) { setError(result.error); return; }
+    if (result.sheets.length === 0) { setError("文件为空或格式不支持"); return; }
+
+    const s = result.sheets[0];
+    if (s.rows.length === 0) { setError(`当前 Sheet「${s.sheetName}」没有数据行，请检查是否选对了 Sheet`); return; }
+    if (s.headers.length === 0) { setError("没有识别到表头，请确认第一行是字段名称"); return; }
+
+    setFileName(result.fileName);
+    setSheets(result.sheets);
+    setSheet(s);
+    setSelectedSheet(0);
+
+    const analysis = analyzeFields(s);
+    setFieldAnalysis(analysis);
+    autoGuessMapping(s, analysis);
+    if (mode === "knowledge") {
+      const id = identifyMaterial(result.fileName, s.sheetName, s.headers, s.rows);
+      // 用 setTimeout 确保 identity state 在 step 切换前已更新
+      setIdentity(id);
+      setConfirmedScope(id.scope === "unknown" ? null : id.scope);
+      setTimeout(() => setStep("identify"), 0);
+    } else {
+      setStep("mapping");
+    }
+  }
+
+function identifyMaterial(fileName: string, sheetName: string, headers: string[], sampleRows: Record<string, string>[]): MaterialIdentity {
+  const combined = [fileName, sheetName, ...headers, ...sampleRows.slice(0,3).map(r => Object.values(r).join(" "))].join(" ").toLowerCase();
+  const hit = (patterns: string[]) => patterns.find(p => combined.includes(p));
+  const ipHit = hit(["逐字稿","口播稿","口播","ip语料","语料","ip表达","话术","表达方式"]);
+  if (ipHit) return { scope:"ip", libraryName:"当前IP语料库", category:"IP语料", confidence:"high", reason:`检测到「${ipHit}」相关字段`, suggestedTags:["IP语料","表达风格","口播"] };
+  const dataHit = hit(["播放量","点赞量","评论量","收藏量","博主名称","抖音号","粉丝量","达人","竞品"]);
+  if (dataHit) { const cat = ["博主","达人","抖音号","粉丝"].some(p=>combined.includes(p))?"达人数据":"视频数据"; return { scope:"data", libraryName:"数据表", category:cat, confidence:"high", reason:`检测到「${dataHit}」等数据字段`, suggestedTags:[cat,"数据分析"] }; }
+  const matHit = hit(["封面","分镜","bgm","音效","纹理","字体","icon","表情包","素材"]);
+  if (matHit) return { scope:"material", libraryName:"素材库", category:"封面参考", confidence:"high", reason:`检测到「${matHit}」相关字段`, suggestedTags:["素材",matHit] };
+  const methodHit = hit(["方法","步骤","框架","模型","skill","课程","方法论","公式"]);
+  if (methodHit) return { scope:"global", libraryName:"通用知识库", category:"方法论", confidence:"medium", reason:`检测到「${methodHit}」相关内容`, suggestedTags:["方法论","内容框架"] };
+  const hookHit = hit(["开头","钩子","hook","3秒","爆款开头","标题方法","标题公式"]);
+  if (hookHit) return { scope:"global", libraryName:"通用知识库", category:"钩子", confidence:"medium", reason:`检测到「${hookHit}」相关内容`, suggestedTags:["钩子","开头"] };
+  const caseHit = hit(["爆款","案例","爆款案例"]);
+  if (caseHit) return { scope:"global", libraryName:"通用知识库", category:"案例", confidence:"medium", reason:`检测到「${caseHit}」相关内容`, suggestedTags:["案例","爆款"] };
+  return { scope:"unknown", libraryName:"待确认", category:"待确认", confidence:"low", reason:"无法从文件名、字段名判断资料类型，请手动选择", suggestedTags:[] };
+}
+
+function autoGuessMapping(s: SheetData, analysis: FieldAnalysis[]) {
+    if (mode === "comment") {
+      const guessed = guessCommentColumn(s);
+      if (guessed) setColumnMap({ comment: guessed });
+    } else if (mode === "knowledge") {
+      const titleCol  = analysis.find(f => f.role === "title")?.header   ?? s.headers[0] ?? "";
+      const contentCol = analysis.find(f => f.role === "content")?.header ?? "";
+      const tagCol    = analysis.find(f => f.role === "tags")?.header     ?? "";
+      setColumnMap({ title: titleCol, content: contentCol, tags: tagCol });
+    } else if (mode === "review") {
+      const guess = (keys: string[]) => s.headers.find(h => keys.some(k => h.includes(k))) ?? "";
+      setColumnMap({
+        views: guess(["播放", "观看"]), likes: guess(["点赞"]),
+        comments: guess(["评论"]), favorites: guess(["收藏"]),
+        shares: guess(["转发", "分享"]), newFollowers: guess(["涨粉", "新增关注"]),
+      });
+    }
+  }
+
+  function handleSheetChange(idx: number) {
+    const s = sheets[idx];
+    setSelectedSheet(idx);
+    setSheet(s);
+    const analysis = analyzeFields(s);
+    setFieldAnalysis(analysis);
+    autoGuessMapping(s, analysis);
+  }
+
+  // ── 构建预览数据 ──
+  function buildPreviewRows() {
+    if (!sheet) return [];
+    return sheet.rows.slice(0, 3).map(row => {
+      const title = row[columnMap.title] || row[sheet.headers[0]] || "(无标题)";
+      let content = row[columnMap.content] || "";
+      if (!content) content = buildAutoContent(row, fieldAnalysis, columnMap.title || sheet.headers[0]);
+      const tags = row[columnMap.tags] || "";
+      return { title, content: content.slice(0, 200) + (content.length > 200 ? "…" : ""), tags };
+    }).filter(r => r.title || r.content);
+  }
+
+  // ── 计算可导入数量 ──
+  function calcImportStats() {
+    if (!sheet) return { valid: 0, skipped: 0, total: 0 };
+    const total = sheet.rows.length;
+    let valid = 0;
+    for (const row of sheet.rows) {
+      const title = row[columnMap.title] || row[sheet.headers[0]] || "";
+      const content = row[columnMap.content] || buildAutoContent(row, fieldAnalysis, columnMap.title || sheet.headers[0]);
+      if (title || content) valid++;
+    }
+    return { valid, skipped: total - valid, total };
+  }
+
+  // ── 执行导入 ──
+  function handleImport() {
+    if (!sheet) return;
+    if (mode === "comment") {
+      const col = columnMap.comment;
+      if (!col) { setError("请选择评论所在列"); return; }
+      const comments = extractColumn(sheet, col);
+      if (comments.length === 0) { setError("所选列没有内容"); return; }
+      onImport({ mode, comments, fileName, rowCount: comments.length });
+    } else if (mode === "knowledge") {
+      const knowledgeRows = sheet.rows.map(row => {
+        const title = row[columnMap.title] || row[sheet.headers[0]] || "";
+        const content = row[columnMap.content] || buildAutoContent(row, fieldAnalysis, columnMap.title || sheet.headers[0]);
+        const tags = row[columnMap.tags] || "";
+        return { title, content, tags };
+      }).filter(r => r.title || r.content);
+      if (knowledgeRows.length === 0) { setError("没有找到有效数据行，请检查字段映射"); return; }
+      onImport({ mode, knowledgeRows, fileName, rowCount: knowledgeRows.length });
+    } else if (mode === "review") {
+      const row = sheet.rows[0];
+      if (!row) { setError("表格没有数据行"); return; }
+      onImport({ mode, reviewMetrics: {
+        views: row[columnMap.views] ?? "", likes: row[columnMap.likes] ?? "",
+        comments: row[columnMap.comments] ?? "", favorites: row[columnMap.favorites] ?? "",
+        shares: row[columnMap.shares] ?? "", newFollowers: row[columnMap.newFollowers] ?? "",
+      }, fileName, rowCount: sheet.rows.length });
+    }
+  }
+
+  const stats = sheet ? calcImportStats() : null;
+  const previewRows = sheet ? buildPreviewRows() : [];
+
+  // ── 按钮文案 ──
+  function importButtonLabel() {
+    if (!sheet) return "请先选择文件";
+    if (mode === "comment") return columnMap.comment ? `导入 ${extractColumn(sheet, columnMap.comment).length} 条评论` : "请选择评论列";
+    if (mode === "knowledge") return stats && stats.valid > 0 ? `批量导入 ${stats.valid} 条` : "无有效数据";
+    return "导入视频数据";
+  }
+
+  function reset() {
+    setStep("upload"); setSheet(null); setSheets([]); setColumnMap({});
+    setFieldAnalysis([]); setError(null);
+    setIdentity(null); setConfirmedScope(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  return (
+    <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
+      {/* 顶栏 */}
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <div className="text-[13.5px] font-bold text-[#1C1C1B]">{config.title}</div>
+          <p className="mt-0.5 text-[12px] text-[#8A8A86]">{config.desc}</p>
+        </div>
+        {onClose && <button onClick={onClose} className="text-[12px] text-[#999] hover:text-[#555]">关闭</button>}
+      </div>
+
+      {/* Step 指示器（knowledge模式） */}
+      {mode === "knowledge" && (
+        <div className="mb-4 flex items-center gap-1 text-[11px]">
+          {(["upload","identify","mapping","preview"] as Step[]).map((s, i) => (
+            <div key={s} className="flex items-center gap-1">
+              <div className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${step === s ? "bg-[#1C1C1B] text-white" : ["upload","identify","mapping","preview"].indexOf(step) > i ? "bg-[#639922] text-white" : "bg-[#E5E4DE] text-[#999]"}`}>{i+1}</div>
+              <span className={step === s ? "font-semibold text-[#1C1C1B]" : "text-[#BBB]"}>{["上传文件","资料识别","字段映射","确认导入"][i]}</span>
+              {i < 2 && <span className="text-[#DDD]">›</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Step 1：上传 */}
+      {step === "upload" && (
+        <>
+          <div onClick={() => fileRef.current?.click()}
+            className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-[12px] border-2 border-dashed border-[#E5E4DE] py-8 hover:border-[#639922] hover:bg-[#F7FCF0] transition">
+            <span className="text-[28px]">📊</span>
+            <span className="text-[13px] font-semibold text-[#555]">点击选择 Excel 文件</span>
+            <span className="text-[11.5px] text-[#BBB]">支持 .xlsx .xls .csv</span>
+            <input ref={fileRef} type="file" accept={config.accept} onChange={handleFile} className="hidden" />
+          </div>
+          {parsing && <div className="mt-3 py-2 text-center text-[13px] text-[#888]">正在解析文件…</div>}
+        </>
+      )}
+
+      {error && <div className="mt-2 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</div>}
+
+      {/* Step 2：字段识别与映射 */}
+      {step === "identify" && sheet && mode === "knowledge" && (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center gap-2 rounded-[8px] bg-[#F7F6F2] px-3 py-2 text-[12px]">
+            <span className="font-semibold text-[#1C1C1B]">📄 {fileName}</span>
+            <span className="font-semibold text-[#639922]">{sheet.rows.length} 行数据</span>
+            <span className="text-[#888]">{sheet.headers.length} 列</span>
+          </div>
+          <div className={`rounded-[12px] border-2 p-4 ${identity?.confidence === "low" ? "border-orange-200 bg-orange-50" : "border-[#639922]/30 bg-[#F7FCF0]"}`}>
+            <div className="mb-3 flex items-center gap-2">
+              <span className="text-[13px] font-bold text-[#1C1C1B]">系统识别结果</span>
+              <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${identity?.confidence === "high" ? "bg-[#EAF3DE] text-[#3B6D11]" : identity?.confidence === "medium" ? "bg-[#FEF3C7] text-[#92400E]" : "bg-[#FCEBEB] text-[#A32D2D]"}`}>
+                {identity?.confidence === "high" ? "高置信" : identity?.confidence === "medium" ? "中置信" : "需确认"}
+              </span>
+            </div>
+            <div className="flex flex-col gap-2 text-[12.5px]">
+              <div className="flex items-center gap-2"><span className="w-20 flex-shrink-0 text-[#888]">推荐导入到</span><span className="font-semibold text-[#1C1C1B]">{identity?.scope ? SCOPE_LABEL[identity.scope] : "待确认"}</span></div>
+              <div className="flex items-center gap-2"><span className="w-20 flex-shrink-0 text-[#888]">推荐分类</span><span className="font-semibold text-[#1C1C1B]">{identity?.category}</span></div>
+              <div className="flex items-start gap-2"><span className="w-20 flex-shrink-0 text-[#888]">判断依据</span><span className="text-[#555]">{identity?.reason}</span></div>
+              {(identity?.suggestedTags?.length ?? 0) > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="w-20 flex-shrink-0 text-[#888]">推荐标签</span>
+                  <div className="flex flex-wrap gap-1">{(identity?.suggestedTags ?? []).map((t,i)=><span key={i} className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[10.5px] text-[#666]">#{t}</span>)}</div>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-[10px] border border-[#E5E4DE] p-3">
+            <div className="mb-2 text-[12px] font-bold text-[#555]">确认或修改导入目标</div>
+            <div className="flex flex-wrap gap-1.5">
+              {([["global","通用知识库"],["ip","当前IP语料"],["data","数据表"],["material","素材库"]] as const).map(([v,l])=>(
+                <button key={v} onClick={()=>setConfirmedScope(v as MaterialScope)}
+                  className="rounded-full px-3 py-1.5 text-[12px] font-semibold transition-all"
+                  style={(confirmedScope as string)===v?{background:"#1C1C1B",color:"#fff"}:{background:"#F2F1ED",color:"#666"}}>{l}</button>
+              ))}
+            </div>
+          </div>
+          {identity?.confidence === "low" && !confirmedScope && (
+            <div className="rounded-[10px] bg-[#FFF5F5] px-4 py-3 text-[12px] text-[#A32D2D]">
+              ⚠️ 系统无法明确判断这份资料类型，请手动选择导入目标后才能继续。
+            </div>
+          )}
+          <div className="flex gap-2">
+            <button onClick={()=>{if(confirmedScope)setStep("mapping");}} disabled={!confirmedScope}
+              className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">
+              下一步：字段映射 →
+            </button>
+            <button onClick={reset} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[12.5px] font-semibold text-[#555]">重新上传</button>
+          </div>
+        </div>
+      )}
+      {step === "mapping" && sheet && (
+        <div className="flex flex-col gap-3">
+          {/* 文件信息 */}
+          <div className="flex flex-wrap items-center gap-2 rounded-[8px] bg-[#F7F6F2] px-3 py-2 text-[12px]">
+            <span className="font-semibold text-[#1C1C1B]">📄 {fileName}</span>
+            <span className="text-[#639922] font-semibold">{sheet.rows.length} 行有效数据</span>
+            <span className="text-[#888]">{sheet.headers.length} 列</span>
+            {sheets.length > 1 && (
+              <div className="ml-auto flex items-center gap-1.5">
+                <span className="text-[#888]">Sheet：</span>
+                {sheets.map((s, i) => (
+                  <button key={i} onClick={() => handleSheetChange(i)}
+                    className="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                    style={i === selectedSheet ? { background: "#1C1C1B", color: "#fff" } : { background: "#E5E4DE", color: "#555" }}>
+                    {s.sheetName}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 字段识别结果 */}
+          {mode === "knowledge" && (
+            <>
+              <div>
+                <div className="mb-2 text-[12px] font-bold text-[#555]">系统识别到的字段</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {fieldAnalysis.map(f => (
+                    <span key={f.header} className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${ROLE_COLORS[f.role]}`}>
+                      {f.header} · {f.roleLabel}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* 字段映射 */}
+              <div className="rounded-[10px] border border-[#E5E4DE] p-3">
+                <div className="mb-2 text-[12px] font-bold text-[#555]">字段映射（系统已自动推荐）</div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  {[
+                    { key: "title",   label: "标题列", required: true  },
+                    { key: "content", label: "内容列", required: false },
+                    { key: "tags",    label: "标签列", required: false },
+                  ].map(({ key, label, required }) => (
+                    <div key={key}>
+                      <div className="mb-1 text-[11px] font-semibold text-[#888]">{label}{required ? " *" : "（可选）"}</div>
+                      <select value={columnMap[key] ?? ""} onChange={e => setColumnMap(prev => ({ ...prev, [key]: e.target.value }))}
+                        className="w-full rounded-[8px] border border-[#E5E4DE] px-2 py-1.5 text-[12.5px]">
+                        <option value="">— 跳过此字段 —</option>
+                        {sheet.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                {!columnMap.content && (
+                  <p className="mt-2 text-[11px] text-[#888]">
+                    💡 未选择内容列时，系统会自动拼接所有数据字段生成内容
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* comment 模式 */}
+          {mode === "comment" && (
+            <div>
+              <div className="mb-1.5 text-[12px] font-bold text-[#555]">选择评论列</div>
+              <div className="flex flex-wrap gap-2">
+                {sheet.headers.map(h => (
+                  <button key={h} onClick={() => setColumnMap({ comment: h })}
+                    className="rounded-full px-3 py-1.5 text-[12px] font-semibold"
+                    style={columnMap.comment === h ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>
+                    {h}
+                  </button>
+                ))}
+              </div>
+              {columnMap.comment && (
+                <p className="mt-1.5 text-[11.5px] text-[#639922]">
+                  已选「{columnMap.comment}」列，共 {extractColumn(sheet, columnMap.comment).length} 条非空数据
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* review 模式 */}
+          {mode === "review" && (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {REVIEW_FIELDS.map(({ key, label }) => (
+                <div key={key}>
+                  <div className="mb-1 text-[11.5px] font-bold text-[#888]">{label}</div>
+                  <select value={columnMap[key] ?? ""} onChange={e => setColumnMap(prev => ({ ...prev, [key]: e.target.value }))}
+                    className="w-full rounded-[8px] border border-[#E5E4DE] px-2 py-1.5 text-[12.5px]">
+                    <option value="">— 跳过此字段 —</option>
+                    {sheet.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 按钮 */}
+          <div className="flex gap-2">
+            {mode === "knowledge" && (
+              <button onClick={() => setStep("preview")}
+                className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white">
+                下一步：确认导入预览 →
+              </button>
+            )}
+            {mode !== "knowledge" && (
+              <button onClick={handleImport}
+                className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white">
+                {importButtonLabel()}
+              </button>
+            )}
+            <button onClick={reset} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[12.5px] font-semibold text-[#555]">
+              重新上传
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 3：导入预览（knowledge模式） */}
+      {step === "preview" && sheet && mode === "knowledge" && (
+        <div className="flex flex-col gap-3">
+          {/* 统计 */}
+          {stats && (
+            <div className="flex gap-3 rounded-[10px] bg-[#F7F6F2] px-4 py-3">
+              <div className="text-center">
+                <div className="text-[18px] font-bold text-[#1C1C1B]">{stats.total}</div>
+                <div className="text-[11px] text-[#888]">总行数</div>
+              </div>
+              <div className="text-center">
+                <div className="text-[18px] font-bold text-[#3B6D11]">{stats.valid}</div>
+                <div className="text-[11px] text-[#888]">可导入</div>
+              </div>
+              {stats.skipped > 0 && (
+                <div className="text-center">
+                  <div className="text-[18px] font-bold text-[#888]">{stats.skipped}</div>
+                  <div className="text-[11px] text-[#888]">跳过空行</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 双栏预览 */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {/* 原始数据 */}
+            <div>
+              <div className="mb-1.5 text-[11.5px] font-bold text-[#888]">原始数据（前3行）</div>
+              <div className="overflow-x-auto rounded-[8px] border border-[#E5E4DE]">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="bg-[#F7F6F2]">
+                      {sheet.headers.slice(0, 4).map((h, i) => (
+                        <th key={i} className="px-2 py-1.5 text-left font-semibold text-[#555] border-r border-[#E5E4DE] last:border-0 max-w-[80px] truncate">{h}</th>
+                      ))}
+                      {sheet.headers.length > 4 && <th className="px-2 py-1 text-[#BBB]">+{sheet.headers.length-4}</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sheet.rows.slice(0, 3).map((row, i) => (
+                      <tr key={i} className="border-t border-[#F0EFE9]">
+                        {sheet.headers.slice(0, 4).map((h, j) => (
+                          <td key={j} className="max-w-[80px] truncate px-2 py-1.5 text-[#333] border-r border-[#F0EFE9] last:border-0">
+                            {row[h] || <span className="text-[#DDD]">空</span>}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* 导入后预览 */}
+            <div>
+              <div className="mb-1.5 text-[11.5px] font-bold text-[#888]">导入后（写入知识库的内容）</div>
+              <div className="flex flex-col gap-2">
+                {previewRows.map((r, i) => (
+                  <div key={i} className="rounded-[8px] border border-[#E5E4DE] p-2">
+                    <div className="text-[12px] font-semibold text-[#1C1C1B] line-clamp-1">{r.title}</div>
+                    <div className="mt-0.5 text-[11px] text-[#666] line-clamp-2">{r.content || <span className="text-[#CCC]">（自动拼接字段）</span>}</div>
+                    {r.tags && <div className="mt-1 text-[10.5px] text-[#888]">标签：{r.tags}</div>}
+                    <div className="mt-1 flex gap-1.5">
+                      <span className="rounded-full bg-[#F3F4F6] px-1.5 py-0.5 text-[10px] text-[#888]">type: case</span>
+                      <span className="rounded-full bg-[#F3F4F6] px-1.5 py-0.5 text-[10px] text-[#888]">scene: analysis</span>
+                      <span className="rounded-full bg-[#F3F4F6] px-1.5 py-0.5 text-[10px] text-[#888]">Excel导入</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 按钮 */}
+          <div className="flex gap-2">
+            <button onClick={handleImport}
+              disabled={!stats || stats.valid === 0}
+              className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed">
+              {stats && stats.valid > 0 ? `确认导入 ${stats.valid} 条` : "无有效数据"}
+            </button>
+            <button onClick={() => setStep("mapping")} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[12.5px] font-semibold text-[#555]">
+              ← 返回修改映射
+            </button>
+            <button onClick={reset} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[12.5px] font-semibold text-[#555]">
+              重新上传
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

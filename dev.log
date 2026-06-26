@@ -1,0 +1,26 @@
+
+> ai-ip-workbench@0.1.0 dev
+> next dev
+
+  ▲ Next.js 14.2.32
+  - Local:        http://localhost:3000
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 2.3s
+ ○ Compiling /shoot-room ...
+ ✓ Compiled /shoot-room in 2.3s (506 modules)
+ GET /shoot-room 200 in 2499ms
+ ○ Compiling /topic-board ...
+ ✓ Compiled /topic-board in 698ms (512 modules)
+ ✓ Compiled /api/topic-review in 290ms (280 modules)
+ POST /api/topic-review 200 in 23401ms
+ ✓ Compiled /_not-found in 347ms (501 modules)
+ GET /hot-analysis 404 in 60ms
+ ✓ Compiled /comment-radar in 326ms (509 modules)
+ ✓ Compiled in 1439ms (520 modules)
+ GET /topic-board 200 in 296ms
+ GET /shoot-room 200 in 172ms
+ GET /topic-board 200 in 644ms
+ ○ Compiling / ...
+ ✓ Compiled / in 1413ms (526 modules)
