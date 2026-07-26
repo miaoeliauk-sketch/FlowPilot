@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callDeepSeek, parseDeepSeekJSON as parseJSON, parseDeepSeekJSONArray, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import { callDeepSeek, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import {
+  HotAnalysisResponseError,
+  parseHotAnalysisResponse,
+} from "@/lib/hot-analysis-response";
 
 // 按标点切句——切句本身用代码做，不依赖AI，保证后面"占比"统计的分母是确定的
 function splitSentences(text: string): string[] {
@@ -31,7 +35,7 @@ const SYSTEM = `你是短视频内容的诊断分析师，任务是拆解一段�
 4. IP匹配度：如果提供了当前IP信息，结合受众/风格/内容方向判断匹配度，给定性档位（高度匹配/中度匹配/低度匹配），不要给精确百分比——你没有能力算出真实的匹配率数字。
 5. 是否值得学习：值得学习/部分学习/不建议学习，必须给具体理由，不能空泛。
 
-严格按JSON格式输出，不要输出任何其他文字。`;
+严格按JSON格式输出，不要输出任何其他文字，不要使用Markdown代码块，不要在JSON前后添加解释。`;
 
 const PROMPT = (inputRaw: string, sentences: string[], ipContext: IPContext | null, hasMetrics: boolean) => `输入内容：
 """
@@ -76,7 +80,9 @@ ${hasMetrics ? "用户提供了真实互动数据，指标层会在代码里另�
   "userNeedLayer": "${NEED_LAYERS}（六选一，判断用户主要在看什么）",
   "sentenceStageTags": [{"index": 句子编号, "stage": "Hook｜Problem｜Solution｜Case｜CTA｜none"}],
   "sentenceEmotionTags": [{"index": 句子编号, "emotions": ["焦虑/希望/好奇/羡慕/优越感/危机感中命中的，可以是空数组"]}]
-}`;
+}
+
+只输出上述JSON对象，不要使用Markdown代码块，不要在JSON前后添加解释文字。`;
 
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
@@ -95,12 +101,30 @@ export async function POST(req: NextRequest) {
   const sentences = splitSentences(inputRaw);
   const hasRealMetrics = !!body.metrics && (body.metrics.likes > 0 || body.metrics.comments > 0 || body.metrics.shares > 0 || body.metrics.favorites > 0 || body.metrics.aboveAccountAverage);
   const calledAt = new Date().toISOString();
-  const apiMeta = { apiCalled: true, calledAt, model: MODEL, ipUsed: null as string | null, mockHit: false };
+  const requestId = crypto.randomUUID();
+  const isDevelopment = process.env.NODE_ENV !== "production";
+  const apiMeta = {
+    apiCalled: true,
+    calledAt,
+    model: MODEL,
+    ipUsed: null as string | null,
+    mockHit: false,
+    ...(isDevelopment ? { requestId } : {}),
+  };
 
   try {
-    const raw = await callDeepSeek(SYSTEM, PROMPT(inputRaw, sentences, body.ipContext ?? null, hasRealMetrics), 3000, 0.3, apiKey);
-    const parsed = parseJSON(raw, null as Record<string, unknown> | null);
-    if (!parsed) throw new Error("AI返回内容解析失败，请重试");
+    const raw = await callDeepSeek(
+      SYSTEM,
+      PROMPT(inputRaw, sentences, body.ipContext ?? null, hasRealMetrics),
+      6000,
+      0.2,
+      apiKey,
+      {
+        thinking: { type: "disabled" },
+        responseFormat: { type: "json_object" },
+      },
+    );
+    const parsed = parseHotAnalysisResponse(raw);
 
     // ── 指标层：代码核算，AI不参与 ──
     const m = body.metrics;
@@ -111,7 +135,7 @@ export async function POST(req: NextRequest) {
         ? "提供的真实数据满足指标层阈值"
         : "提供的真实数据未达到指标层阈值（点赞>1000/评论>100/转发>50/收藏>100/播放量明显高于账号平均）";
 
-    const total = (parsed.hookScore as { total?: number } | undefined)?.total ?? 0;
+    const total = parsed.hookScore.total;
     const grade: "S" | "A" | "B" | "不收录" = total >= 45 ? "S" : total >= 35 ? "A" : total >= 25 ? "B" : "不收录";
 
     // 没有真实数据时，admitted的判断里跳过指标层这一项，只要求内容层+结构层+排除+钩子分+自我检查
@@ -121,20 +145,20 @@ export async function POST(req: NextRequest) {
 
     const evaluation = {
       account: "", track: "",
-      hook: parsed.hook ?? "", hookType: parsed.hookType ?? null,
-      hookScore: parsed.hookScore ?? { painPoint: 0, curiosity: 0, conflict: 0, benefit: 0, emotion: 0, total: 0 },
-      grade, whyViral: parsed.whyViral ?? "", structureBreakdown: parsed.structureBreakdownText ?? "",
+      hook: parsed.hook, hookType: parsed.hookType,
+      hookScore: parsed.hookScore,
+      grade, whyViral: parsed.whyViral, structureBreakdown: parsed.structureBreakdownText,
       metricsLayerPassed, metricsLayerReason,
-      contentLayerPassed: !!parsed.contentLayerPassed, contentLayerMatched: (parsed.contentLayerMatched as string[]) ?? [],
-      structureLayerPassed: !!parsed.structureLayerPassed, structureLayerMissing: (parsed.structureLayerMissing as string[]) ?? [],
-      exclusionMatched: (parsed.exclusionMatched as string | null) ?? null,
-      selfCheckPassed: !!parsed.selfCheckPassed, selfCheckReasoning: parsed.selfCheckReasoning ?? "",
+      contentLayerPassed: parsed.contentLayerPassed, contentLayerMatched: parsed.contentLayerMatched,
+      structureLayerPassed: parsed.structureLayerPassed, structureLayerMissing: parsed.structureLayerMissing,
+      exclusionMatched: parsed.exclusionMatched,
+      selfCheckPassed: parsed.selfCheckPassed, selfCheckReasoning: parsed.selfCheckReasoning,
       admitted,
     };
 
     // ── DNA：句子级标签由AI给，占比由代码统计字数，不让AI报数字 ──
-    const stageTags = (parsed.sentenceStageTags as { index: number; stage: string }[]) ?? [];
-    const emotionTags = (parsed.sentenceEmotionTags as { index: number; emotions: string[] }[]) ?? [];
+    const stageTags = parsed.sentenceStageTags;
+    const emotionTags = parsed.sentenceEmotionTags;
     const totalChars = sentences.reduce((sum, s) => sum + s.length, 0) || 1;
 
     const STAGES = ["Hook", "Problem", "Solution", "Case", "CTA"] as const;
@@ -159,15 +183,51 @@ export async function POST(req: NextRequest) {
     };
 
     return NextResponse.json({
-      title: parsed.title ?? "", author: parsed.author ?? "", platform: parsed.platform ?? "",
-      publishedAt: parsed.publishedAt ?? "", contentDirection: parsed.contentDirection ?? [],
+      title: parsed.title, author: parsed.author, platform: parsed.platform,
+      publishedAt: parsed.publishedAt, contentDirection: parsed.contentDirection,
       evaluation, hasRealMetrics,
-      worthLearning: parsed.worthLearning ?? "不建议学习", worthLearningReason: parsed.worthLearningReason ?? "",
-      ipFitTier: parsed.ipFitTier ?? null, ipFitReason: parsed.ipFitReason ?? "",
+      worthLearning: parsed.worthLearning, worthLearningReason: parsed.worthLearningReason,
+      ipFitTier: parsed.ipFitTier, ipFitReason: parsed.ipFitReason,
       dna, apiMeta,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "分析失败，请重试";
-    return NextResponse.json({ error: message, apiMeta: { ...apiMeta, error: message } }, { status: 500 });
+    const originalMessage = err instanceof Error ? err.message : "未知错误";
+    const errorStage = err instanceof HotAnalysisResponseError
+      ? err.code
+      : originalMessage.includes("content 为空或不是字符串")
+        ? "empty_content"
+        : originalMessage.includes("DeepSeek API 请求失败") ||
+            originalMessage.includes("未配置 DeepSeek API Key")
+          ? "request_failed"
+          : "processing_failed";
+    const message = errorStage === "empty_content"
+      ? "AI未返回有效内容"
+      : errorStage === "invalid_json"
+        ? "AI返回格式异常"
+        : errorStage === "incomplete_fields"
+          ? "分析结果字段不完整"
+          : errorStage === "request_failed"
+            ? "AI请求失败"
+            : "分析失败，请重试";
+
+    if (isDevelopment) {
+      console.error("[hot-analysis]", {
+        requestId,
+        errorStage,
+        message: originalMessage,
+      });
+    }
+    return NextResponse.json(
+      {
+        error: message,
+        ...(isDevelopment ? { errorCode: errorStage, requestId } : {}),
+        apiMeta: {
+          ...apiMeta,
+          error: message,
+          ...(isDevelopment ? { errorStage } : {}),
+        },
+      },
+      { status: 500 },
+    );
   }
 }

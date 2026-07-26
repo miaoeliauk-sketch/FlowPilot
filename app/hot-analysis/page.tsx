@@ -79,8 +79,23 @@ function RadarTab() {
           metrics: hasMetrics ? { likes: Number(likes) || 0, comments: Number(comments) || 0, shares: Number(shares) || 0, favorites: Number(favorites) || 0, aboveAccountAverage: aboveAvg } : null,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) { setError(data.error ?? `请求失败（${res.status}）`); return; }
+      let data: Record<string, any>;
+      try {
+        data = await res.json();
+      } catch {
+        setError(res.ok ? "AI返回格式异常" : "AI请求失败");
+        return;
+      }
+      if (!res.ok) {
+        if (process.env.NODE_ENV !== "production") {
+          console.error("[hot-analysis]", {
+            requestId: data.requestId ?? data.apiMeta?.requestId ?? null,
+            errorStage: data.errorCode ?? data.apiMeta?.errorStage ?? "request_failed",
+          });
+        }
+        setError(typeof data.error === "string" && data.error ? data.error : "AI请求失败");
+        return;
+      }
       setResult(data);
       const saved = addHotAnalysis({
         inputType, inputRaw, sourceUrl,
@@ -92,8 +107,8 @@ function RadarTab() {
       });
       setLastAnalysisId(saved.id);
       setHistory(getHotAnalyses());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "分析失败");
+    } catch {
+      setError("AI请求失败");
     } finally { setLoading(false); }
   }
 
