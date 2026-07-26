@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callDeepSeek, parseDeepSeekJSON } from "@/lib/deepseek";
+import { callDeepSeek, DEEPSEEK_MODEL, parseDeepSeekJSON } from "@/lib/deepseek";
 
 const SYSTEM = `你是一位专业的用户研究分析师，擅长从社交媒体评论中提取真实用户需求并生成用户人格画像。
 
@@ -145,7 +145,7 @@ export async function POST(req: NextRequest) {
       ipId: body.ipId ?? null,
       platform: body.platform ?? "未指定",
       createdAt: calledAt,
-      apiMeta: { apiCalled: true, calledAt, model: "deepseek-chat" },
+      apiMeta: { apiCalled: true, calledAt, model: DEEPSEEK_MODEL },
     });
 
   } catch (err) {

@@ -67,6 +67,16 @@ function normalizeStringArray(value: unknown): string[] {
 function normalizeSummary(value: unknown): DecisionAIResult | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as RawSummary;
+  if (
+    typeof raw.theme !== "string" ||
+    typeof raw.coreDecision !== "string" ||
+    typeof raw.basis !== "string" ||
+    !Array.isArray(raw.applicableScenarios) ||
+    typeof raw.corePrinciple !== "string" ||
+    !Array.isArray(raw.keywords)
+  ) {
+    return null;
+  }
   const summary: DecisionAIResult = {
     theme: normalizeString(raw.theme).slice(0, 40),
     coreDecision: normalizeString(raw.coreDecision),
@@ -114,13 +124,20 @@ ${JSON.stringify({
   背景: body.context.trim(),
   我的理由: body.reasoning.trim(),
   涉及分类: body.category,
-  未来验证: body.futureValidation.trim(),
-  判断来源: body.source.trim(),
-  当时确信程度: `${body.confidence}/5`,
 }, null, 2)}`;
 
   try {
-    const raw = await callDeepSeek(SYSTEM_PROMPT, userPrompt, 1000, 0.2, apiKey);
+    const raw = await callDeepSeek(
+      SYSTEM_PROMPT,
+      userPrompt,
+      1200,
+      0.2,
+      apiKey,
+      {
+        thinking: { type: "disabled" },
+        responseFormat: { type: "json_object" },
+      },
+    );
     const parsed = parseDeepSeekJSON<RawSummary | null>(raw, null);
     const summary = normalizeSummary(parsed);
     if (!summary) {

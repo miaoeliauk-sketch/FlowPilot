@@ -7,7 +7,12 @@
  */
 
 const DEEPSEEK_API = "https://api.deepseek.com/v1/chat/completions";
-export const DEEPSEEK_MODEL = "deepseek-chat";
+export const DEEPSEEK_MODEL = "deepseek-v4-flash";
+
+export interface DeepSeekCallOptions {
+  thinking?: { type: "disabled" };
+  responseFormat?: { type: "json_object" };
+}
 
 /**
  * 调用 DeepSeek Chat API。
@@ -18,6 +23,7 @@ export const DEEPSEEK_MODEL = "deepseek-chat";
  *                     长文本生成（脚本/分析报告）请显式传入 2000-4000。
  * @param temperature  采样温度，默认 0.3（结构化 JSON 输出用低温度保证稳定性）。
  *                     创意类生成可传 0.7。
+ * @param options      按任务开启JSON模式或明确关闭思考模式。
  */
 export async function callDeepSeek(
   systemPrompt: string,
@@ -25,6 +31,7 @@ export async function callDeepSeek(
   maxTokens = 800,
   temperature = 0.3,
   apiKey?: string,  // 优先使用：来自请求头 X-DeepSeek-Key，不传则退回 process.env.DEEPSEEK_API_KEY
+  options: DeepSeekCallOptions = {},
 ): Promise<string> {
   const key = apiKey || process.env.DEEPSEEK_API_KEY;
   if (!key) {
@@ -41,6 +48,8 @@ export async function callDeepSeek(
       model: DEEPSEEK_MODEL,
       max_tokens: maxTokens,
       temperature,
+      ...(options.thinking ? { thinking: options.thinking } : {}),
+      ...(options.responseFormat ? { response_format: options.responseFormat } : {}),
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -55,8 +64,8 @@ export async function callDeepSeek(
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error("DeepSeek API 返回格式异常：choices[0].message.content 不是字符串");
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("DeepSeek API 返回格式异常：choices[0].message.content 为空或不是字符串");
   }
   return content;
 }

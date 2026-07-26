@@ -358,7 +358,7 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
         sourceSampleIds: data.sourceSampleIds ?? [],
         sourceSampleTitles: data.sourceSampleTitles ?? [],
         extractedAt: data.extractedAt ?? new Date().toISOString(),
-        model: data.model ?? "deepseek-chat",
+        model: data.model ?? "deepseek-v4-flash",
       };
       saveStyleProfile(newProfile);
       setProfile(newProfile);
