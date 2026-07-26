@@ -569,7 +569,7 @@ export default function CopyOptimizationPage() {
         }),
       });
     } catch (networkErr) {
-      const msg = `网络错误：无法连接到 /api/copy-optimization，请确认开发服务器正在运行（${networkErr instanceof Error ? networkErr.message : String(networkErr)}）`;
+      const msg = `AI请求失败：无法连接到服务，请保留当前内容后重试（${networkErr instanceof Error ? networkErr.message : String(networkErr)}）`;
       setApiMeta({ apiCalled: false, calledAt: new Date().toISOString(), model: null, ipUsed: ip.name, mockHit: false, error: msg });
       setGenError(msg); setLoading(false); return;
     }
@@ -577,8 +577,8 @@ export default function CopyOptimizationPage() {
     let data: (RewriteResult & { error?: string }) | { error: string; apiMeta?: ApiMeta };
     try {
       data = await res.json();
-    } catch (parseErr) {
-      const msg = `JSON解析错误：服务器返回的不是合法JSON（HTTP ${res.status}）（${parseErr instanceof Error ? parseErr.message : String(parseErr)}）`;
+    } catch {
+      const msg = `服务器响应格式异常（HTTP ${res.status}），请保留当前内容后重试`;
       setApiMeta({ apiCalled: true, calledAt: new Date().toISOString(), model: null, ipUsed: ip.name, mockHit: false, error: msg });
       setGenError(msg); setLoading(false); return;
     }
@@ -587,12 +587,20 @@ export default function CopyOptimizationPage() {
 
     if (!res.ok) {
       const errMsg = "error" in data && data.error ? data.error : `HTTP ${res.status}`;
-      setGenError(`API返回错误（HTTP ${res.status}）：${errMsg}`);
+      setGenError(`${errMsg}（HTTP ${res.status}）`);
       setLoading(false);
       return;
     }
 
     const rr = data as RewriteResult;
+    if (isCopyOptimizationTaskNotExecuted(rr)) {
+      const msg = "分析结果字段不完整：未生成有效的优化全文";
+      setApiMeta({ ...rr.apiMeta, error: msg });
+      setGenError(msg);
+      setLoading(false);
+      return;
+    }
+
     setResult(rr);
     addScriptAsset({
       ipId: ip.id,
@@ -899,7 +907,31 @@ export default function CopyOptimizationPage() {
       {step === 4 && (
         <>
           <ApiStatusPanel meta={apiMeta} />
-          {genError && <div className="mb-6 rounded-[14px] bg-[#FCEBEB] px-5 py-4 text-[14px] font-semibold text-[#A32D2D]">{genError}</div>}
+          {genError && (
+            <div className="mb-6 rounded-[14px] border border-[#F2C6C6] bg-[#FCEBEB] px-5 py-4 text-[#A32D2D]">
+              <div className="text-[14px] font-semibold">{genError}</div>
+              <p className="mt-1.5 text-[12.5px] leading-5">
+                本次生成失败，暂时无法核对锁定项。你的原文、优化目标和锁定项设置均已保留。
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleOptimize}
+                  disabled={loading}
+                  className="rounded-[9px] bg-[#A32D2D] px-3.5 py-2 text-[12px] font-semibold text-white disabled:opacity-60"
+                >
+                  重新尝试
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStep(3)}
+                  className="rounded-[9px] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#7A3030]"
+                >
+                  返回优化设置
+                </button>
+              </div>
+            </div>
+          )}
           {loading && (
             <div className="py-16 text-center text-[#8A8A86]">
               <div className="mx-auto mb-4 h-9 w-9 animate-spin rounded-full border-4 border-[#EAF3DE] border-t-[#639922]" />
