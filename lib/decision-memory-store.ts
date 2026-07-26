@@ -2,7 +2,11 @@ import {
   DECISION_CATEGORIES,
   DECISION_VERDICTS,
   CONFIDENCE_LEVELS,
+  CONTENT_DECISION_STAGES,
+  ContentDecisionStage,
+  CreateQuickDecisionInput,
   DecisionAIResult,
+  DecisionCategory,
   DecisionMemoryState,
   DecisionRecord,
   SaveDecisionReviewInput,
@@ -43,7 +47,13 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
       typeof aiSummary.corePrinciple === "string" &&
       isStringArray(aiSummary.keywords) &&
       typeof aiSummary.organizedAt === "string" &&
-      typeof aiSummary.model === "string",
+      typeof aiSummary.model === "string" &&
+      (aiSummary.contentStage === undefined ||
+        CONTENT_DECISION_STAGES.includes(aiSummary.contentStage)) &&
+      (aiSummary.applicableIP === undefined ||
+        typeof aiSummary.applicableIP === "string") &&
+      (aiSummary.futureValidationSuggestion === undefined ||
+        typeof aiSummary.futureValidationSuggestion === "string"),
     );
 
   const validReview =
@@ -60,6 +70,10 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
 
   return Boolean(
     typeof record.id === "string" &&
+    (record.rawInput === undefined || typeof record.rawInput === "string") &&
+    (record.captureMode === undefined ||
+      record.captureMode === "full" ||
+      record.captureMode === "quick_capture") &&
     typeof record.decision === "string" &&
     typeof record.context === "string" &&
     typeof record.reasoning === "string" &&
@@ -122,6 +136,13 @@ function clean(value: string): string {
   return value.trim();
 }
 
+function categoryFromContentStage(stage: ContentDecisionStage): DecisionCategory {
+  if (stage === "选题判断") return "选题";
+  if (stage === "标题判断") return "标题";
+  if (["开头判断", "脚本结构", "内容形式"].includes(stage)) return "脚本";
+  return "战略";
+}
+
 function updateRecord(
   id: string,
   updater: (record: DecisionRecord, now: string) => DecisionRecord,
@@ -167,6 +188,7 @@ export function createDecisionRecord(input: CreateDecisionInput): DecisionRecord
   const now = new Date().toISOString();
   const record: DecisionRecord = {
     id: createId(),
+    captureMode: "full",
     decision: clean(input.decision),
     context: clean(input.context),
     reasoning: clean(input.reasoning),
@@ -175,6 +197,54 @@ export function createDecisionRecord(input: CreateDecisionInput): DecisionRecord
     source: clean(input.source),
     confidence: input.confidence,
     aiSummary: null,
+    review: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  writeState({ schemaVersion: 1, records: [record, ...state.records] });
+  return record;
+}
+
+export function createQuickDecisionRecord(
+  input: CreateQuickDecisionInput,
+): DecisionRecord {
+  const rawInput = clean(input.rawInput);
+  if (!rawInput) {
+    throw new Error("请先写下一句话判断");
+  }
+
+  const summary = input.summary;
+  if (summary && !CONTENT_DECISION_STAGES.includes(summary.contentStage)) {
+    throw new Error("涉及环节不在允许范围内");
+  }
+
+  const state = readState();
+  const now = new Date().toISOString();
+  const record: DecisionRecord = {
+    id: createId(),
+    rawInput,
+    captureMode: "quick_capture",
+    decision: clean(summary?.coreDecision || rawInput),
+    context: rawInput,
+    reasoning: clean(summary?.basis || ""),
+    category: summary ? categoryFromContentStage(summary.contentStage) : "选题",
+    futureValidation: clean(summary?.futureValidationSuggestion || ""),
+    source: "quick_capture",
+    confidence: 3,
+    aiSummary: summary ? {
+      theme: clean(summary.theme),
+      coreDecision: clean(summary.coreDecision),
+      basis: clean(summary.basis),
+      applicableScenarios: [summary.contentStage],
+      corePrinciple: clean(summary.corePrinciple),
+      keywords: summary.keywords.map(clean).filter(Boolean).slice(0, 6),
+      model: clean(summary.model),
+      organizedAt: now,
+      contentStage: summary.contentStage,
+      applicableIP: clean(summary.applicableIP),
+      futureValidationSuggestion: clean(summary.futureValidationSuggestion),
+    } : null,
     review: null,
     createdAt: now,
     updatedAt: now,
@@ -196,6 +266,13 @@ export function saveDecisionAISummary(id: string, result: DecisionAIResult): Dec
       keywords: result.keywords.map(clean).filter(Boolean),
       model: clean(result.model),
       organizedAt: now,
+      contentStage: result.contentStage ?? record.aiSummary?.contentStage,
+      applicableIP: result.applicableIP === undefined
+        ? record.aiSummary?.applicableIP
+        : clean(result.applicableIP),
+      futureValidationSuggestion: result.futureValidationSuggestion === undefined
+        ? record.aiSummary?.futureValidationSuggestion
+        : clean(result.futureValidationSuggestion),
     },
     updatedAt: now,
   }));

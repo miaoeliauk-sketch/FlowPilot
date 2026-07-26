@@ -4,12 +4,15 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import {
   createDecisionRecord,
+  createQuickDecisionRecord,
   getDecisionRecords,
   saveDecisionAISummary,
   saveDecisionReview,
 } from "@/lib/decision-memory-store";
 import {
   CONFIDENCE_LEVELS,
+  CONTENT_DECISION_STAGES,
+  ContentDecisionStage,
   CreateDecisionInput,
   DECISION_CATEGORIES,
   DECISION_VERDICTS,
@@ -17,8 +20,10 @@ import {
   DecisionCategory,
   DecisionRecord,
   DecisionVerdict,
+  QuickCaptureAIResult,
   SaveDecisionReviewInput,
 } from "@/lib/decision-memory-types";
+import { useIP } from "@/lib/ip-context";
 import { Select } from "@/components/ui/select";
 import { Icon } from "@/components/ui/icon";
 
@@ -128,6 +133,7 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
 }
 
 export default function DecisionMemoryPage() {
+  const { activeIP } = useIP();
   const [records, setRecords] = useState<DecisionRecord[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const [storageError, setStorageError] = useState("");
@@ -143,6 +149,12 @@ export default function DecisionMemoryPage() {
   const [actionError, setActionError] = useState("");
   const [organizingId, setOrganizingId] = useState<string | null>(null);
   const [savingReview, setSavingReview] = useState(false);
+  const [quickInput, setQuickInput] = useState("");
+  const [quickDraft, setQuickDraft] = useState<QuickCaptureAIResult | null>(null);
+  const [quickError, setQuickError] = useState("");
+  const [quickOrganizing, setQuickOrganizing] = useState(false);
+  const [quickEdited, setQuickEdited] = useState(false);
+  const [fullFormOpen, setFullFormOpen] = useState(false);
 
   function refreshRecords() {
     try {
@@ -169,6 +181,7 @@ export default function DecisionMemoryPage() {
       if (reviewFilter === "已复盘" && !record.review) return false;
       if (!query) return true;
       const searchable = [
+        record.rawInput ?? "",
         record.decision,
         record.context,
         record.reasoning,
@@ -178,6 +191,9 @@ export default function DecisionMemoryPage() {
         record.aiSummary?.basis ?? "",
         ...(record.aiSummary?.applicableScenarios ?? []),
         record.aiSummary?.corePrinciple ?? "",
+        record.aiSummary?.contentStage ?? "",
+        record.aiSummary?.applicableIP ?? "",
+        record.aiSummary?.futureValidationSuggestion ?? "",
         ...(record.aiSummary?.keywords ?? []),
         record.review?.actualOutcome ?? "",
         record.review?.explanation ?? "",
@@ -187,6 +203,92 @@ export default function DecisionMemoryPage() {
       return searchable.includes(query);
     });
   }, [records, keyword, categoryFilter, reviewFilter]);
+
+  async function handleQuickOrganize() {
+    const rawInput = quickInput.trim();
+    if (!rawInput) {
+      setQuickError("请先用一句话写下：你决定做什么，以及为什么");
+      return;
+    }
+
+    setQuickOrganizing(true);
+    setQuickError("");
+    setNotice("");
+    try {
+      const response = await apiFetch("/api/decision-memory/organize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "quick_capture",
+          rawInput,
+          activeIPName: activeIP?.name || undefined,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.summary) {
+        throw new Error(data?.error || "AI整理失败，请稍后重试");
+      }
+      setQuickDraft(data.summary as QuickCaptureAIResult);
+      setQuickEdited(false);
+    } catch (error) {
+      setQuickError(
+        `${error instanceof Error ? error.message : "AI整理失败"}。原始内容已保留，你可以重试或直接保存。`,
+      );
+    } finally {
+      setQuickOrganizing(false);
+    }
+  }
+
+  function updateQuickDraft<K extends keyof QuickCaptureAIResult>(
+    key: K,
+    value: QuickCaptureAIResult[K],
+  ) {
+    setQuickDraft((current) => current ? { ...current, [key]: value } : current);
+    setQuickEdited(true);
+    setQuickError("");
+  }
+
+  function resetQuickCapture() {
+    setQuickInput("");
+    setQuickDraft(null);
+    setQuickError("");
+    setQuickEdited(false);
+  }
+
+  function handleSaveQuick(useDraft: boolean) {
+    if (!quickInput.trim()) {
+      setQuickError("请先写下一句话判断");
+      return;
+    }
+    if (useDraft && !quickDraft) {
+      setQuickError("请先让AI整理判断卡");
+      return;
+    }
+    if (
+      useDraft &&
+      quickDraft &&
+      (!quickDraft.theme.trim() ||
+        !quickDraft.coreDecision.trim() ||
+        !quickDraft.basis.trim() ||
+        quickDraft.keywords.filter((item) => item.trim()).length < 3)
+    ) {
+      setQuickError("请保留判断主题、核心判断、判断依据和至少3个关键词");
+      return;
+    }
+
+    try {
+      const created = createQuickDecisionRecord({
+        rawInput: quickInput,
+        summary: useDraft ? quickDraft : null,
+      });
+      resetQuickCapture();
+      setNotice(useDraft ? "内容判断已保存" : "原始判断已保存，之后仍可在详情中整理");
+      refreshRecords();
+      openRecord(created);
+    } catch (error) {
+      setQuickError(error instanceof Error ? error.message : "判断保存失败");
+    }
+  }
 
   function updateForm<K extends keyof CreateDecisionInput>(
     key: K,
@@ -247,10 +349,15 @@ export default function DecisionMemoryPage() {
     setOrganizingId(record.id);
     setActionError("");
     try {
+      const quickCapture = record.captureMode === "quick_capture" && record.rawInput;
       const response = await apiFetch("/api/decision-memory/organize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify(quickCapture ? {
+          mode: "quick_capture",
+          rawInput: record.rawInput,
+          activeIPName: record.aiSummary?.applicableIP || activeIP?.name || undefined,
+        } : {
           decision: record.decision,
           context: record.context,
           reasoning: record.reasoning,
@@ -264,7 +371,19 @@ export default function DecisionMemoryPage() {
       if (!response.ok || !data?.summary) {
         throw new Error(data?.error || "AI整理失败，请稍后重试");
       }
-      saveDecisionAISummary(record.id, data.summary as DecisionAIResult);
+      const result = data.summary as DecisionAIResult | QuickCaptureAIResult;
+      saveDecisionAISummary(record.id, quickCapture ? {
+        theme: result.theme,
+        coreDecision: result.coreDecision,
+        basis: result.basis,
+        applicableScenarios: [(result as QuickCaptureAIResult).contentStage],
+        corePrinciple: result.corePrinciple,
+        keywords: result.keywords,
+        model: result.model,
+        contentStage: (result as QuickCaptureAIResult).contentStage,
+        applicableIP: (result as QuickCaptureAIResult).applicableIP,
+        futureValidationSuggestion: (result as QuickCaptureAIResult).futureValidationSuggestion,
+      } : result as DecisionAIResult);
       refreshRecords();
     } catch (error) {
       setActionError(
@@ -315,11 +434,11 @@ export default function DecisionMemoryPage() {
       <header className="mb-5 rounded-[20px] bg-[#1C1C1B] px-6 py-5 text-white">
         <div className="mb-2 flex items-center gap-2 text-[11px] font-bold tracking-[0.18em] text-[#C8F04A]">
           <Icon name="flask" size="sm" />
-          MEMORY LAYER · V0.1
+          MEMORY LAYER · V0.1.1
         </div>
-        <h1 className="text-[27px] font-bold tracking-tight">我的判断库</h1>
+        <h1 className="text-[27px] font-bold tracking-tight">内容判断库</h1>
         <p className="mt-2 max-w-[720px] text-[13px] leading-6 text-white/65">
-          记录你当时为什么这样判断，并在未来回来验证。AI只负责整理你的原意，不替你创造判断，也不裁定绝对对错。
+          记录你在选题、标题、脚本、拍摄和运营中，为什么这样选择。
         </p>
       </header>
 
@@ -334,172 +453,343 @@ export default function DecisionMemoryPage() {
         </div>
       )}
 
-      <div className="grid items-start gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
-        <form onSubmit={handleCreate} className="card p-5 xl:sticky xl:top-5">
-          <div className="mb-4">
-            <div className="text-[16px] font-bold text-[#1C1C1B]">记录一次判断</div>
-            <div className="mt-1 text-[11.5px] text-[#999]">先保存人的原始判断，再决定是否交给AI整理。</div>
+      <section className="card mb-5 overflow-hidden border-[#D8E7B8]">
+        <div className="grid gap-5 bg-gradient-to-br from-[#F7FBEF] to-white p-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)] lg:p-6">
+          <div>
+            <div className="mb-1 text-[19px] font-bold text-[#1C1C1B]">快速记录一次内容判断</div>
+            <p className="mb-4 text-[12.5px] leading-6 text-[#777]">
+              用一句话写下：你决定做什么，以及为什么。
+            </p>
+            <label className="block">
+              <span className="sr-only">一句话内容判断</span>
+              <textarea
+                value={quickInput}
+                onChange={(event) => {
+                  setQuickInput(event.target.value);
+                  setQuickError("");
+                  if (quickDraft) setQuickDraft(null);
+                }}
+                disabled={quickOrganizing}
+                rows={6}
+                placeholder="我决定把‘装修花很多钱却没有高级感’作为重点选题，因为高投入和低结果之间的反差更强，也更适合设计师展示专业判断。"
+                className="w-full resize-y rounded-[16px] border border-[#DADFD0] bg-white px-4 py-3.5 text-[14px] leading-7 text-[#1C1C1B] outline-none transition focus:border-[#8DB52A] focus:ring-2 focus:ring-[#C8F04A]/25 disabled:cursor-wait disabled:bg-[#F7F6F2]"
+              />
+            </label>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleQuickOrganize}
+                disabled={quickOrganizing || Boolean(storageError)}
+                className="flex items-center justify-center gap-2 rounded-[12px] bg-[#1C1C1B] px-5 py-3 text-[13px] font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Icon name="sparkle" size="sm" />
+                {quickOrganizing ? "AI正在整理…" : quickDraft ? "重新整理判断卡" : "AI整理成判断卡"}
+              </button>
+              <span className="text-[11px] text-[#999]">
+                AI只整理原意，保存前由你确认。
+              </span>
+            </div>
+            {quickError && (
+              <div className="mt-3 rounded-[11px] border border-[#E8B4B4] bg-[#FFF4F4] px-3.5 py-3 text-[12px] leading-5 text-[#A32D2D]">
+                {quickError}
+                {!quickDraft && quickInput.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => handleSaveQuick(false)}
+                    className="ml-2 font-bold underline underline-offset-2"
+                  >
+                    直接保存原始判断
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-col gap-4">
-            <TextField
-              label="我决定"
-              value={form.decision}
-              onChange={(value) => updateForm("decision", value)}
-              placeholder="例如：这期内容不追热点，改做一个长期有搜索价值的教程"
-            />
-            <TextField
-              label="背景"
-              value={form.context}
-              onChange={(value) => updateForm("context", value)}
-              placeholder="当时发生了什么？有哪些约束和信息？"
-            />
-            <TextField
-              label="我的理由"
-              value={form.reasoning}
-              onChange={(value) => updateForm("reasoning", value)}
-              placeholder="为什么做出这个判断？"
-            />
+          <div className="rounded-[16px] border border-[#E5E4DE] bg-white p-4">
+            {quickDraft ? (
+              <>
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-[15px] font-bold text-[#1C1C1B]">内容判断卡预览</div>
+                    <div className="mt-1 text-[11px] text-[#999]">所有字段都可以直接修改，确认后才会保存。</div>
+                  </div>
+                  <span className="rounded-full bg-[#EEF5DF] px-2.5 py-1 text-[10px] font-bold text-[#527D18]">
+                    待确认
+                  </span>
+                </div>
+                <div className="grid gap-3">
+                  <TextField
+                    label="判断主题"
+                    value={quickDraft.theme}
+                    onChange={(value) => updateQuickDraft("theme", value)}
+                    placeholder="简短概括这次判断"
+                    multiline={false}
+                  />
+                  <TextField
+                    label="核心判断"
+                    value={quickDraft.coreDecision}
+                    onChange={(value) => updateQuickDraft("coreDecision", value)}
+                    placeholder="忠实保留最终决定"
+                  />
+                  <TextField
+                    label="判断依据"
+                    value={quickDraft.basis}
+                    onChange={(value) => updateQuickDraft("basis", value)}
+                    placeholder="只保留原始输入中的理由"
+                  />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label>
+                      <span className="mb-1.5 block text-[12px] font-bold text-[#555]">涉及环节</span>
+                      <Select
+                        value={quickDraft.contentStage}
+                        onChange={(value) => updateQuickDraft("contentStage", value as ContentDecisionStage)}
+                        options={[...CONTENT_DECISION_STAGES]}
+                      />
+                    </label>
+                    <TextField
+                      label="适用IP"
+                      value={quickDraft.applicableIP}
+                      onChange={(value) => updateQuickDraft("applicableIP", value)}
+                      placeholder="可选"
+                      multiline={false}
+                      required={false}
+                    />
+                  </div>
+                  <TextField
+                    label="未来验证建议"
+                    value={quickDraft.futureValidationSuggestion}
+                    onChange={(value) => updateQuickDraft("futureValidationSuggestion", value)}
+                    placeholder="这是建议，可以修改或删除"
+                    required={false}
+                  />
+                  <TextField
+                    label="核心原则"
+                    value={quickDraft.corePrinciple}
+                    onChange={(value) => updateQuickDraft("corePrinciple", value)}
+                    placeholder="只总结原话中已有的原则"
+                    required={false}
+                  />
+                  <TextField
+                    label="关键词（用逗号分隔）"
+                    value={quickDraft.keywords.join("，")}
+                    onChange={(value) => updateQuickDraft(
+                      "keywords",
+                      value.split(/[，,]/).map((item) => item.trim()).filter(Boolean).slice(0, 6),
+                    )}
+                    placeholder="3—6个关键词"
+                    multiline={false}
+                  />
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2 border-t border-[#EEEDE8] pt-4">
+                  <button
+                    type="button"
+                    onClick={() => handleSaveQuick(true)}
+                    disabled={quickOrganizing}
+                    className="rounded-[11px] bg-[#1C1C1B] px-5 py-2.5 text-[12.5px] font-bold text-white disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {quickEdited ? "修改后保存" : "保存判断"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetQuickCapture}
+                    disabled={quickOrganizing}
+                    className="rounded-[11px] bg-[#F2F1ED] px-4 py-2.5 text-[12.5px] font-bold text-[#666] disabled:cursor-wait disabled:opacity-50"
+                  >
+                    放弃
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="flex min-h-[310px] flex-col items-center justify-center rounded-[12px] border border-dashed border-[#DADFD0] bg-[#FAFBF7] px-6 text-center">
+                <Icon name="sparkle" size="md" />
+                <div className="mt-3 text-[14px] font-bold text-[#555]">AI整理后，判断卡会显示在这里</div>
+                <div className="mt-2 max-w-[280px] text-[11.5px] leading-5 text-[#999]">
+                  AI不会自动保存，也不会替你增加没有说过的判断理由。
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
 
-            <div className="grid grid-cols-2 gap-3">
-              <label>
-                <span className="mb-1.5 block text-[12px] font-bold text-[#555]">涉及分类</span>
-                <Select
-                  value={form.category}
-                  onChange={(value) => updateForm("category", value as DecisionCategory)}
-                  options={[...DECISION_CATEGORIES]}
-                />
-              </label>
-              <div>
-                <div className="mb-1.5 text-[12px] font-bold text-[#555]">当时确信程度</div>
-                <div className="grid grid-cols-5 gap-1">
-                  {CONFIDENCE_LEVELS.map((level) => (
-                    <button
-                      key={level}
-                      type="button"
-                      onClick={() => updateForm("confidence", level)}
-                      className="h-[38px] rounded-[9px] text-[12px] font-bold transition"
-                      style={form.confidence === level
-                        ? { background: "#1C1C1B", color: "#C8F04A" }
-                        : { background: "#F2F1ED", color: "#777" }}
-                    >
-                      {level}
-                    </button>
-                  ))}
+      <section className="card mb-5">
+        <button
+          type="button"
+          onClick={() => setFullFormOpen((value) => !value)}
+          className="flex w-full items-center justify-between gap-4 p-5 text-left"
+        >
+          <div>
+            <div className="text-[15px] font-bold text-[#1C1C1B]">完整记录一项重要判断</div>
+            <div className="mt-1 text-[11.5px] text-[#999]">适合复杂取舍、重要策略和长期验证，默认收起。</div>
+          </div>
+          <span className="rounded-full bg-[#F2F1ED] px-3 py-1.5 text-[11px] font-bold text-[#666]">
+            {fullFormOpen ? "收起" : "补充更多背景（可选）"}
+          </span>
+        </button>
+
+        {fullFormOpen && (
+          <form onSubmit={handleCreate} className="border-t border-[#EEEDE8] p-5">
+            <div className="grid gap-4 md:grid-cols-2">
+              <TextField
+                label="我决定"
+                value={form.decision}
+                onChange={(value) => updateForm("decision", value)}
+                placeholder="例如：这期内容不追热点，改做一个长期有搜索价值的教程"
+              />
+              <TextField
+                label="背景"
+                value={form.context}
+                onChange={(value) => updateForm("context", value)}
+                placeholder="当时发生了什么？有哪些约束和信息？"
+              />
+              <TextField
+                label="我的理由"
+                value={form.reasoning}
+                onChange={(value) => updateForm("reasoning", value)}
+                placeholder="为什么做出这个判断？"
+              />
+              <TextField
+                label="未来验证"
+                value={form.futureValidation}
+                onChange={(value) => updateForm("futureValidation", value)}
+                placeholder="未来看到什么结果，才知道这个判断是否成立？"
+              />
+              <TextField
+                label="判断来源"
+                value={form.source}
+                onChange={(value) => updateForm("source", value)}
+                placeholder="例如：亲自测试、用户反馈、历史数据、面试交流"
+                multiline={false}
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <label>
+                  <span className="mb-1.5 block text-[12px] font-bold text-[#555]">分类</span>
+                  <Select
+                    value={form.category}
+                    onChange={(value) => updateForm("category", value as DecisionCategory)}
+                    options={[...DECISION_CATEGORIES]}
+                  />
+                </label>
+                <div>
+                  <div className="mb-1.5 text-[12px] font-bold text-[#555]">确信程度</div>
+                  <div className="grid grid-cols-5 gap-1">
+                    {CONFIDENCE_LEVELS.map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => updateForm("confidence", level)}
+                        className="h-[38px] rounded-[9px] text-[12px] font-bold transition"
+                        style={form.confidence === level
+                          ? { background: "#1C1C1B", color: "#C8F04A" }
+                          : { background: "#F2F1ED", color: "#777" }}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
-
-            <TextField
-              label="未来验证"
-              value={form.futureValidation}
-              onChange={(value) => updateForm("futureValidation", value)}
-              placeholder="未来看到什么结果，才知道这个判断是否成立？"
-            />
-            <TextField
-              label="判断来源"
-              value={form.source}
-              onChange={(value) => updateForm("source", value)}
-              placeholder="例如：亲自测试、用户反馈、历史数据、面试交流"
-              multiline={false}
-            />
-
             {formError && (
-              <div className="rounded-[10px] bg-[#FFF1F1] px-3 py-2 text-[12px] text-[#A32D2D]">
+              <div className="mt-4 rounded-[10px] bg-[#FFF1F1] px-3 py-2 text-[12px] text-[#A32D2D]">
                 {formError}
               </div>
             )}
-
             <button
               type="submit"
               disabled={Boolean(storageError)}
-              className="flex items-center justify-center gap-2 rounded-[12px] bg-[#1C1C1B] px-5 py-3 text-[13px] font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              className="mt-4 flex items-center justify-center gap-2 rounded-[12px] bg-[#1C1C1B] px-5 py-3 text-[13px] font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Icon name="plus" size="sm" />
-              保存判断
+              保存完整判断
             </button>
-          </div>
-        </form>
+          </form>
+        )}
+      </section>
 
-        <section className="min-w-0">
-          <div className="card mb-4 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <span className="text-[16px] font-bold text-[#1C1C1B]">判断记录</span>
-                <span className="ml-2 text-[11.5px] text-[#999]">
-                  {filteredRecords.length}/{records.length}条
-                </span>
-              </div>
-            </div>
-            <div className="grid gap-2 md:grid-cols-[minmax(180px,1fr)_150px_130px]">
-              <input
-                value={keyword}
-                onChange={(event) => setKeyword(event.target.value)}
-                placeholder="搜索判断、理由、原则或关键词"
-                className="rounded-[10px] border border-[#E5E4DE] bg-white px-3 py-2 text-[12.5px] outline-none focus:border-[#8DB52A]"
-              />
-              <Select
-                value={categoryFilter}
-                onChange={(value) => setCategoryFilter(value as "全部" | DecisionCategory)}
-                options={["全部", ...DECISION_CATEGORIES]}
-              />
-              <Select
-                value={reviewFilter}
-                onChange={(value) => setReviewFilter(value as ReviewFilter)}
-                options={["全部", "未复盘", "已复盘"]}
-              />
+      <section className="min-w-0">
+        <div className="card mb-4 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <span className="text-[16px] font-bold text-[#1C1C1B]">内容判断记录</span>
+              <span className="ml-2 text-[11.5px] text-[#999]">
+                {filteredRecords.length}/{records.length}条
+              </span>
             </div>
           </div>
+          <div className="grid gap-2 md:grid-cols-[minmax(180px,1fr)_150px_130px]">
+            <input
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              placeholder="搜索判断、理由、原则或关键词"
+              className="rounded-[10px] border border-[#E5E4DE] bg-white px-3 py-2 text-[12.5px] outline-none focus:border-[#8DB52A]"
+            />
+            <Select
+              value={categoryFilter}
+              onChange={(value) => setCategoryFilter(value as "全部" | DecisionCategory)}
+              options={["全部", ...DECISION_CATEGORIES]}
+            />
+            <Select
+              value={reviewFilter}
+              onChange={(value) => setReviewFilter(value as ReviewFilter)}
+              options={["全部", "未复盘", "已复盘"]}
+            />
+          </div>
+        </div>
 
-          {!hydrated ? (
-            <div className="card p-10 text-center text-[13px] text-[#999]">正在读取判断记录…</div>
-          ) : filteredRecords.length === 0 ? (
-            <div className="card p-10 text-center">
-              <div className="text-[15px] font-bold text-[#555]">
-                {records.length === 0 ? "还没有判断记录" : "没有符合筛选条件的记录"}
-              </div>
-              <div className="mt-2 text-[12px] text-[#999]">
-                {records.length === 0 ? "从左侧记录你现在正在做的一个判断。" : "可以调整关键词或筛选条件。"}
-              </div>
+        {!hydrated ? (
+          <div className="card p-10 text-center text-[13px] text-[#999]">正在读取判断记录…</div>
+        ) : filteredRecords.length === 0 ? (
+          <div className="card p-10 text-center">
+            <div className="text-[15px] font-bold text-[#555]">
+              {records.length === 0 ? "还没有内容判断" : "没有符合筛选条件的记录"}
             </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {filteredRecords.map((record) => (
-                <button
-                  key={record.id}
-                  onClick={() => openRecord(record)}
-                  className="card group w-full p-4 text-left transition hover:-translate-y-0.5 hover:border-[#C8F04A] hover:shadow-md"
-                >
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-[#1C1C1B] px-2.5 py-1 text-[10.5px] font-bold text-[#C8F04A]">
-                      {record.category}
-                    </span>
-                    <StatusPill record={record} />
-                    <span className={`rounded-full px-2.5 py-1 text-[10.5px] font-bold ${
-                      record.aiSummary
-                        ? "bg-[#EEF3FF] text-[#4F67A3]"
-                        : "bg-[#FFF4DD] text-[#906518]"
-                    }`}>
-                      {record.aiSummary ? "AI已整理" : "待整理"}
-                    </span>
-                    <span className="ml-auto text-[10.5px] text-[#AAA]">{formatDate(record.createdAt)}</span>
-                  </div>
-                  <div className="text-[15px] font-bold leading-6 text-[#1C1C1B] group-hover:text-[#527D18]">
-                    {recordTitle(record)}
-                  </div>
-                  <div className="mt-1.5 line-clamp-2 text-[12.5px] leading-5 text-[#777]">
-                    {record.decision}
-                  </div>
-                  <div className="mt-3 flex items-center gap-3 text-[11px] text-[#999]">
-                    <span>确信程度 {record.confidence}/5</span>
-                    <span>来源：{record.source}</span>
-                  </div>
-                </button>
-              ))}
+            <div className="mt-2 text-[12px] text-[#999]">
+              {records.length === 0 ? "从上方用一句话记录你现在正在做的判断。" : "可以调整关键词或筛选条件。"}
             </div>
-          )}
-        </section>
-      </div>
+          </div>
+        ) : (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {filteredRecords.map((record) => (
+              <button
+                key={record.id}
+                onClick={() => openRecord(record)}
+                className="card group w-full p-4 text-left transition hover:-translate-y-0.5 hover:border-[#C8F04A] hover:shadow-md"
+              >
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-[#1C1C1B] px-2.5 py-1 text-[10.5px] font-bold text-[#C8F04A]">
+                    {record.aiSummary?.contentStage || record.category}
+                  </span>
+                  {record.captureMode === "quick_capture" && (
+                    <span className="rounded-full bg-[#F0F3E9] px-2.5 py-1 text-[10.5px] font-bold text-[#527D18]">
+                      快速记录
+                    </span>
+                  )}
+                  <StatusPill record={record} />
+                  <span className={`rounded-full px-2.5 py-1 text-[10.5px] font-bold ${
+                    record.aiSummary
+                      ? "bg-[#EEF3FF] text-[#4F67A3]"
+                      : "bg-[#FFF4DD] text-[#906518]"
+                  }`}>
+                    {record.aiSummary ? "AI已整理" : "待整理"}
+                  </span>
+                  <span className="ml-auto text-[10.5px] text-[#AAA]">{formatDate(record.createdAt)}</span>
+                </div>
+                <div className="text-[15px] font-bold leading-6 text-[#1C1C1B] group-hover:text-[#527D18]">
+                  {recordTitle(record)}
+                </div>
+                <div className="mt-1.5 line-clamp-2 text-[12.5px] leading-5 text-[#777]">
+                  {record.decision}
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-[#999]">
+                  {record.aiSummary?.applicableIP && <span>适用IP：{record.aiSummary.applicableIP}</span>}
+                  <span>来源：{record.captureMode === "quick_capture" ? "快速记录" : record.source}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
 
       {selectedRecord && (
         <div
@@ -540,11 +830,18 @@ export default function DecisionMemoryPage() {
               <section className="rounded-[16px] bg-white p-5">
                 <div className="mb-4 text-[14px] font-bold text-[#1C1C1B]">原始判断</div>
                 <div className="grid gap-4 md:grid-cols-2">
+                  {selectedRecord.rawInput && (
+                    <div className="md:col-span-2">
+                      <DetailRow label="最初输入的一句话">{selectedRecord.rawInput}</DetailRow>
+                    </div>
+                  )}
                   <DetailRow label="我决定">{selectedRecord.decision}</DetailRow>
                   <DetailRow label="背景">{selectedRecord.context}</DetailRow>
                   <DetailRow label="我的理由">{selectedRecord.reasoning}</DetailRow>
                   <DetailRow label="未来验证">{selectedRecord.futureValidation}</DetailRow>
-                  <DetailRow label="判断来源">{selectedRecord.source}</DetailRow>
+                  <DetailRow label="判断来源">
+                    {selectedRecord.captureMode === "quick_capture" ? "快速记录" : selectedRecord.source}
+                  </DetailRow>
                   <DetailRow label="当时确信程度">{selectedRecord.confidence}/5</DetailRow>
                 </div>
               </section>
@@ -574,10 +871,23 @@ export default function DecisionMemoryPage() {
                     <DetailRow label="判断主题">{selectedRecord.aiSummary.theme}</DetailRow>
                     <DetailRow label="核心判断">{selectedRecord.aiSummary.coreDecision}</DetailRow>
                     <DetailRow label="判断依据">{selectedRecord.aiSummary.basis}</DetailRow>
+                    {selectedRecord.aiSummary.contentStage && (
+                      <DetailRow label="涉及环节">{selectedRecord.aiSummary.contentStage}</DetailRow>
+                    )}
+                    {selectedRecord.aiSummary.applicableIP && (
+                      <DetailRow label="适用IP">{selectedRecord.aiSummary.applicableIP}</DetailRow>
+                    )}
+                    {selectedRecord.aiSummary.futureValidationSuggestion && (
+                      <DetailRow label="未来验证建议">
+                        {selectedRecord.aiSummary.futureValidationSuggestion}
+                      </DetailRow>
+                    )}
                     <DetailRow label="核心原则">{selectedRecord.aiSummary.corePrinciple}</DetailRow>
-                    <DetailRow label="适用场景">
-                      {selectedRecord.aiSummary.applicableScenarios.join("、")}
-                    </DetailRow>
+                    {!selectedRecord.aiSummary.contentStage && (
+                      <DetailRow label="适用场景">
+                        {selectedRecord.aiSummary.applicableScenarios.join("、")}
+                      </DetailRow>
+                    )}
                     <div>
                       <div className="mb-1.5 text-[11px] font-bold text-[#999]">关键词</div>
                       <div className="flex flex-wrap gap-1.5">
