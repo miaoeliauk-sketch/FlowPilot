@@ -9,9 +9,17 @@
 const DEEPSEEK_API = "https://api.deepseek.com/v1/chat/completions";
 export const DEEPSEEK_MODEL = "deepseek-v4-flash";
 
+export interface DeepSeekResponseMeta {
+  requestId: string | null;
+  finishReason: string | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+}
+
 export interface DeepSeekCallOptions {
   thinking?: { type: "disabled" };
   responseFormat?: { type: "json_object" };
+  onResponseMeta?: (meta: DeepSeekResponseMeta) => void;
 }
 
 /**
@@ -63,6 +71,12 @@ export async function callDeepSeek(
   }
 
   const data = await res.json();
+  options.onResponseMeta?.({
+    requestId: typeof data.id === "string" ? data.id : null,
+    finishReason: typeof data.choices?.[0]?.finish_reason === "string" ? data.choices[0].finish_reason : null,
+    promptTokens: typeof data.usage?.prompt_tokens === "number" ? data.usage.prompt_tokens : null,
+    completionTokens: typeof data.usage?.completion_tokens === "number" ? data.usage.completion_tokens : null,
+  });
   const content = data.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("DeepSeek API 返回格式异常：choices[0].message.content 为空或不是字符串");
