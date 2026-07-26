@@ -13,6 +13,9 @@ const MAIN_NAV: { label: string; href: string; icon: IconName }[] = [
   { label: "知识库中心", href: "/knowledge-hub", icon: "book" },
   { label: "设置", href: "/settings", icon: "settings" },
 ];
+const MEMORY_NAV: { label: string; href: string; icon: IconName }[] = [
+  { label: "我的判断库", href: "/decision-memory", icon: "flask" },
+];
 const WORKFLOW_NAV: { label: string; href: string; icon: IconName; step: string }[] = [
   { label: "AI 选题董事会", href: "/topic-board", icon: "chat", step: "01" },
   { label: "AI IP脚本工厂", href: "/script-factory", icon: "film", step: "02" },
@@ -181,6 +184,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
         <div className="px-2 mb-1 text-[10px] font-bold uppercase tracking-widest text-[#BBB]">主菜单</div>
         {MAIN_NAV.map(item => (
+          <Link key={item.href} href={item.href}
+            className="flex items-center gap-3 rounded-[12px] px-3 py-2.5 text-[13.5px] font-medium transition-all"
+            style={isActive(item.href) ? { background: "#C8F04A", color: "#1A1A1A", fontWeight: 700 } : { color: "#555" }}>
+            <Icon name={item.icon} size="sm" />{item.label}
+          </Link>
+        ))}
+
+        <div className="px-2 mt-4 mb-1 text-[10px] font-bold uppercase tracking-widest text-[#BBB]">记忆层</div>
+        {MEMORY_NAV.map(item => (
           <Link key={item.href} href={item.href}
             className="flex items-center gap-3 rounded-[12px] px-3 py-2.5 text-[13.5px] font-medium transition-all"
             style={isActive(item.href) ? { background: "#C8F04A", color: "#1A1A1A", fontWeight: 700 } : { color: "#555" }}>

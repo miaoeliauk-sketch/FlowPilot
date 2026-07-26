@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { getStoredApiKey, setStoredApiKey, clearStoredApiKey, hasApiKey } from "@/lib/api-settings";
 import { apiFetch } from "@/lib/api-fetch";
+import { DECISION_MEMORY_STORAGE_KEY } from "@/lib/decision-memory-store";
 
 // API Key不进导出，其余所有数据key都导出
 const EXPORT_KEYS = [
@@ -19,6 +20,7 @@ const EXPORT_KEYS = [
   "ipwr:videoReviews",
   "ipwr:userProfile",
   "ipwr:weeklyReports",
+  DECISION_MEMORY_STORAGE_KEY,
 ];
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
@@ -263,7 +265,7 @@ function BackupSection() {
     const summary: string[] = [];
     const counts: Record<string, number> = {
       "IP配置": 0, "知识库条目": 0, "脚本记录": 0,
-      "选题记录": 0, "复盘记录": 0, "爆款分析": 0,
+      "选题记录": 0, "复盘记录": 0, "爆款分析": 0, "判断记录": 0,
     };
     try {
       const ips = JSON.parse(localStorage.getItem("ipwr:ips_v2") || "[]");
@@ -278,6 +280,10 @@ function BackupSection() {
       counts["复盘记录"] = Array.isArray(reviews) ? reviews.length : 0;
       const hot = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") || "[]");
       counts["爆款分析"] = Array.isArray(hot) ? hot.length : 0;
+      const decisionMemory = JSON.parse(
+        localStorage.getItem(DECISION_MEMORY_STORAGE_KEY) || '{"schemaVersion":1,"records":[]}',
+      );
+      counts["判断记录"] = Array.isArray(decisionMemory?.records) ? decisionMemory.records.length : 0;
     } catch {}
     for (const [k, v] of Object.entries(counts)) {
       if (v > 0) summary.push(`${k} ${v}条`);
