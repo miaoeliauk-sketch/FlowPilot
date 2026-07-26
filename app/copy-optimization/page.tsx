@@ -7,6 +7,7 @@ import { IPProfile, IPStyleProfile, KnowledgeEntry } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
 import { CitationSummary } from "@/components/ui/citation-summary";
+import { isCopyOptimizationTaskNotExecuted } from "@/lib/copy-optimization-result-state";
 
 // ── Types ──
 interface CoreElements { viewpoint: string; cases: string[]; logic: string; conclusion: string; }
@@ -25,6 +26,7 @@ type OptimizationMode = "strict" | "balanced" | "creative";
 interface RewriteResult {
   ipId: string; ipName: string; mode: OptimizationMode; modeLabel: string; goal: OptimizationGoal; constraints: Constraints;
   coreElements: CoreElements; lockedItemsCheck: LockedItemCheck[]; segments: Segment[]; rewrittenFullText: string;
+  optimizedText?: string | null; impactAnalysis?: string | null;
   deviationScore: number; deviationWarning: boolean; deviationThreshold: number; deviationReason: string;
   styleMatchScore: number; referencedSamples: string[];
   ipStyleExplanation: string; goalImpact: GoalImpact; apiMeta: ApiMeta;
@@ -224,6 +226,20 @@ const GOAL_DIRECTION_STYLE: Record<GoalImpact["direction"], { bg: string; text: 
 };
 
 function ResultView({ data }: { data: RewriteResult }) {
+  if (isCopyOptimizationTaskNotExecuted(data)) {
+    return (
+      <div
+        role="status"
+        className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-5 py-8 text-center"
+      >
+        <div className="text-[15px] font-bold text-[#555]">任务未执行</div>
+        <p className="mt-2 text-[12.5px] leading-5 text-[#888]">
+          未生成有效的优化结果，请返回上一步补充原文或重新提交。
+        </p>
+      </div>
+    );
+  }
+
   const allPreserved = data.lockedItemsCheck.length > 0 && data.lockedItemsCheck.every(c => c.preserved);
   const dirStyle = GOAL_DIRECTION_STYLE[data.goalImpact.direction] ?? GOAL_DIRECTION_STYLE["中性"];
 
