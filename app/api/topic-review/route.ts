@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { IPProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 
-import { callDeepSeek, parseDeepSeekJSON as parseJSON, parseDeepSeekJSONArray, splitSentences, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import {
+  callDeepSeek,
+  type DeepSeekResponseMeta,
+  splitSentences,
+  DEEPSEEK_MODEL as MODEL,
+} from "@/lib/deepseek";
 
 
 // 兜底IP上下文（理论上前端总会传ipProfile，这里只是防止异常请求导致500）
@@ -15,6 +20,94 @@ const FALLBACK_IP: IPProfile = {
   sampleViralTitles: [], styleNotes: "",
   bio: "", color: "#999", createdAt: "", updatedAt: "",
 };
+
+class TopicReviewAIError extends Error {
+  readonly stage: string;
+  readonly responseMeta: DeepSeekResponseMeta | null;
+
+  constructor(stage: string, message: string, responseMeta: DeepSeekResponseMeta | null) {
+    super(message);
+    this.name = "TopicReviewAIError";
+    this.stage = stage;
+    this.responseMeta = responseMeta;
+  }
+}
+
+type TopicReviewAttemptErrorCode = "EMPTY_CONTENT" | "TRUNCATED" | "INVALID_JSON";
+
+class TopicReviewAttemptError extends Error {
+  readonly code: TopicReviewAttemptErrorCode;
+
+  constructor(code: TopicReviewAttemptErrorCode, message: string) {
+    super(message);
+    this.name = "TopicReviewAttemptError";
+    this.code = code;
+  }
+}
+
+function parseTopicReviewJSON<T>(content: string, responseShape: "object" | "array"): T {
+  const clean = content.replace(/```json|```/gi, "").trim();
+  const startToken = responseShape === "object" ? "{" : "[";
+  const endToken = responseShape === "object" ? "}" : "]";
+  const start = clean.indexOf(startToken);
+  const end = clean.lastIndexOf(endToken);
+  if (start < 0 || end <= start) {
+    throw new TopicReviewAttemptError("INVALID_JSON", "AI返回内容不是完整JSON");
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(clean.slice(start, end + 1));
+    const shapeMatches = responseShape === "array"
+      ? Array.isArray(parsed)
+      : typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+    if (!shapeMatches) {
+      throw new TopicReviewAttemptError("INVALID_JSON", "AI返回JSON最外层结构不符合要求");
+    }
+    return parsed as T;
+  } catch (error) {
+    if (error instanceof TopicReviewAttemptError) throw error;
+    throw new TopicReviewAttemptError("INVALID_JSON", "AI返回JSON解析失败");
+  }
+}
+
+async function callTopicReviewAI<T>(
+  stage: string,
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens: number,
+  apiKey: string,
+  responseShape: "object" | "array",
+): Promise<T> {
+  let responseMeta: DeepSeekResponseMeta | null = null;
+  for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+    responseMeta = null;
+    try {
+      const content = await callDeepSeek(systemPrompt, userPrompt, maxTokens, 0, apiKey, {
+        thinking: { type: "disabled" },
+        ...(responseShape === "object"
+          ? { responseFormat: { type: "json_object" as const } }
+          : {}),
+        onResponseMeta: (meta) => { responseMeta = meta; },
+      });
+      if ((responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length") {
+        throw new TopicReviewAttemptError("TRUNCATED", "DeepSeek返回内容被截断");
+      }
+      return parseTopicReviewJSON<T>(content, responseShape);
+    } catch (error) {
+      const normalizedError = error instanceof TopicReviewAttemptError
+        ? error
+        : error instanceof Error &&
+          error.message === "DeepSeek API 返回格式异常：choices[0].message.content 为空或不是字符串"
+        ? new TopicReviewAttemptError("EMPTY_CONTENT", error.message)
+        : null;
+      const message = error instanceof Error ? error.message : "AI调用失败";
+      const retryable = normalizedError !== null;
+      if (retryable && tryIndex === 0) continue;
+      throw new TopicReviewAIError(stage, message, responseMeta);
+    }
+  }
+  throw new TopicReviewAIError(stage, "AI调用失败", responseMeta);
+}
 
 // ── 专家定义：每个专家的system prompt都要求必须结合IP上下文做差异化判断 ──
 const EXPERTS = [
@@ -350,16 +443,20 @@ export async function POST(req: NextRequest) {
     // ── 第一步：8位专家并行调用，每位专家都拿到同一份IP上下文 ──
     const expertResults = await Promise.all(
       EXPERTS.map(async (expert) => {
-        const raw = await callDeepSeek(expert.systemPrompt, expert.userPromptTemplate(topic, ipBlock), 800, 0.3, apiKey);
-        const parsed = parseJSON(raw, {
-          observation: "分析中...",
-          reasoning: "推理中...",
-          conclusion: "结论生成中...",
-          dims: expert.systemPrompt.includes("痛点") ?
-            [{ label: "痛点强度", score: 7 }, { label: "搜索意愿", score: 7 }, { label: "点击意愿", score: 7 }, { label: "收藏意愿", score: 6 }, { label: "讨论意愿", score: 7 }] :
-            [{ label: "维度1", score: 7 }, { label: "维度2", score: 7 }, { label: "维度3", score: 7 }],
-          vote: "保留意见",
-        });
+        const parsed = await callTopicReviewAI<{
+          observation?: string;
+          reasoning?: string;
+          conclusion?: string;
+          dims?: { label: string; score: number }[];
+          vote?: string;
+        }>(
+          `expert:${expert.role}`,
+          expert.systemPrompt,
+          expert.userPromptTemplate(topic, ipBlock),
+          800,
+          apiKey,
+          "object",
+        );
 
         const dims = parsed.dims ?? [];
         const avgScore = dims.length > 0
@@ -392,13 +489,19 @@ export async function POST(req: NextRequest) {
 
     // ── 第二步：首席反对官 ──
     const expertSummary = expertResults.map(e => `${e.role}：${e.initialScore}分`).join("，");
-    const chiefRaw = await callDeepSeek(CHIEF_SYSTEM, CHIEF_PROMPT(topic, ipBlock, expertSummary), 800, 0.3, apiKey);
-    const chiefParsed = parseJSON(chiefRaw, {
-      reasons: ["缺少真实市场数据支撑", "同质化风险被低估", "付费转化路径不清晰", "执行难度被低估"],
-      riskLevel: "中风险",
-      failProbability: 40,
-      dismissalSuggestion: "建议先做市场调研，再决定是否投入",
-    });
+    const chiefParsed = await callTopicReviewAI<{
+      reasons?: string[];
+      riskLevel?: string;
+      failProbability?: number;
+      dismissalSuggestion?: string;
+    }>(
+      "chief-objection",
+      CHIEF_SYSTEM,
+      CHIEF_PROMPT(topic, ipBlock, expertSummary),
+      800,
+      apiKey,
+      "object",
+    );
 
     const chiefOfficer = {
       role: "首席反对官",
@@ -409,9 +512,21 @@ export async function POST(req: NextRequest) {
     };
 
     // ── 第三步：专家质疑 ──
-    const challengeRaw = await callDeepSeek(CHALLENGE_SYSTEM, CHALLENGE_PROMPT(topic, ipBlock, expertSummary), 800, 0.3, apiKey);
-    const challengesParsed = parseJSON<{ from: string; to: string; targetScore: number; challenge: string; affectedDimension: string; impact: string }[]>(challengeRaw, []);
-    const challenges = Array.isArray(challengesParsed) ? challengesParsed : [];
+    const challenges = await callTopicReviewAI<{
+      from: string;
+      to: string;
+      targetScore: number;
+      challenge: string;
+      affectedDimension: string;
+      impact: string;
+    }[]>(
+      "challenge",
+      CHALLENGE_SYSTEM,
+      CHALLENGE_PROMPT(topic, ipBlock, expertSummary),
+      1600,
+      apiKey,
+      "array",
+    );
 
     // ── 第四步：修正评分（基于质疑微调） ──
     const responses = expertResults.map(e => {
@@ -462,14 +577,20 @@ export async function POST(req: NextRequest) {
     const level = scoreLevel(totalScore);
 
     // ── 第七步：综合决议 ──
-    const verdictRaw = await callDeepSeek(VERDICT_SYSTEM, VERDICT_PROMPT(topic, ipBlock, totalScore, level, expertSummary), 800, 0.3, apiKey);
-    const verdictParsed = parseJSON(verdictRaw, {
-      upgradedTopics: [`${topic}：30天真实实测`, `普通人做「${topic}」的正确姿势`, `为什么你做「${topic}」总是失败`],
-      titles: Array(10).fill(0).map((_, i) => `标题${i + 1}：${topic}相关内容`),
-      risks: ["缺少真实案例支撑", "竞争激烈需要差异化", "付费转化链路需要设计"],
-      credScore: 60,
-      credReasons: ["评审基于AI推理，未经真实数据验证"],
-    });
+    const verdictParsed = await callTopicReviewAI<{
+      upgradedTopics?: string[];
+      titles?: string[];
+      risks?: string[];
+      credScore?: number;
+      credReasons?: string[];
+    }>(
+      "verdict",
+      VERDICT_SYSTEM,
+      VERDICT_PROMPT(topic, ipBlock, totalScore, level, expertSummary),
+      1600,
+      apiKey,
+      "object",
+    );
 
     // ── 第八步（可选）：真实用户预演——仅在有用户人格数据时执行 ──
     let personaPreview = null;
@@ -512,8 +633,14 @@ ${personas.map((p, i) => `
   "conversionOpportunity": "最可能产生付费转化的人格和场景"
 }`;
       try {
-        const personaRaw = await callDeepSeek(PERSONA_SYSTEM, PERSONA_PROMPT, 1200, 0.3, apiKey);
-        personaPreview = parseJSON(personaRaw, null);
+        personaPreview = await callTopicReviewAI<Record<string, unknown>>(
+          "persona-preview",
+          PERSONA_SYSTEM,
+          PERSONA_PROMPT,
+          1200,
+          apiKey,
+          "object",
+        );
       } catch { personaPreview = null; }
     }
 
@@ -540,7 +667,18 @@ ${personas.map((p, i) => `
     });
 
   } catch (err) {
-    const message = err instanceof Error ? err.message : "评审失败，请重试";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const isDevelopment = process.env.NODE_ENV !== "production";
+    const topicError = err instanceof TopicReviewAIError ? err : null;
+    return NextResponse.json({
+      error: isDevelopment && err instanceof Error ? err.message : "AI评审失败，请重试",
+      ...(isDevelopment && topicError
+        ? {
+            errorStage: topicError.stage,
+            requestId: topicError.responseMeta?.requestId ?? null,
+            finishReason: topicError.responseMeta?.finishReason ?? null,
+            completionTokens: topicError.responseMeta?.completionTokens ?? null,
+          }
+        : {}),
+    }, { status: 500 });
   }
 }
