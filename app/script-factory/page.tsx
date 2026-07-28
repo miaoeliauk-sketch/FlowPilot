@@ -2,11 +2,15 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
-import { addScriptAsset, getKnowledgeEntries, recordKnowledgeUsage, getStyleProfile, getAllVoiceSamples } from "@/lib/ip-store";
+import { addScriptAsset, getKnowledgeEntries, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
 import { IPProfile, KnowledgeEntry } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
 import { CitationSummary } from "@/components/ui/citation-summary";
+import { getNormalizedCategory, isGlobalMethodCategory, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
+
+const DEMO_TOPIC = "为什么很多人装修花了很多钱，最后还是没有高级感？";
+const DEMO_SCRIPT_REQUIREMENT = "请基于当前IP「设计师石空」，生成一条60秒短视频口播脚本。开头要有反常识冲突，正文从比例关系、材质关系、灯光关系三个角度拆解，语气专业、克制、有设计师判断。";
 
 // ── Types ──
 interface TitleOption { title: string; formula: string; platform: string; whyFitsIP: string; }
@@ -41,6 +45,7 @@ const FORMAT_CATEGORIES = [
 const PLATFORM_OPTIONS = ["抖音", "小红书", "B站", "视频号"];
 const GOAL_OPTIONS = ["涨粉", "引流", "转化", "建立信任", "教学"];
 const VIDEO_TYPE_OPTIONS = ["口播", "教程", "案例拆解", "观点输出", "工具演示", "剧情"];
+const toSelectOptions = (items: string[]): SelectOption[] => items.map(item => ({ value: item, label: item }));
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <div className={`rounded-[14px] border border-[#E5E4DE] bg-white p-5 ${className}`}>{children}</div>;
@@ -282,14 +287,14 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
 
 export default function ScriptFactoryPage() {
   const { activeIP, ips, loading: ipLoading } = useIP();
-  const [topic, setTopic] = useState("AI小白如何用ChatGPT做副业");
+  const [topic, setTopic] = useState(DEMO_TOPIC);
   // 模式切换：engine=先走SKILL.md完整工作流；classic=现有脚本生成
   const [mode, setMode] = useState<"engine" | "classic">("classic");
 
   // Content Engine 状态
   const [ceGoal, setCeGoal] = useState<"traffic" | "conversion" | "persona">("traffic");
-  const [ceAudience, setCeAudience] = useState("");
-  const [ceIndustry, setCeIndustry] = useState("");
+  const [ceAudience, setCeAudience] = useState("准备装修的业主、别墅大宅业主、大平层业主");
+  const [ceIndustry, setCeIndustry] = useState("室内设计与全案装修");
   const [ceLoading, setCeLoading] = useState(false);
   const [ceError, setCeError] = useState<string | null>(null);
   const [ceResult, setCeResult] = useState<Record<string, any> | null>(null); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -326,25 +331,34 @@ export default function ScriptFactoryPage() {
     debounceRef.current = setTimeout(() => { searchKnowledge(topic); }, 800);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topic]);
+  }, [topic, activeIP?.id]);
 
   async function searchKnowledge(query: string) {
-    // IP语料库：把 VoiceSample 转为可检索格式加入知识库
-    const voiceSamples = getAllVoiceSamples().map(s => ({
-      id: s.id, category: "IP语料库" as const,
-      title: s.title, tags: [s.type], keywords: [] as string[],
-    }));
-    const allEntries = [
-      ...getKnowledgeEntries("爆款案例"), ...getKnowledgeEntries("方法论"),
-      ...getKnowledgeEntries("评论需求"), ...getKnowledgeEntries("选题案例"),
-      ...voiceSamples,
-    ];
+    const allEntries = getKnowledgeEntries().filter(e => {
+      if (e.ipId && e.ipId !== activeIP?.id) return false;
+      const category = getNormalizedCategory(e);
+      return isGlobalMethodCategory(category) || isIPKnowledgeCategory(category);
+    });
     if (allEntries.length === 0) { setKnowledgeSearched(true); setKnowledgeRefs([]); return; }
     setKnowledgeLoading(true); setKnowledgeSearched(true);
     try {
       const res = await apiFetch("/api/knowledge-search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, entries: allEntries.map(e => ({ id: e.id, category: e.category, title: e.title, tags: e.tags, keywords: e.keywords })) }),
+        body: JSON.stringify({
+          query,
+          entries: allEntries.map(e => ({
+            id: e.id,
+            category: getNormalizedCategory(e),
+            normalizedCategory: getNormalizedCategory(e),
+            title: e.title,
+            tags: e.tags,
+            keywords: e.keywords,
+            rawContent: e.rawContent,
+            summary: e.note,
+            referenceReason: e.sourceTierReason,
+            metadata: { contentDirection: e.contentDirection, sourcePlatform: e.sourcePlatform },
+          })),
+        }),
       });
       const data = await res.json();
       if (!res.ok) { setKnowledgeRefs([]); return; }
@@ -391,7 +405,7 @@ export default function ScriptFactoryPage() {
   }, [activeIP?.id]);
 
   // ── 验收测试：同一选题，两个IP对比（使用当前表单选中的形式/时长/目标，保持条件一致） ──
-  const [compareTopic, setCompareTopic] = useState("Claude Code是什么");
+  const [compareTopic, setCompareTopic] = useState(DEMO_TOPIC);
   const [compareAId, setCompareAId] = useState("");
   const [compareBId, setCompareBId] = useState("");
   const [compareLoading, setCompareLoading] = useState(false);
@@ -416,6 +430,14 @@ export default function ScriptFactoryPage() {
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
           formatCategory, durationSeconds: duration, goal, videoType,
           needsStoryboard, needsShootingTips,
+          generationRequirement: DEMO_SCRIPT_REQUIREMENT,
+          knowledgeRefs: knowledgeRefs.map(ref => ({
+            id: ref.id,
+            title: ref.entry.title,
+            category: getNormalizedCategory(ref.entry),
+            rawContent: ref.entry.rawContent,
+            reason: ref.reason,
+          })),
         }),
       });
     } catch (networkErr) {
@@ -531,17 +553,17 @@ export default function ScriptFactoryPage() {
               <div className="sm:col-span-2">
                 <label className="mb-1 block text-[11.5px] text-[#888]">选题 / 关键词 *</label>
                 <input value={topic} onChange={e => setTopic(e.target.value)}
-                  placeholder="例如：AI小白如何做副业" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13.5px]" />
+                  placeholder={`例如：${DEMO_TOPIC}`} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13.5px]" />
               </div>
               <div>
                 <label className="mb-1 block text-[11.5px] text-[#888]">目标受众（可选，留空由AI推断）</label>
                 <input value={ceAudience} onChange={e => setCeAudience(e.target.value)}
-                  placeholder="例如：想学AI的职场新人" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
+                  placeholder="例如：准备装修的别墅大宅和大平层业主" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
               </div>
               <div>
                 <label className="mb-1 block text-[11.5px] text-[#888]">行业/赛道（可选）</label>
                 <input value={ceIndustry} onChange={e => setCeIndustry(e.target.value)}
-                  placeholder="例如：AI工具 / 副业变现" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
+                  placeholder="例如：室内设计与全案装修" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
               </div>
               <div>
                 <label className="mb-1 block text-[11.5px] text-[#888]">内容目标 *</label>
@@ -775,9 +797,13 @@ export default function ScriptFactoryPage() {
         <div className="flex flex-col gap-3">
           <textarea
             value={topic} onChange={e => setTopic(e.target.value)}
-            placeholder="例如：AI小白如何用ChatGPT做副业"
+            placeholder={`例如：${DEMO_TOPIC}`}
             className="min-h-[52px] resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"
           />
+
+          <div className="rounded-[10px] bg-[#F7FCF0] px-3 py-2.5 text-[12px] leading-5 text-[#4F6F32]">
+            <span className="font-semibold">本次演示生成要求：</span>{DEMO_SCRIPT_REQUIREMENT}
+          </div>
 
           <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />
 
@@ -808,16 +834,16 @@ export default function ScriptFactoryPage() {
               <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">发布平台</label>
               <Select
                 value={platform} onChange={setPlatform}
-                options={activeIP?.platforms.length ? activeIP.platforms : PLATFORM_OPTIONS}
+                options={toSelectOptions(activeIP?.platforms.length ? activeIP.platforms : PLATFORM_OPTIONS)}
               />
             </div>
             <div>
               <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">内容目标</label>
-              <Select value={goal} onChange={setGoal} options={GOAL_OPTIONS} />
+              <Select value={goal} onChange={setGoal} options={toSelectOptions(GOAL_OPTIONS)} />
             </div>
             <div>
               <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">内容类型</label>
-              <Select value={videoType} onChange={setVideoType} options={VIDEO_TYPE_OPTIONS} />
+              <Select value={videoType} onChange={setVideoType} options={toSelectOptions(VIDEO_TYPE_OPTIONS)} />
             </div>
           </div>
 
