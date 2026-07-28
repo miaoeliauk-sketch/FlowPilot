@@ -8,6 +8,16 @@ import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
 import { CitationSummary } from "@/components/ui/citation-summary";
 import { getNormalizedCategory, isGlobalMethodCategory, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
+import {
+  clearPartialScriptDraft,
+  getPartialScriptDraft,
+  PartialScriptDraft,
+  savePartialScriptDraft,
+} from "@/lib/script-factory-draft";
+import type {
+  ScriptGenerationStatus,
+  ScriptPartialFailure,
+} from "@/lib/script-factory-contract";
 
 const DEMO_TOPIC = "为什么很多人装修花了很多钱，最后还是没有高级感？";
 const DEMO_SCRIPT_REQUIREMENT = "请基于当前IP「设计师石空」，生成一条60秒短视频口播脚本。开头要有反常识冲突，正文从比例关系、材质关系、灯光关系三个角度拆解，语气专业、克制、有设计师判断。";
@@ -23,6 +33,7 @@ interface EditingRhythm { subtitleHighlights: string[]; soundEffects: string[]; 
 interface OutputLabels { cover: string; outline: string; shooting: string; comment: string; }
 interface ApiMeta { apiCalled: boolean; calledAt: string; model: string | null; ipUsed: string | null; mockHit: boolean; error?: string; }
 interface ScriptResult {
+  generationStatus: ScriptGenerationStatus; partialFailure: ScriptPartialFailure | null;
   ipId: string; ipName: string; topic: string; platform: string;
   formatCategory: string; formatLabel: string; durationSeconds: number; durationLabel: string; goal: string; videoType: string;
   outputLabels: OutputLabels;
@@ -30,6 +41,62 @@ interface ScriptResult {
   ipStyleExplanation: string;
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStoredScriptResult(value: unknown): value is ScriptResult {
+  if (!isRecord(value) || value.generationStatus !== "partial") return false;
+  const partialFailure = value.partialFailure;
+  const outputLabels = value.outputLabels;
+  const commentGuidance = value.commentGuidance;
+  const editingRhythm = value.editingRhythm;
+  const apiMeta = value.apiMeta;
+  if (
+    !isRecord(partialFailure) ||
+    (partialFailure.stage !== "storyboard" && partialFailure.stage !== "execution") ||
+    typeof partialFailure.errorCode !== "string" ||
+    typeof partialFailure.message !== "string" ||
+    !isRecord(outputLabels) ||
+    !isRecord(commentGuidance) ||
+    !Array.isArray(commentGuidance.keywordReplies) ||
+    !isRecord(editingRhythm) ||
+    !isRecord(apiMeta)
+  ) {
+    return false;
+  }
+  const rhythmFields = [
+    editingRhythm.subtitleHighlights,
+    editingRhythm.soundEffects,
+    editingRhythm.screenRecordingCuts,
+    editingRhythm.caseInserts,
+    editingRhythm.pauses,
+  ];
+  return (
+    typeof value.ipId === "string" &&
+    typeof value.ipName === "string" &&
+    typeof value.topic === "string" &&
+    typeof value.platform === "string" &&
+    typeof value.formatCategory === "string" &&
+    typeof value.formatLabel === "string" &&
+    typeof value.durationSeconds === "number" &&
+    typeof value.durationLabel === "string" &&
+    typeof value.goal === "string" &&
+    typeof value.videoType === "string" &&
+    Array.isArray(value.titles) &&
+    Array.isArray(value.coverCopy) &&
+    Array.isArray(value.outline) &&
+    value.outline.every(section =>
+      isRecord(section) &&
+      (section.subPoints === undefined || Array.isArray(section.subPoints))
+    ) &&
+    Array.isArray(value.storyboard) &&
+    Array.isArray(value.shootingSuggestions) &&
+    Array.isArray(value.shotPrompts) &&
+    rhythmFields.every(Array.isArray)
+  );
 }
 
 // ── 内容形式 → 时长选项（架构在后端按formatCategory切换，这里只管UI选项） ──
@@ -99,9 +166,40 @@ function IPContextModal({ ip, onClose }: { ip: IPProfile; onClose: () => void })
 }
 
 // ── 结果展示：outline按通用结构渲染，标签随内容形式动态变化 ──
-function ResultView({ data, compact = false }: { data: ScriptResult; compact?: boolean }) {
+function ResultView({
+  data,
+  compact = false,
+  draftSavedAt = null,
+  onClearDraft,
+}: {
+  data: ScriptResult;
+  compact?: boolean;
+  draftSavedAt?: string | null;
+  onClearDraft?: () => void;
+}) {
   return (
     <div className="flex flex-col gap-5">
+      {data.generationStatus === "partial" && data.partialFailure && (
+        <div className="rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4 text-[#755700]">
+          <div className="text-[13px] font-bold">核心脚本已保留，补充内容未完成</div>
+          <p className="mt-1 text-[12.5px] leading-5">{data.partialFailure.message}</p>
+          {draftSavedAt && (
+            <p className="mt-1 text-[11.5px] text-[#8A6B13]">
+              已自动保存为本地临时草稿，刷新或离开后仍可恢复。
+            </p>
+          )}
+          {onClearDraft && (
+            <button
+              type="button"
+              onClick={onClearDraft}
+              className="mt-2 rounded-[8px] border border-[#D8B94F] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#755700]"
+            >
+              清除临时草稿
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#999]">
         <span className="rounded-full bg-[#F2F1ED] px-2 py-1 font-semibold text-[#555]">{data.formatLabel}</span>
         <span className="rounded-full bg-[#F2F1ED] px-2 py-1">{data.durationLabel}</span>
@@ -388,6 +486,8 @@ export default function ScriptFactoryPage() {
   const [result, setResult] = useState<ScriptResult | null>(null);
   const [showContext, setShowContext] = useState(false);
   const [apiMeta, setApiMeta] = useState<ApiMeta | null>(null);
+  const [partialDraftSavedAt, setPartialDraftSavedAt] = useState<string | null>(null);
+  const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
 
   const currentFormat = FORMAT_CATEGORIES.find(f => f.id === formatCategory) ?? FORMAT_CATEGORIES[0];
 
@@ -403,6 +503,55 @@ export default function ScriptFactoryPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIP?.id]);
+
+  function restorePartialDraft(draft: PartialScriptDraft<ScriptResult>) {
+    const settings = draft.generationSettings;
+    setTopic(draft.topic);
+    setPlatform(settings.platform);
+    setFormatCategory(settings.formatCategory);
+    setDuration(settings.durationSeconds);
+    setGoal(settings.goal);
+    setVideoType(settings.videoType);
+    setNeedsStoryboard(settings.needsStoryboard);
+    setNeedsShootingTips(settings.needsShootingTips);
+    setResult(draft.result);
+    setApiMeta(draft.result.apiMeta);
+    setPartialDraftSavedAt(draft.savedAt);
+  }
+
+  useEffect(() => {
+    if (!activeIP) {
+      setResult(null);
+      setApiMeta(null);
+      setPartialDraftSavedAt(null);
+      return;
+    }
+    const draft = getPartialScriptDraft(activeIP.id);
+    if (draft && isStoredScriptResult(draft.result)) {
+      restorePartialDraft(draft as PartialScriptDraft<ScriptResult>);
+      setDraftStorageError(null);
+    }
+    else {
+      setResult(null);
+      setApiMeta(null);
+      setPartialDraftSavedAt(null);
+      setDraftStorageError(draft ? "本地临时草稿数据不完整，已停止自动恢复。" : null);
+    }
+    setError(null);
+    // 仅在切换IP时恢复该IP自己的临时草稿。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIP?.id]);
+
+  function handleClearPartialDraft() {
+    if (!activeIP) return;
+    if (!clearPartialScriptDraft(activeIP.id)) {
+      setDraftStorageError("浏览器未允许清除本地临时草稿，请检查站点存储权限。");
+      return;
+    }
+    setResult(current => current?.generationStatus === "partial" ? null : current);
+    setPartialDraftSavedAt(null);
+    setDraftStorageError(null);
+  }
 
   // ── 验收测试：同一选题，两个IP对比（使用当前表单选中的形式/时长/目标，保持条件一致） ──
   const [compareTopic, setCompareTopic] = useState(DEMO_TOPIC);
@@ -467,20 +616,56 @@ export default function ScriptFactoryPage() {
   async function handleGenerate() {
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
-    setError(null); setResult(null); setLoading(true);
+    setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setLoading(true);
     try {
       const data = await generateFor(activeIP, topic);
       setResult(data);
-      addScriptAsset({
-        ipId: activeIP.id,
-        title: data.titles?.[0]?.title || topic,
-        cover: data.coverCopy?.[0] || "",
-        content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
-        status: "草稿",
-        scriptResult: data,
-      });
+      if (data.generationStatus === "partial") {
+        if (!data.partialFailure) {
+          throw new Error("部分成功响应缺少失败阶段信息，无法安全保存临时草稿");
+        }
+        const savedAt = new Date().toISOString();
+        const saved = savePartialScriptDraft<ScriptResult>({
+          version: 1,
+          ipId: activeIP.id,
+          topic,
+          savedAt,
+          failedStage: data.partialFailure.stage,
+          warning: data.partialFailure.message,
+          generationSettings: {
+            platform,
+            formatCategory,
+            durationSeconds: duration,
+            goal,
+            videoType,
+            needsStoryboard,
+            needsShootingTips,
+          },
+          result: data,
+        });
+        if (saved) setPartialDraftSavedAt(savedAt);
+        else {
+          setDraftStorageError("核心脚本可以继续查看，但浏览器未能自动保存临时草稿。刷新或离开前请先复制内容。");
+        }
+      } else {
+        addScriptAsset({
+          ipId: activeIP.id,
+          title: data.titles?.[0]?.title || topic,
+          cover: data.coverCopy?.[0] || "",
+          content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
+          status: "草稿",
+          scriptResult: data,
+        });
+        if (!clearPartialScriptDraft(activeIP.id)) {
+          setDraftStorageError("完整脚本已保存，但浏览器未能清除旧的本地临时草稿。");
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "脚本生成失败，请重试");
+      const draft = getPartialScriptDraft(activeIP.id);
+      if (draft && isStoredScriptResult(draft.result)) {
+        restorePartialDraft(draft as PartialScriptDraft<ScriptResult>);
+      }
     } finally {
       setLoading(false);
     }
@@ -868,6 +1053,11 @@ export default function ScriptFactoryPage() {
       </Card>
 
       {error && <div className="mb-6 rounded-[14px] bg-[#FCEBEB] px-5 py-4 text-[14px] font-semibold text-[#A32D2D]">{error}</div>}
+      {draftStorageError && (
+        <div className="mb-6 rounded-[14px] border border-[#E8C96A] bg-[#FFF8DC] px-5 py-4 text-[13px] font-semibold text-[#755700]">
+          {draftStorageError}
+        </div>
+      )}
       {loading && (
         <div className="py-16 text-center text-[#8A8A86]">
           <div className="mx-auto mb-4 h-9 w-9 animate-spin rounded-full border-4 border-[#EAF3DE] border-t-[#639922]" />
@@ -892,7 +1082,11 @@ export default function ScriptFactoryPage() {
           />
           <Card>
             <SectionHead num="②">生成结果</SectionHead>
-            <ResultView data={result} />
+            <ResultView
+              data={result}
+              draftSavedAt={partialDraftSavedAt}
+              onClearDraft={partialDraftSavedAt ? handleClearPartialDraft : undefined}
+            />
           </Card>
         </>
       )} {/* !loading && result */}

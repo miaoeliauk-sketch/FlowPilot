@@ -20,6 +20,7 @@ export interface DeepSeekCallOptions {
   thinking?: { type: "disabled" };
   responseFormat?: { type: "json_object" };
   onResponseMeta?: (meta: DeepSeekResponseMeta) => void;
+  signal?: AbortSignal;
 }
 
 /**
@@ -48,6 +49,7 @@ export async function callDeepSeek(
 
   const res = await fetch(DEEPSEEK_API, {
     method: "POST",
+    signal: options.signal,
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
