@@ -2,7 +2,12 @@
 import { useState, useRef, useEffect } from "react";
 import { ChevronDown } from "./icon";
 
-export interface SelectOption { value: string; label: string; }
+export interface SelectOption {
+  value: string;
+  label: string;
+  avatarText?: string;
+  avatarColor?: string;
+}
 
 export function Select({
   value, onChange, options, placeholder = "请选择", className = "",
@@ -43,9 +48,17 @@ export function Select({
               key={o.value}
               type="button"
               onClick={() => { onChange(o.value); setOpen(false); }}
-              className="flex w-full items-center px-3 py-2 text-left text-[13px] hover:bg-[#F7F6F2]"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-[#F7F6F2]"
               style={o.value === value ? { color: "#639922", fontWeight: 600 } : { color: "#1C1C1B" }}
             >
+              {o.avatarText && (
+                <span
+                  className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white"
+                  style={{ background: o.avatarColor ?? "#999" }}
+                >
+                  {o.avatarText}
+                </span>
+              )}
               {o.label}
             </button>
           ))}
