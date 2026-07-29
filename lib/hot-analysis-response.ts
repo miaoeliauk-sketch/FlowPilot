@@ -56,11 +56,70 @@ export interface HotAnalysisAIResponse {
     index: number;
     emotions: string[];
   }>;
+  methodCards: HotAnalysisMethodCard[];
+}
+
+export type HotAnalysisMethodCategory =
+  | "定位方法库"
+  | "选题方法库"
+  | "标题方法库"
+  | "开头方法库"
+  | "文案框架方法库";
+
+export interface HotAnalysisMethodCard {
+  name: string;
+  targetCategory: HotAnalysisMethodCategory;
+  summary: string;
+  evidenceQuote: string;
+}
+
+export interface HotAnalysisTitleAIResponse {
+  titleStructure: "反差型" | "结果型" | "痛点型" | "悬念型" | "认知颠覆型";
+  contentDirection: string[];
+  titleAttraction: {
+    score: number;
+    reason: string;
+  };
+  topicPotential: {
+    score: number;
+    reason: string;
+  };
+  painPointClarity: {
+    score: number;
+    painPoint: string;
+    reason: string;
+  };
+  ipFit: {
+    tier: "高度匹配" | "中度匹配" | "低度匹配" | null;
+    reason: string;
+  };
+  worthContinuing: {
+    verdict: "值得补全" | "可以补全" | "不建议补全";
+    reason: string;
+  };
+  titleDiagnosisGrade: "A" | "B" | "C";
+  overallSummary: string;
 }
 
 const STAGES = ["Hook", "Problem", "Solution", "Case", "CTA", "none"] as const;
 const WORTH_LEARNING = ["值得学习", "部分学习", "不建议学习"] as const;
 const IP_FIT_TIERS = ["高度匹配", "中度匹配", "低度匹配"] as const;
+const METHOD_CATEGORIES = [
+  "定位方法库",
+  "选题方法库",
+  "标题方法库",
+  "开头方法库",
+  "文案框架方法库",
+] as const;
+const TITLE_STRUCTURES = [
+  "反差型",
+  "结果型",
+  "痛点型",
+  "悬念型",
+  "认知颠覆型",
+] as const;
+const CONTINUE_VERDICTS = ["值得补全", "可以补全", "不建议补全"] as const;
+const TITLE_GRADES = ["A", "B", "C"] as const;
 
 function extractCompleteJSONObject(text: string): string | null {
   let start = -1;
@@ -109,6 +168,46 @@ function asObject(value: unknown): Record<string, unknown> | null {
 
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function parseObjectContent(content: unknown): Record<string, unknown> {
+  if (typeof content !== "string" || !content.trim()) {
+    throw new HotAnalysisResponseError(
+      "empty_content",
+      "AI未返回有效内容",
+    );
+  }
+
+  const trimmed = content.trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  const jsonText = extractCompleteJSONObject(trimmed);
+  if (!jsonText) {
+    throw new HotAnalysisResponseError(
+      "invalid_json",
+      "AI返回格式异常",
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new HotAnalysisResponseError(
+      "invalid_json",
+      "AI返回格式异常",
+    );
+  }
+
+  const object = asObject(parsed);
+  if (!object) {
+    throw new HotAnalysisResponseError(
+      "incomplete_fields",
+      "分析结果字段不完整：root",
+    );
+  }
+  return object;
 }
 
 function requiredString(
@@ -170,6 +269,34 @@ function scoreValue(
   return value;
 }
 
+function requiredObject(
+  object: Record<string, unknown>,
+  field: string,
+): Record<string, unknown> {
+  const value = asObject(object[field]);
+  if (!value) {
+    throw new HotAnalysisResponseError(
+      "incomplete_fields",
+      `分析结果字段不完整：${field}`,
+    );
+  }
+  return value;
+}
+
+function requiredEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  field: string,
+): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new HotAnalysisResponseError(
+      "incomplete_fields",
+      `分析结果字段不完整：${field}`,
+    );
+  }
+  return value as T;
+}
+
 function normalizeStageTags(value: unknown): HotAnalysisAIResponse["sentenceStageTags"] {
   if (!Array.isArray(value)) {
     throw new HotAnalysisResponseError(
@@ -219,46 +346,40 @@ function normalizeEmotionTags(value: unknown): HotAnalysisAIResponse["sentenceEm
   });
 }
 
+function normalizeMethodCards(value: unknown): HotAnalysisMethodCard[] {
+  if (!Array.isArray(value)) {
+    throw new HotAnalysisResponseError(
+      "incomplete_fields",
+      "分析结果字段不完整：methodCards",
+    );
+  }
+
+  return value.map((item, index) => {
+    const card = asObject(item);
+    if (!card) {
+      throw new HotAnalysisResponseError(
+        "incomplete_fields",
+        `分析结果字段不完整：methodCards[${index}]`,
+      );
+    }
+    return {
+      name: requiredString(card, "name"),
+      targetCategory: requiredEnum(
+        card.targetCategory,
+        METHOD_CATEGORIES,
+        `methodCards[${index}].targetCategory`,
+      ),
+      summary: requiredString(card, "summary"),
+      evidenceQuote: requiredString(card, "evidenceQuote"),
+    };
+  }).slice(0, 6);
+}
+
 export function parseHotAnalysisResponse(
   content: unknown,
 ): HotAnalysisAIResponse {
-  if (typeof content !== "string" || !content.trim()) {
-    throw new HotAnalysisResponseError(
-      "empty_content",
-      "AI未返回有效内容",
-    );
-  }
-
-  const trimmed = content.trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-  const jsonText = extractCompleteJSONObject(trimmed);
-  if (!jsonText) {
-    throw new HotAnalysisResponseError(
-      "invalid_json",
-      "AI返回格式异常",
-    );
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    throw new HotAnalysisResponseError(
-      "invalid_json",
-      "AI返回格式异常",
-    );
-  }
-
-  const object = asObject(parsed);
-  const hookScore = asObject(object?.hookScore);
-  if (!object || !hookScore) {
-    throw new HotAnalysisResponseError(
-      "incomplete_fields",
-      "分析结果字段不完整：hookScore",
-    );
-  }
+  const object = parseObjectContent(content);
+  const hookScore = requiredObject(object, "hookScore");
 
   const worthLearning = object.worthLearning;
   if (
@@ -315,5 +436,61 @@ export function parseHotAnalysisResponse(
     userNeedLayer: requiredString(object, "userNeedLayer"),
     sentenceStageTags: normalizeStageTags(object.sentenceStageTags),
     sentenceEmotionTags: normalizeEmotionTags(object.sentenceEmotionTags),
+    methodCards: normalizeMethodCards(object.methodCards),
+  };
+}
+
+export function parseHotAnalysisTitleResponse(
+  content: unknown,
+): HotAnalysisTitleAIResponse {
+  const object = parseObjectContent(content);
+  const titleAttraction = requiredObject(object, "titleAttraction");
+  const topicPotential = requiredObject(object, "topicPotential");
+  const painPointClarity = requiredObject(object, "painPointClarity");
+  const ipFit = requiredObject(object, "ipFit");
+  const worthContinuing = requiredObject(object, "worthContinuing");
+  const rawTier = ipFit.tier;
+  const tier = rawTier === null
+    ? null
+    : requiredEnum(rawTier, IP_FIT_TIERS, "ipFit.tier");
+
+  return {
+    titleStructure: requiredEnum(
+      object.titleStructure,
+      TITLE_STRUCTURES,
+      "titleStructure",
+    ),
+    contentDirection: stringArray(object.contentDirection),
+    titleAttraction: {
+      score: scoreValue(titleAttraction, "score", 10),
+      reason: requiredString(titleAttraction, "reason"),
+    },
+    topicPotential: {
+      score: scoreValue(topicPotential, "score", 10),
+      reason: requiredString(topicPotential, "reason"),
+    },
+    painPointClarity: {
+      score: scoreValue(painPointClarity, "score", 10),
+      painPoint: requiredString(painPointClarity, "painPoint"),
+      reason: requiredString(painPointClarity, "reason"),
+    },
+    ipFit: {
+      tier,
+      reason: optionalString(ipFit.reason),
+    },
+    worthContinuing: {
+      verdict: requiredEnum(
+        worthContinuing.verdict,
+        CONTINUE_VERDICTS,
+        "worthContinuing.verdict",
+      ),
+      reason: requiredString(worthContinuing, "reason"),
+    },
+    titleDiagnosisGrade: requiredEnum(
+      object.titleDiagnosisGrade,
+      TITLE_GRADES,
+      "titleDiagnosisGrade",
+    ),
+    overallSummary: requiredString(object, "overallSummary"),
   };
 }

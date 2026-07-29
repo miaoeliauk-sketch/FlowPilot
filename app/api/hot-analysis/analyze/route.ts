@@ -1,23 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callDeepSeek, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import { DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
 import {
   HotAnalysisResponseError,
   parseHotAnalysisResponse,
+  parseHotAnalysisTitleResponse,
 } from "@/lib/hot-analysis-response";
+import {
+  callStructuredDeepSeek,
+  StructuredDeepSeekError,
+} from "@/lib/structured-deepseek";
 
-// 按标点切句——切句本身用代码做，不依赖AI，保证后面"占比"统计的分母是确定的
 function splitSentences(text: string): string[] {
-  return text.split(/(?<=[。！？\n])/).map(s => s.trim()).filter(s => s.length > 0);
+  return text
+    .split(/(?<=[。！？\n])/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
 }
 
-interface IPContext { name: string; positioning: string; audience: string; contentDirection: string[]; platforms: string[]; }
-interface MetricsInput { likes: number; comments: number; shares: number; favorites: number; aboveAccountAverage: boolean; }
+function deriveTitleFromOpening(text: string): string {
+  const first = text.replace(/\s+/g, "").slice(0, 20);
+  return first.length >= 20 ? `${first}…` : first;
+}
+
+interface IPContext {
+  name: string;
+  positioning: string;
+  audience: string;
+  contentDirection: string[];
+  platforms: string[];
+}
+
+interface MetricsInput {
+  likes: number;
+  comments: number;
+  shares: number;
+  favorites: number;
+  aboveAccountAverage: boolean;
+}
+
+type InputType = "transcript" | "copy" | "title";
+
 interface RequestBody {
-  inputType?: "transcript" | "copy" | "title";
+  inputType?: InputType;
   inputRaw?: string;
   sourceUrl?: string;
   ipContext?: IPContext | null;
   metrics?: MetricsInput | null;
+}
+
+interface ApiMeta {
+  apiCalled: boolean;
+  calledAt: string;
+  model: string;
+  ipUsed: string | null;
+  mockHit: boolean;
+  requestId?: string;
 }
 
 const HOOK_TYPES = "痛点型/反常识型/数据型/故事型/收益型/身份型/冲突型/情绪型";
@@ -25,209 +62,421 @@ const TITLE_STRUCTURES = "反差型/结果型/痛点型/悬念型/认知颠覆�
 const OPENING_HOOK_TYPES = "提问题/反常识/制造焦虑/展示结果/讲故事";
 const EMOTIONS = ["焦虑", "希望", "好奇", "羡慕", "优越感", "危机感"];
 const NEED_LAYERS = "知识/赚钱/效率/身份认同/情绪价值/案例参考";
+const METHOD_CATEGORY_LIST = "定位方法库/选题方法库/标题方法库/开头方法库/文案框架方法库";
 
-const SYSTEM = `你是短视频内容的诊断分析师，任务是拆解一段内容（口播稿/文案/标题）的结构和质量，给出有据可查的诊断，不是模糊的夸夸其谈。
+const TITLE_SYSTEM = `你是短视频标题的资深诊断分析师。任务：只针对一个标题（不到30字的短文本）做诊断，不要幻想它背后的完整内容，不要输出钩子评分、结构占比、情绪占比、DNA等只对完整口播稿适用的字段。
+
+评估只覆盖5个维度：
+1. titleAttraction：标题吸引力。这句话作为标题能否让人在信息流里停下来点开。
+2. topicPotential：选题潜力。如果标题背后有内容支撑，这个话题的传播空间有多大。
+3. painPointClarity：用户痛点清晰度。标题指向的问题、焦虑或欲望是否具体。
+4. ipFit：IP匹配度。如果提供了IP信息，判断选题是否契合其定位与受众。
+5. worthContinuing：是否值得补全文案。判断是否值得投入时间生产完整脚本。
+
+严格按JSON格式输出，不要输出任何其他文字。`;
+
+const TITLE_PROMPT = (title: string, ipContext: IPContext | null) => `待诊断的标题：
+"""
+${title}
+"""
+
+${ipContext
+  ? `当前操盘IP：名称=${ipContext.name}，定位=${ipContext.positioning}，受众=${ipContext.audience}，内容方向=${ipContext.contentDirection.join("、")}，平台=${ipContext.platforms.join("、")}`
+  : "未提供当前IP信息，ipFit.tier返回null，ipFit.reason返回空字符串。"}
+
+请严格按以下JSON格式输出：
+{
+  "titleStructure": "${TITLE_STRUCTURES}（五选一）",
+  "contentDirection": ["1-3个内容方向标签"],
+  "titleAttraction": { "score": 0-10整数, "reason": "具体评分依据" },
+  "topicPotential": { "score": 0-10整数, "reason": "选题空间判断依据" },
+  "painPointClarity": { "score": 0-10整数, "painPoint": "具体人群或问题", "reason": "判断依据" },
+  "ipFit": { "tier": "高度匹配｜中度匹配｜低度匹配｜null", "reason": "判断依据，没有IP信息时为空字符串" },
+  "worthContinuing": { "verdict": "值得补全｜可以补全｜不建议补全", "reason": "下一步行动建议" },
+  "titleDiagnosisGrade": "A｜B｜C",
+  "overallSummary": "30-60字总结"
+}`;
+
+const TRANSCRIPT_SYSTEM = `你是短视频完整口播或文案的资深诊断分析师。任务是拆解一段完整内容的结构和质量，并把真正可复用的做法提炼成方法卡。
 
 核心规则：
-1. 基础信息（标题/作者/平台/发布时间）只能从输入文本里实际提取，提取不出来的字段必须留空字符串，绝对不能编造。
-2. 评级和上次"爆款案例库"用的是同一套逻辑：内容层（至少2项：明确痛点/情绪波动/反常识表达/冲突观点/具体结果/真实案例/数字支撑/身份标签）、结构层（4项全有：3秒钩子/价值输出/结尾引导/结构完整）、钩子5维度评分（痛点强度/好奇心强度/冲突强度/收益感强度/情绪强度，各0-10）、排除标准（纯鸡汤/纯情绪发泄/无案例/无观点/流水账/AI生成痕迹明显/标题党但内容空洞）、自我检查（百万粉操盘手会不会收录）。
-3. 句子级标注：输入文本已经按句子编号，你需要给每一句标注它属于内容结构的哪个阶段（Hook/Problem/Solution/Case/CTA/none）、以及包含哪些情绪（可以是多个或没有）。不要自己计算占比，占比由代码统计，你只需要逐句打标签。
-4. IP匹配度：如果提供了当前IP信息，结合受众/风格/内容方向判断匹配度，给定性档位（高度匹配/中度匹配/低度匹配），不要给精确百分比——你没有能力算出真实的匹配率数字。
-5. 是否值得学习：值得学习/部分学习/不建议学习，必须给具体理由，不能空泛。
+1. 基础信息只能从输入文本里提取，提取不出来返回空字符串，绝对不能编造。没有明确标题时title留空，代码会生成临时标题。
+2. 评级采用严进严出：内容层至少命中2项；结构层包含3秒钩子、价值输出、结尾引导和结构完整；钩子5个维度各评0-10分；排除低质流水账和标题党；完成自我检查。
+3. 句子级标注只返回阶段和情绪，不要计算占比，占比由代码统计。
+4. IP匹配度只给高度、中度、低度三个档位，不给虚构百分比。
+5. 方法卡只提炼真正值得沉淀的做法，targetCategory只能来自：${METHOD_CATEGORY_LIST}。没有可沉淀方法时返回空数组。
 
-严格按JSON格式输出，不要输出任何其他文字，不要使用Markdown代码块，不要在JSON前后添加解释。`;
+严格按JSON格式输出，不要输出任何其他文字。`;
 
-const PROMPT = (inputRaw: string, sentences: string[], ipContext: IPContext | null, hasMetrics: boolean) => `输入内容：
+const TRANSCRIPT_PROMPT = (
+  inputRaw: string,
+  sentences: string[],
+  ipContext: IPContext | null,
+  hasMetrics: boolean,
+) => `输入内容：
 """
 ${inputRaw}
 """
 
-句子编号列表（标注时用编号引用，不要重复抄写原文）：
-${sentences.map((s, i) => `[${i}] ${s}`).join("\n")}
+句子编号列表：
+${sentences.map((sentence, index) => `[${index}] ${sentence}`).join("\n")}
 
-${ipContext ? `当前操盘IP信息：名称=${ipContext.name}，定位=${ipContext.positioning}，受众=${ipContext.audience}，内容方向=${ipContext.contentDirection.join("、")}，平台=${ipContext.platforms.join("、")}` : "未提供当前IP信息，ipFitTier和ipFitReason都返回null/空字符串"}
+${ipContext
+  ? `当前操盘IP：名称=${ipContext.name}，定位=${ipContext.positioning}，受众=${ipContext.audience}，内容方向=${ipContext.contentDirection.join("、")}，平台=${ipContext.platforms.join("、")}`
+  : "未提供当前IP信息，ipFitTier返回null，ipFitReason返回空字符串。"}
 
-${hasMetrics ? "用户提供了真实互动数据，指标层会在代码里另行核算，你不用考虑这一层。" : "用户没有提供真实互动数据，指标层视为不适用，contentLayerPassed/structureLayerPassed/钩子评分/自我检查照常评估，但admitted不要求指标层通过。"}
+${hasMetrics
+  ? "用户提供了真实互动数据，指标层由代码核算。"
+  : "用户没有提供真实互动数据，指标层不适用，其余各层照常评估。"}
 
 请严格按以下JSON格式输出：
 {
-  "title": "从文本提取的标题，提取不出来给空字符串",
-  "author": "从文本提取的作者/账号，提取不出来给空字符串",
-  "platform": "从文本提取的平台，提取不出来给空字符串",
-  "publishedAt": "从文本提取的发布时间，提取不出来给空字符串",
+  "title": "从文本提取的标题，提取不到给空字符串",
+  "author": "从文本提取的作者，提取不到给空字符串",
+  "platform": "从文本提取的平台，提取不到给空字符串",
+  "publishedAt": "从文本提取的发布时间，提取不到给空字符串",
   "contentDirection": ["1-3个内容方向标签"],
-
-  "hook": "开头钩子原文（前几句）",
+  "hook": "开头钩子原文",
   "hookType": "${HOOK_TYPES}（八选一）",
-  "hookScore": {"painPoint": 0-10整数, "curiosity": 0-10整数, "conflict": 0-10整数, "benefit": 0-10整数, "emotion": 0-10整数, "total": 五项之和},
-  "whyViral": "为什么这条内容可能传播好，给具体证据",
-  "structureBreakdownText": "按3秒钩子/价值输出/结尾引导说明对应原文",
+  "hookScore": { "painPoint": 0-10整数, "curiosity": 0-10整数, "conflict": 0-10整数, "benefit": 0-10整数, "emotion": 0-10整数, "total": 五项之和 },
+  "whyViral": "传播原因和具体证据",
+  "structureBreakdownText": "按钩子、价值输出和结尾引导说明结构",
   "contentLayerPassed": true或false,
-  "contentLayerMatched": ["命中的内容层具体项"],
+  "contentLayerMatched": ["命中的内容层项目"],
   "structureLayerPassed": true或false,
-  "structureLayerMissing": ["缺失的结构层具体项，没缺失给空数组"],
-  "exclusionMatched": "命中的排除标准，没命中给null",
+  "structureLayerMissing": ["缺失的结构项目"],
+  "exclusionMatched": "命中的排除标准，没有则为null",
   "selfCheckPassed": true或false,
-  "selfCheckReasoning": "自我检查理由",
-
+  "selfCheckReasoning": "自我检查依据",
   "worthLearning": "值得学习｜部分学习｜不建议学习",
-  "worthLearningReason": "具体理由",
-  "ipFitTier": "高度匹配｜中度匹配｜低度匹配｜null（没有IP信息时给null）",
-  "ipFitReason": "为什么是这个匹配档位，没有IP信息给空字符串",
-
-  "titleStructure": "${TITLE_STRUCTURES}（五选一，从标题判断，没有明显标题就从开头几句判断）",
+  "worthLearningReason": "具体依据",
+  "ipFitTier": "高度匹配｜中度匹配｜低度匹配｜null",
+  "ipFitReason": "具体依据，没有IP信息时为空字符串",
+  "titleStructure": "${TITLE_STRUCTURES}（五选一）",
   "openingHookType": "${OPENING_HOOK_TYPES}（五选一）",
-  "userNeedLayer": "${NEED_LAYERS}（六选一，判断用户主要在看什么）",
-  "sentenceStageTags": [{"index": 句子编号, "stage": "Hook｜Problem｜Solution｜Case｜CTA｜none"}],
-  "sentenceEmotionTags": [{"index": 句子编号, "emotions": ["焦虑/希望/好奇/羡慕/优越感/危机感中命中的，可以是空数组"]}]
+  "userNeedLayer": "${NEED_LAYERS}（六选一）",
+  "sentenceStageTags": [{ "index": 句子编号, "stage": "Hook｜Problem｜Solution｜Case｜CTA｜none" }],
+  "sentenceEmotionTags": [{ "index": 句子编号, "emotions": ["焦虑｜希望｜好奇｜羡慕｜优越感｜危机感"] }],
+  "methodCards": [{
+    "name": "具体方法名",
+    "targetCategory": "${METHOD_CATEGORY_LIST}（五选一）",
+    "summary": "50-120字说明方法和适用场景",
+    "evidenceQuote": "能证明该方法的原文"
+  }]
+}`;
+
+function hasRealMetrics(metrics: MetricsInput | null): boolean {
+  return !!metrics && (
+    metrics.likes > 0 ||
+    metrics.comments > 0 ||
+    metrics.shares > 0 ||
+    metrics.favorites > 0 ||
+    metrics.aboveAccountAverage
+  );
 }
 
-只输出上述JSON对象，不要使用Markdown代码块，不要在JSON前后添加解释文字。`;
+function metricsEvaluation(metrics: MetricsInput | null) {
+  const hasMetrics = hasRealMetrics(metrics);
+  const passed = hasMetrics && !!metrics && (
+    metrics.likes > 1000 ||
+    metrics.comments > 100 ||
+    metrics.shares > 50 ||
+    metrics.favorites > 100 ||
+    metrics.aboveAccountAverage
+  );
+  const reason = !hasMetrics
+    ? "未提供真实互动数据，本次评级仅基于内容质量与结构，不代表已验证的真实传播表现"
+    : passed
+      ? "提供的真实数据满足指标层阈值"
+      : "提供的真实数据未达到指标层阈值（点赞>1000/评论>100/转发>50/收藏>100/播放量明显高于账号平均）";
+  return { hasMetrics, passed, reason };
+}
+
+function responseApiMeta(
+  base: ApiMeta,
+  result: {
+    attempts: number;
+    responseMeta: { requestId: string | null; finishReason: string | null };
+  },
+) {
+  return {
+    ...base,
+    attempts: result.attempts,
+    providerRequestId: result.responseMeta.requestId,
+    finishReason: result.responseMeta.finishReason,
+  };
+}
+
+async function handleTitleMode(
+  inputRaw: string,
+  ipContext: IPContext | null,
+  apiKey: string,
+  apiMeta: ApiMeta,
+) {
+  const result = await callStructuredDeepSeek({
+    systemPrompt: TITLE_SYSTEM,
+    userPrompt: TITLE_PROMPT(inputRaw, ipContext),
+    parse: parseHotAnalysisTitleResponse,
+    apiKey,
+    maxTokens: 1500,
+    temperature: 0.3,
+  });
+  const parsed = result.data;
+
+  return NextResponse.json({
+    mode: "title",
+    title: inputRaw,
+    author: "",
+    platform: "",
+    publishedAt: "",
+    contentDirection: parsed.contentDirection,
+    titleStructure: parsed.titleStructure,
+    titleEvaluation: {
+      titleAttraction: parsed.titleAttraction,
+      topicPotential: parsed.topicPotential,
+      painPointClarity: parsed.painPointClarity,
+      ipFit: parsed.ipFit,
+      worthContinuing: parsed.worthContinuing,
+      titleDiagnosisGrade: parsed.titleDiagnosisGrade,
+      overallSummary: parsed.overallSummary,
+    },
+    evaluation: null,
+    dna: null,
+    methodCards: [],
+    hasRealMetrics: false,
+    ipFitTier: parsed.ipFit.tier,
+    ipFitReason: parsed.ipFit.reason,
+    worthLearning: parsed.worthContinuing.verdict,
+    worthLearningReason: parsed.worthContinuing.reason,
+    apiMeta: responseApiMeta(apiMeta, result),
+  });
+}
+
+async function handleContentMode(
+  inputRaw: string,
+  ipContext: IPContext | null,
+  metrics: MetricsInput | null,
+  apiKey: string,
+  apiMeta: ApiMeta,
+  inputType: "transcript" | "copy",
+) {
+  const sentences = splitSentences(inputRaw);
+  const metricsResult = metricsEvaluation(metrics);
+  const result = await callStructuredDeepSeek({
+    systemPrompt: TRANSCRIPT_SYSTEM,
+    userPrompt: TRANSCRIPT_PROMPT(
+      inputRaw,
+      sentences,
+      ipContext,
+      metricsResult.hasMetrics,
+    ),
+    parse: parseHotAnalysisResponse,
+    apiKey,
+    maxTokens: 3500,
+    temperature: 0.3,
+  });
+  const parsed = result.data;
+  const title = parsed.title || deriveTitleFromOpening(inputRaw);
+  const titleAutoGenerated = !parsed.title;
+  const total = parsed.hookScore.total;
+  const grade: "S" | "A" | "B" | "不收录" = total >= 45
+    ? "S"
+    : total >= 35
+      ? "A"
+      : total >= 25
+        ? "B"
+        : "不收录";
+  const admitted = (metricsResult.hasMetrics ? metricsResult.passed : true) &&
+    parsed.contentLayerPassed &&
+    parsed.structureLayerPassed &&
+    !parsed.exclusionMatched &&
+    total >= 25 &&
+    parsed.selfCheckPassed;
+
+  const evaluation = {
+    account: "",
+    track: "",
+    hook: parsed.hook,
+    hookType: parsed.hookType,
+    hookScore: parsed.hookScore,
+    grade,
+    whyViral: parsed.whyViral,
+    structureBreakdown: parsed.structureBreakdownText,
+    metricsLayerPassed: metricsResult.passed,
+    metricsLayerReason: metricsResult.reason,
+    contentLayerPassed: parsed.contentLayerPassed,
+    contentLayerMatched: parsed.contentLayerMatched,
+    structureLayerPassed: parsed.structureLayerPassed,
+    structureLayerMissing: parsed.structureLayerMissing,
+    exclusionMatched: parsed.exclusionMatched,
+    selfCheckPassed: parsed.selfCheckPassed,
+    selfCheckReasoning: parsed.selfCheckReasoning,
+    admitted,
+  };
+
+  const totalChars = sentences.reduce(
+    (sum, sentence) => sum + sentence.length,
+    0,
+  ) || 1;
+  const stages = ["Hook", "Problem", "Solution", "Case", "CTA"] as const;
+  const structureBreakdown = stages.map((stage) => {
+    const matched = parsed.sentenceStageTags
+      .filter((tag) => tag.stage === stage)
+      .map((tag) => sentences[tag.index])
+      .filter(Boolean);
+    const characters = matched.reduce(
+      (sum, sentence) => sum + sentence.length,
+      0,
+    );
+    return {
+      stage,
+      percentage: Math.round((characters / totalChars) * 100),
+      content: matched.join(""),
+    };
+  });
+  const sentenceCount = sentences.length || 1;
+  const emotionValue = EMOTIONS.map((emotion) => {
+    const count = parsed.sentenceEmotionTags
+      .filter((tag) => tag.emotions.includes(emotion))
+      .length;
+    return {
+      emotion,
+      percentage: Math.round((count / sentenceCount) * 100),
+    };
+  }).filter((item) => item.percentage > 0);
+
+  return NextResponse.json({
+    mode: inputType,
+    title,
+    titleAutoGenerated,
+    author: parsed.author,
+    platform: parsed.platform,
+    publishedAt: parsed.publishedAt,
+    contentDirection: parsed.contentDirection,
+    evaluation,
+    hasRealMetrics: metricsResult.hasMetrics,
+    worthLearning: parsed.worthLearning,
+    worthLearningReason: parsed.worthLearningReason,
+    ipFitTier: parsed.ipFitTier,
+    ipFitReason: parsed.ipFitReason,
+    dna: {
+      titleStructure: parsed.titleStructure,
+      openingHookType: parsed.openingHookType,
+      openingHookText: parsed.hook,
+      structureBreakdown,
+      emotionValue,
+      userNeedLayer: parsed.userNeedLayer,
+    },
+    methodCards: parsed.methodCards,
+    titleEvaluation: null,
+    apiMeta: responseApiMeta(apiMeta, result),
+  });
+}
+
+function getErrorStage(error: unknown) {
+  if (error instanceof StructuredDeepSeekError) {
+    if (error.cause instanceof HotAnalysisResponseError) {
+      return error.cause.code;
+    }
+    if (error.stage === "timeout") return "timeout";
+    if (error.stage === "request") return "request_failed";
+    return "processing_failed";
+  }
+  if (error instanceof HotAnalysisResponseError) return error.code;
+  return "processing_failed";
+}
+
+function errorMessage(stage: string): string {
+  if (stage === "empty_content") return "AI未返回有效内容";
+  if (stage === "invalid_json") return "AI返回格式异常";
+  if (stage === "incomplete_fields") return "分析结果字段不完整";
+  if (stage === "timeout") return "分析生成超时，已自动重试，请稍后再试";
+  if (stage === "request_failed") return "AI请求失败";
+  return "分析失败，请重试";
+}
 
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
   let body: RequestBody;
-  try { body = await req.json(); }
-  catch { return NextResponse.json({ error: "请求格式错误" }, { status: 400 }); }
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
+  }
 
+  const inputType = body.inputType ?? "transcript";
+  if (!["transcript", "copy", "title"].includes(inputType)) {
+    return NextResponse.json({ error: "不支持的分析模式" }, { status: 400 });
+  }
   const inputRaw = (body.inputRaw ?? "").trim();
   if (!inputRaw) {
     return NextResponse.json(
-      { error: "请提供要分析的内容", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } },
-      { status: 400 }
+      {
+        error: "请提供要分析的内容",
+        apiMeta: {
+          apiCalled: false,
+          calledAt: new Date().toISOString(),
+          model: MODEL,
+          ipUsed: null,
+          mockHit: false,
+        },
+      },
+      { status: 400 },
     );
   }
 
-  const sentences = splitSentences(inputRaw);
-  const hasRealMetrics = !!body.metrics && (body.metrics.likes > 0 || body.metrics.comments > 0 || body.metrics.shares > 0 || body.metrics.favorites > 0 || body.metrics.aboveAccountAverage);
-  const calledAt = new Date().toISOString();
   const requestId = crypto.randomUUID();
   const isDevelopment = process.env.NODE_ENV !== "production";
-  const apiMeta = {
+  const apiMeta: ApiMeta = {
     apiCalled: true,
-    calledAt,
+    calledAt: new Date().toISOString(),
     model: MODEL,
-    ipUsed: null as string | null,
+    ipUsed: body.ipContext?.name ?? null,
     mockHit: false,
     ...(isDevelopment ? { requestId } : {}),
   };
 
   try {
-    const raw = await callDeepSeek(
-      SYSTEM,
-      PROMPT(inputRaw, sentences, body.ipContext ?? null, hasRealMetrics),
-      6000,
-      0.2,
+    if (inputType === "title") {
+      return await handleTitleMode(
+        inputRaw,
+        body.ipContext ?? null,
+        apiKey,
+        apiMeta,
+      );
+    }
+    return await handleContentMode(
+      inputRaw,
+      body.ipContext ?? null,
+      body.metrics ?? null,
       apiKey,
-      {
-        thinking: { type: "disabled" },
-        responseFormat: { type: "json_object" },
-      },
+      apiMeta,
+      inputType,
     );
-    const parsed = parseHotAnalysisResponse(raw);
-
-    // ── 指标层：代码核算，AI不参与 ──
-    const m = body.metrics;
-    const metricsLayerPassed = hasRealMetrics && !!m && (m.likes > 1000 || m.comments > 100 || m.shares > 50 || m.favorites > 100 || m.aboveAccountAverage);
-    const metricsLayerReason = !hasRealMetrics
-      ? "未提供真实互动数据，本次评级仅基于内容质量与结构，不代表已验证的真实传播表现"
-      : metricsLayerPassed
-        ? "提供的真实数据满足指标层阈值"
-        : "提供的真实数据未达到指标层阈值（点赞>1000/评论>100/转发>50/收藏>100/播放量明显高于账号平均）";
-
-    const total = parsed.hookScore.total;
-    const grade: "S" | "A" | "B" | "不收录" = total >= 45 ? "S" : total >= 35 ? "A" : total >= 25 ? "B" : "不收录";
-
-    // 没有真实数据时，admitted的判断里跳过指标层这一项，只要求内容层+结构层+排除+钩子分+自我检查
-    const admitted = (hasRealMetrics ? metricsLayerPassed : true)
-      && !!parsed.contentLayerPassed && !!parsed.structureLayerPassed
-      && !parsed.exclusionMatched && total >= 25 && !!parsed.selfCheckPassed;
-
-    const evaluation = {
-      account: "", track: "",
-      hook: parsed.hook, hookType: parsed.hookType,
-      hookScore: parsed.hookScore,
-      grade, whyViral: parsed.whyViral, structureBreakdown: parsed.structureBreakdownText,
-      metricsLayerPassed, metricsLayerReason,
-      contentLayerPassed: parsed.contentLayerPassed, contentLayerMatched: parsed.contentLayerMatched,
-      structureLayerPassed: parsed.structureLayerPassed, structureLayerMissing: parsed.structureLayerMissing,
-      exclusionMatched: parsed.exclusionMatched,
-      selfCheckPassed: parsed.selfCheckPassed, selfCheckReasoning: parsed.selfCheckReasoning,
-      admitted,
-    };
-
-    // ── DNA：句子级标签由AI给，占比由代码统计字数，不让AI报数字 ──
-    const stageTags = parsed.sentenceStageTags;
-    const emotionTags = parsed.sentenceEmotionTags;
-    const totalChars = sentences.reduce((sum, s) => sum + s.length, 0) || 1;
-
-    const STAGES = ["Hook", "Problem", "Solution", "Case", "CTA"] as const;
-    const structureBreakdown = STAGES.map((stage) => {
-      const matchedSentences = stageTags.filter(t => t.stage === stage).map(t => sentences[t.index]).filter(Boolean);
-      const chars = matchedSentences.reduce((sum, s) => sum + s.length, 0);
-      return { stage, percentage: Math.round((chars / totalChars) * 100), content: matchedSentences.join("") };
-    });
-
-    const totalSentences = sentences.length || 1;
-    const emotionValue = EMOTIONS.map((emotion) => {
-      const count = emotionTags.filter(t => t.emotions?.includes(emotion)).length;
-      return { emotion, percentage: Math.round((count / totalSentences) * 100) };
-    }).filter(e => e.percentage > 0);
-
-    const dna = {
-      titleStructure: parsed.titleStructure ?? "",
-      openingHookType: parsed.openingHookType ?? "",
-      openingHookText: parsed.hook ?? "",
-      structureBreakdown, emotionValue,
-      userNeedLayer: parsed.userNeedLayer ?? "",
-    };
-
-    return NextResponse.json({
-      title: parsed.title, author: parsed.author, platform: parsed.platform,
-      publishedAt: parsed.publishedAt, contentDirection: parsed.contentDirection,
-      evaluation, hasRealMetrics,
-      worthLearning: parsed.worthLearning, worthLearningReason: parsed.worthLearningReason,
-      ipFitTier: parsed.ipFitTier, ipFitReason: parsed.ipFitReason,
-      dna, apiMeta,
-    });
-  } catch (err) {
-    const originalMessage = err instanceof Error ? err.message : "未知错误";
-    const errorStage = err instanceof HotAnalysisResponseError
-      ? err.code
-      : originalMessage.includes("content 为空或不是字符串")
-        ? "empty_content"
-        : originalMessage.includes("DeepSeek API 请求失败") ||
-            originalMessage.includes("未配置 DeepSeek API Key")
-          ? "request_failed"
-          : "processing_failed";
-    const message = errorStage === "empty_content"
-      ? "AI未返回有效内容"
-      : errorStage === "invalid_json"
-        ? "AI返回格式异常"
-        : errorStage === "incomplete_fields"
-          ? "分析结果字段不完整"
-          : errorStage === "request_failed"
-            ? "AI请求失败"
-            : "分析失败，请重试";
-
+  } catch (error) {
+    const stage = getErrorStage(error);
+    const message = errorMessage(stage);
     if (isDevelopment) {
       console.error("[hot-analysis]", {
         requestId,
-        errorStage,
-        message: originalMessage,
+        errorStage: stage,
+        message: error instanceof Error ? error.message : "未知错误",
       });
     }
     return NextResponse.json(
       {
         error: message,
-        ...(isDevelopment ? { errorCode: errorStage, requestId } : {}),
+        ...(isDevelopment ? { errorCode: stage, requestId } : {}),
         apiMeta: {
           ...apiMeta,
           error: message,
-          ...(isDevelopment ? { errorStage } : {}),
+          attempts: error instanceof StructuredDeepSeekError
+            ? error.attempts
+            : 1,
+          ...(isDevelopment ? { errorStage: stage } : {}),
         },
       },
-      { status: 500 },
+      { status: stage === "timeout" ? 504 : 500 },
     );
   }
 }

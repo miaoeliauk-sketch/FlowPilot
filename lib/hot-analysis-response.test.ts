@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-// @ts-expect-error Node 24 executes this TypeScript test directly.
-import { HotAnalysisResponseError, parseHotAnalysisResponse } from "./hot-analysis-response.ts";
+import {
+  HotAnalysisResponseError,
+  parseHotAnalysisResponse,
+  parseHotAnalysisTitleResponse,
+} from "./hot-analysis-response";
 
 const VALID_RESPONSE = {
   title: "",
@@ -37,6 +40,28 @@ const VALID_RESPONSE = {
   userNeedLayer: "知识",
   sentenceStageTags: [{ index: 0, stage: "Hook" }],
   sentenceEmotionTags: [{ index: 0, emotions: ["好奇"] }],
+  methodCards: [{
+    name: "反常识开头法",
+    targetCategory: "开头方法库",
+    summary: "先指出用户常见认知与真实结果之间的反差。",
+    evidenceQuote: "很多人以为贵材料等于高级感。",
+  }],
+};
+
+const VALID_TITLE_RESPONSE = {
+  titleStructure: "痛点型",
+  contentDirection: ["装修避坑"],
+  titleAttraction: { score: 8, reason: "痛点明确" },
+  topicPotential: { score: 7, reason: "用户需求稳定" },
+  painPointClarity: {
+    score: 9,
+    painPoint: "预算有限但想提升装修质感的人",
+    reason: "目标人群和困境清楚",
+  },
+  ipFit: { tier: "高度匹配", reason: "符合装修IP定位" },
+  worthContinuing: { verdict: "值得补全", reason: "可以展开具体方法" },
+  titleDiagnosisGrade: "A",
+  overallSummary: "标题痛点明确，适合补充案例和解决方法。",
 };
 
 function expectError(input: unknown, code: HotAnalysisResponseError["code"]) {
@@ -90,4 +115,26 @@ test("normalizes safe optional string arrays", () => {
 test("rejects a response missing required analysis fields", () => {
   const { hookScore: _hookScore, ...incomplete } = VALID_RESPONSE;
   expectError(JSON.stringify(incomplete), "incomplete_fields");
+});
+
+test("strictly parses the title analysis contract", () => {
+  const result = parseHotAnalysisTitleResponse(
+    JSON.stringify(VALID_TITLE_RESPONSE),
+  );
+  assert.equal(result.titleDiagnosisGrade, "A");
+  assert.equal(result.titleAttraction.score, 8);
+  assert.equal(result.ipFit.tier, "高度匹配");
+});
+
+test("rejects a title response missing a nested evaluation field", () => {
+  const incomplete = {
+    ...VALID_TITLE_RESPONSE,
+    titleAttraction: { score: 8 },
+  };
+  assert.throws(
+    () => parseHotAnalysisTitleResponse(JSON.stringify(incomplete)),
+    (error: unknown) =>
+      error instanceof HotAnalysisResponseError &&
+      error.code === "incomplete_fields",
+  );
 });
