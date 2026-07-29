@@ -239,7 +239,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
 
       <div className="flex justify-end">
         <button onClick={handleAnalyze} disabled={loading} className="flex h-[44px] items-center gap-2 rounded-[12px] bg-[#1C1C1B] px-8 text-[13.5px] font-semibold text-white disabled:opacity-40">
-          {loading ? "分析中（需要约20秒）…" : "开始六层复盘分析"}
+          {loading ? "生成中，请稍候，请勿重复点击（最长约2分钟）…" : "开始六层复盘分析"}
         </button>
       </div>
 
