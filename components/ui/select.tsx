@@ -13,7 +13,7 @@ export function Select({
   value, onChange, options, placeholder = "请选择", className = "",
 }: {
   value: string; onChange: (v: string) => void;
-  options: SelectOption[]; placeholder?: string; className?: string;
+  options: Array<SelectOption | string>; placeholder?: string; className?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -26,7 +26,10 @@ export function Select({
     return () => document.removeEventListener("mousedown", handle);
   }, []);
 
-  const selected = options.find(o => o.value === value);
+  const normalizedOptions = options.map((option) => (
+    typeof option === "string" ? { value: option, label: option } : option
+  ));
+  const selected = normalizedOptions.find(o => o.value === value);
 
   return (
     <div ref={ref} className={`relative ${className}`}>
@@ -43,7 +46,7 @@ export function Select({
 
       {open && (
         <div className="absolute left-0 top-[calc(100%+4px)] z-20 w-full overflow-hidden rounded-[10px] border border-[#E5E4DE] bg-white shadow-lg">
-          {options.map(o => (
+          {normalizedOptions.map(o => (
             <button
               key={o.value}
               type="button"
