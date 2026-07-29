@@ -828,7 +828,7 @@ function AddHookModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
 }
 
 export default function KnowledgeHubPage() {
-  const { ips, loading: ipLoading } = useIP();
+  const { ips, loading: ipLoading, activeIP } = useIP();
   // 视图模式：legacy=旧Tab视图（完整保留），unified=新统一视图（筛选器）
   const [viewMode, setViewMode] = useState<"legacy" | "unified">("legacy");
   const [tab, setTab] = useState<TabId>("爆款案例");
