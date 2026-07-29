@@ -2,6 +2,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
+import { getIPDisplayLabel } from "@/lib/ip-display";
 import { addScriptAsset, getStyleProfile, getKnowledgeEntries, recordKnowledgeUsage } from "@/lib/ip-store";
 import { IPProfile, IPStyleProfile, KnowledgeEntry } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
@@ -843,7 +844,7 @@ export default function CopyOptimizationPage() {
               <Select
                 value={targetIpId || targetIP?.id || ""} onChange={setTargetIpId}
                 className="w-[180px]"
-                options={ips.map((ip): SelectOption => ({ value: ip.id, label: ip.name, avatarText: ip.avatar, avatarColor: ip.color }))}
+                options={ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))}
               />
             </div>
 

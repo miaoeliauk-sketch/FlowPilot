@@ -3,6 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useRef, useEffect } from "react";
 import { useIP } from "@/lib/ip-context";
+import { getIPDisplayLabel } from "@/lib/ip-display";
 import { getUserProfile, setUserProfile, getOperatorDisplayName } from "@/lib/ip-store";
 import { UserProfile } from "@/lib/types";
 import { Icon, IconName } from "@/components/ui/icon";
@@ -58,7 +59,7 @@ function IPSwitcher() {
         <div className="flex-1 min-w-0">
           <div className="text-[10px] text-[#BBB] leading-tight">当前操盘IP</div>
           <div className="text-[13px] font-bold text-[#1A1A1A] truncate leading-tight">
-            {activeIP?.name ?? "未选择"}
+            {activeIP ? getIPDisplayLabel(activeIP, ips) : "未选择"}
           </div>
         </div>
         <div className={`text-[#999] transition-transform ${open ? "rotate-180" : ""}`}>
@@ -80,7 +81,7 @@ function IPSwitcher() {
               >
                 {ip.avatar}
               </div>
-              <span className="flex-1 truncate text-[12.5px] font-medium text-[#1A1A1A]">{ip.name}</span>
+              <span className="flex-1 truncate text-[12.5px] font-medium text-[#1A1A1A]">{getIPDisplayLabel(ip, ips)}</span>
               {ip.id === activeIP?.id && (
                 <span className="h-1.5 w-1.5 rounded-full" style={{ background: "#C8F04A" }} />
               )}

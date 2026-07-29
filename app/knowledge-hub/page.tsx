@@ -2,6 +2,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect } from "react";
 import { useIP } from "@/lib/ip-context";
+import { getIPDisplayLabel } from "@/lib/ip-display";
 import { KnowledgeEntry, KnowledgeCategory, VoiceSample, HookEntry, KnowledgeItem, KnowledgeItemType, KnowledgeItemScene, KNOWLEDGE_ITEM_TYPE_LABEL, KNOWLEDGE_ITEM_SCENE_LABEL } from "@/lib/types";
 import {
   getKnowledgeEntries, addKnowledgeEntry, deleteKnowledgeEntry, updateKnowledgeEntry,
@@ -373,7 +374,7 @@ function AddEntryModal({
                               value={it.extracted.ipId ?? ""}
                               onChange={(v) => updateExtracted(it.localId, { ipId: v || null })}
                               placeholder="不归属任何IP（通用）"
-                              options={[{ value: "", label: "不归属任何IP（通用）" }, ...ips.map((ip): SelectOption => ({ value: ip.id, label: ip.name, avatarText: ip.avatar, avatarColor: ip.color }))]}
+                              options={[{ value: "", label: "不归属任何IP（通用）" }, ...ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))]}
                             />
                           </div>
                         )}
@@ -638,7 +639,7 @@ function AddViralCaseModal({
                   <Select
                     value={state.ipId} onChange={(v) => patch({ ipId: v })}
                     placeholder="不归属任何IP（通用参考）"
-                    options={[{ value: "", label: "不归属任何IP（通用参考）" }, ...ips.map((ip): SelectOption => ({ value: ip.id, label: ip.name, avatarText: ip.avatar, avatarColor: ip.color }))]}
+                    options={[{ value: "", label: "不归属任何IP（通用参考）" }, ...ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))]}
                   />
                 </div>
               )}
@@ -684,7 +685,7 @@ function AddVoiceSampleModal({
         <div className="flex flex-col gap-3">
           <div>
             <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">所属IP</label>
-            <Select value={ipId} onChange={setIpId} options={ips.map((ip): SelectOption => ({ value: ip.id, label: ip.name, avatarText: ip.avatar, avatarColor: ip.color }))} />
+            <Select value={ipId} onChange={setIpId} options={ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))} />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <input value={title} onChange={e => setTitle(e.target.value)} placeholder="样本标题" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[12.5px]" />
@@ -1246,7 +1247,7 @@ export default function KnowledgeHubPage() {
                   {ip && (
                     <span className="flex items-center gap-1.5 text-[11.5px] font-semibold" style={{ color: ip.color }}>
                       <span className="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold text-white" style={{ background: ip.color }}>{ip.avatar}</span>
-                      {ip.name}
+                      {getIPDisplayLabel(ip, ips)}
                     </span>
                   )}
                   <button onClick={() => { deleteVoiceSample(s.id); refresh(); }} className="text-[#999] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
@@ -1325,7 +1326,7 @@ export default function KnowledgeHubPage() {
                 </div>
                 {/* 底部：来源左侧截断，删除按钮右侧固定 */}
                 <div className="mt-2 flex min-w-0 items-center justify-between gap-2 border-t border-[#F0EFE9] pt-2">
-                  <span className="min-w-0 truncate text-[10.5px] text-[#BBB]">{e.sourcePlatform} · {new Date(e.createdAt).toLocaleDateString()}{ip ? ` · ${ip.name}` : ""}</span>
+                  <span className="min-w-0 truncate text-[10.5px] text-[#BBB]">{e.sourcePlatform} · {new Date(e.createdAt).toLocaleDateString()}{ip ? ` · ${getIPDisplayLabel(ip, ips)}` : ""}</span>
                   <button onClick={ev => { ev.stopPropagation(); deleteKnowledgeEntry(e.id); refresh(); }} className="flex-shrink-0 text-[#BBB] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
                 </div>
               </Card>

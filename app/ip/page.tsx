@@ -2,6 +2,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect } from "react";
 import { useIP } from "@/lib/ip-context";
+import { getIPDisplayLabel } from "@/lib/ip-display";
 import { IPProfile, VoiceSample, IPStyleProfile } from "@/lib/types";
 import { getTopicAssets, getCommentAssets, getScriptAssets, getVoiceSamples, addVoiceSample, deleteVoiceSample, getStyleProfile, saveStyleProfile } from "@/lib/ip-store";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
@@ -531,7 +532,7 @@ export default function IPCenterPage() {
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="text-[15px] font-bold text-[#1A1A1A]">{ip.name}</span>
+                      <span className="text-[15px] font-bold text-[#1A1A1A]">{getIPDisplayLabel(ip, ips)}</span>
                       {isActiveIP && (
                         <span className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ background: "#E4F9C0", color: "#2A5A0A" }}>
                           <Icon name="check" /> 使用中

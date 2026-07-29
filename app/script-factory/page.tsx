@@ -2,6 +2,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
+import { getIPDisplayLabel } from "@/lib/ip-display";
 import { addScriptAsset, getKnowledgeEntries, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
 import { IPProfile, KnowledgeEntry } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
@@ -944,14 +945,14 @@ export default function ScriptFactoryPage() {
               <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">IP A</label>
               <Select
                 value={compareAId} onChange={setCompareAId}
-                options={ips.map((ip): SelectOption => ({ value: ip.id, label: ip.name, avatarText: ip.avatar, avatarColor: ip.color }))}
+                options={ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))}
               />
             </div>
             <div className="w-[180px] flex-shrink-0">
               <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">IP B</label>
               <Select
                 value={compareBId} onChange={setCompareBId}
-                options={ips.map((ip): SelectOption => ({ value: ip.id, label: ip.name, avatarText: ip.avatar, avatarColor: ip.color }))}
+                options={ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))}
               />
             </div>
             <button onClick={runCompare} disabled={compareLoading} className="h-[56px] flex-shrink-0 rounded-[16px] px-6 text-[13.5px] font-bold disabled:opacity-50" style={{ background: "#C8F04A", color: "#1A1A1A" }}>
@@ -967,7 +968,7 @@ export default function ScriptFactoryPage() {
               <div key={ip.id} className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
                 <div className="mb-3 flex items-center gap-2">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold text-white" style={{ background: ip.color }}>{ip.avatar}</span>
-                  <span className="text-[13.5px] font-bold text-[#1C1C1B]">{ip.name}</span>
+                  <span className="text-[13.5px] font-bold text-[#1C1C1B]">{getIPDisplayLabel(ip, ips)}</span>
                 </div>
                 <ResultView data={data} compact />
               </div>
