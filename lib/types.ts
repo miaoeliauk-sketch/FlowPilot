@@ -210,7 +210,13 @@ export type KnowledgeCategory =
   | "选题方法库"
   | "标题方法库"
   | "开头方法库"
-  | "文案框架方法库";
+  | "文案框架方法库"
+  | "IP人设资料"
+  | "IP表达语料"
+  | "IP历史内容"
+  | "IP高表现内容"
+  | "IP受众反馈"
+  | "IP禁用规则";
 export type SourceTier = "高" | "中" | "低";
 
 // 调用方模块——故意不用closed union锁死，因为AI内容工厂/内容诊断中心这类还没建出来的

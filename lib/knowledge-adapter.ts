@@ -98,12 +98,9 @@ export function itemToEntryInput(item: Omit<KnowledgeItem, "id" | "createdAt" | 
 
 /** 获取所有知识条目（转换为 KnowledgeItem 格式） */
 export function getAllKnowledgeItems(ipId?: string): KnowledgeItem[] {
-  const ALL_CATEGORIES = ["爆款案例", "方法论", "评论需求", "选题案例", "IP语料库", "复盘经验库"] as const;
-  const entries: KnowledgeEntry[] = [];
-  for (const cat of ALL_CATEGORIES) {
-    const items = getKnowledgeEntries(cat);
-    entries.push(...items);
-  }
+  // 不按分类逐个取——直接取全库。旧的按分类遍历方式会漏掉
+  // 新分类体系（选题方法库/IP人设资料等）下存储的条目。
+  const entries: KnowledgeEntry[] = getKnowledgeEntries();
   const filtered = ipId ? entries.filter(e => !e.ipId || e.ipId === ipId) : entries;
   return filtered
     .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
@@ -171,24 +168,18 @@ export function recordKnowledgeItemUsage(
   module: string,
   context: string,
 ): void {
-  // 找到对应的 KnowledgeEntry 并记录引用
-  const ALL_CATEGORIES = ["爆款案例", "方法论", "评论需求", "选题案例", "IP语料库", "复盘经验库"] as const;
-  for (const cat of ALL_CATEGORIES) {
-    const entries = getKnowledgeEntries(cat);
-    const entry = entries.find(e => e.id === id);
-    if (entry) {
-      const record: KnowledgeUsageRecord = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        module, usedAt: new Date().toISOString(), reason: context,
-        relevanceTier: "高度相关", relevanceReason: "unified search match", context,
-      };
-      updateKnowledgeEntry(id, {
-        usageRecords: [...(entry.usageRecords ?? []), record],
-        status: "已用于分析" as const,
-      });
-      return;
-    }
-  }
+  // 全库查找目标条目——不按分类遍历，避免漏掉新分类体系下的条目
+  const entry = getKnowledgeEntries().find(e => e.id === id);
+  if (!entry) return;
+  const record: KnowledgeUsageRecord = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    module, usedAt: new Date().toISOString(), reason: context,
+    relevanceTier: "高度相关", relevanceReason: "unified search match", context,
+  };
+  updateKnowledgeEntry(id, {
+    usageRecords: [...(entry.usageRecords ?? []), record],
+    status: "已用于分析" as const,
+  });
 }
 
 /** 删除知识条目（通过adapter删除旧存储） */
