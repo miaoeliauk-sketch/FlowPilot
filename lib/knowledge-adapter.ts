@@ -19,6 +19,7 @@ import {
   getKnowledgeEntries, getAllIPs, addKnowledgeEntry as legacyAdd,
   deleteKnowledgeEntry, updateKnowledgeEntry,
 } from "./ip-store";
+import { searchKnowledgeEntries } from "./knowledge-search-utils";
 
 // ── 转换函数 ──
 
@@ -132,12 +133,19 @@ export function filterKnowledgeItems(options: {
 
   if (options.keyword?.trim()) {
     const kw = options.keyword.trim().toLowerCase();
-    items = items.filter(item =>
-      item.title.toLowerCase().includes(kw) ||
-      item.content.toLowerCase().includes(kw) ||
-      item.tags.some(t => t.toLowerCase().includes(kw)) ||
-      item.keywords.some(k => k.toLowerCase().includes(kw))
-    );
+    const matches = searchKnowledgeEntries(kw, items.map(item => ({
+      id: item.id,
+      title: item.title,
+      category: item.legacyCategory,
+      normalizedCategory: item.type,
+      tags: item.tags,
+      keywords: item.keywords,
+      content: item.content,
+      summary: item.sourceTierReason,
+      metadata: { type: item.type, scene: item.scene, sourceTier: item.sourceTier },
+    })), { limit: items.length || 1, minScore: 2 });
+    const ids = new Set(matches.results.map(match => match.id));
+    items = items.filter(item => ids.has(item.id));
   }
 
   if (options.limit) {
