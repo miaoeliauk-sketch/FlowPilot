@@ -3,6 +3,7 @@ import { IPProfile, VoiceSample, IPStyleProfile, TopicAsset, CommentAsset, Scrip
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
+const KEY_DEFAULT_IPS_INITIALIZED = "ipwr:defaultIPsInitialized:v1";
 const KEY_VOICE_SAMPLES = "ipwr:voiceSamples";
 const KEY_STYLE_PROFILES = "ipwr:ipStyleProfiles";
 const KEY_TOPIC_ASSETS = "ipwr:topicAssets";
@@ -38,7 +39,7 @@ function seedDefaultIPs(): IPProfile[] {
   const now = new Date().toISOString();
   return [
     {
-      id: genId(), name: "彭彭说AI", avatar: "彭",
+      id: "demo-ip-pengpeng-ai-v1", name: "彭彭说AI", avatar: "彭",
       positioning: "AI内容创作者IP，专注AI工具教程、AI workflow与内容创作方法论，以学习者视角记录真实AI实践，账号处于早期成长阶段",
       platforms: ["抖音", "小红书", "B站", "视频号"],
       audience: "AI新手学习者、刚入行的内容创作者、自媒体从业者",
@@ -63,7 +64,7 @@ function seedDefaultIPs(): IPProfile[] {
       color: COLORS[0], createdAt: now, updatedAt: now,
     },
     {
-      id: genId(), name: "喂鱼", avatar: "喂",
+      id: "demo-ip-weiyu-v1", name: "喂鱼", avatar: "喂",
       positioning: "AI+IP自媒体，专注AI工具与效率工作流分享，账号已有成熟粉丝基础（约3.9万粉丝），定位为可信赖的方法论输出者",
       platforms: ["抖音", "视频号", "小红书", "B站"],
       audience: "AI+IP内容创作者、有一定基础的自媒体从业者、想要复制成功路径的操盘手",
@@ -120,12 +121,24 @@ function normalizeIP(raw: IPProfile): IPProfile {
 // ── IP CRUD ──
 export function getAllIPs(): IPProfile[] {
   const ips = readJSON<IPProfile[]>(KEY_IPS, []);
-  if (ips.length === 0) {
-    const seeded = seedDefaultIPs();
-    writeJSON(KEY_IPS, seeded);
-    return seeded;
-  }
   return ips.map(normalizeIP);
+}
+
+export function initializeIPs(): IPProfile[] {
+  if (typeof window === "undefined") return [];
+
+  const storedIPs = localStorage.getItem(KEY_IPS);
+  const initialized = readJSON<boolean>(KEY_DEFAULT_IPS_INITIALIZED, false);
+  if (storedIPs !== null) {
+    if (!initialized) writeJSON(KEY_DEFAULT_IPS_INITIALIZED, true);
+    return getAllIPs();
+  }
+  if (initialized) return [];
+
+  const seeded = seedDefaultIPs();
+  writeJSON(KEY_IPS, seeded);
+  writeJSON(KEY_DEFAULT_IPS_INITIALIZED, true);
+  return seeded;
 }
 
 export function getIP(id: string): IPProfile | null {
@@ -165,11 +178,12 @@ export function setActiveIPId(id: string | null): void {
   writeJSON(KEY_ACTIVE_IP, id);
 }
 
-export function getOrInitActiveIP(): IPProfile {
+export function getOrInitActiveIP(): IPProfile | null {
   const ips = getAllIPs();
   const activeId = getActiveIPId();
   const found = ips.find(ip => ip.id === activeId);
   if (found) return found;
+  if (ips.length === 0) return null;
   // 没有激活IP，默认选第一个
   setActiveIPId(ips[0].id);
   return ips[0];

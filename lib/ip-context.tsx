@@ -25,10 +25,11 @@ export function IPProvider({ children }: { children: ReactNode }) {
     const all = ipStore.getAllIPs();
     setIps(all);
     const active = ipStore.getOrInitActiveIP();
-    setActiveId(active.id);
+    setActiveId(active?.id ?? null);
   }, []);
 
   useEffect(() => {
+    ipStore.initializeIPs();
     refresh();
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps

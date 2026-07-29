@@ -79,6 +79,91 @@ const seed = (ips = sameNameIPs(), activeIPId: string | null = null) => {
   storage.setItem("ipwr:activeIpId", JSON.stringify(activeIPId));
 };
 
+test("读取IP列表时不自动初始化或写入存储", async () => {
+  const { getAllIPs } = await import("./ip-store");
+  storage.clear();
+
+  assert.deepEqual(getAllIPs(), []);
+  assert.equal(storage.getItem("ipwr:ips_v2"), null);
+});
+
+test("全新环境只初始化一组固定ID的默认IP", async () => {
+  const { initializeIPs } = await import("./ip-store");
+  storage.clear();
+
+  const initialized = initializeIPs();
+
+  assert.deepEqual(initialized.map(ip => ip.id), [
+    "demo-ip-pengpeng-ai-v1",
+    "demo-ip-weiyu-v1",
+  ]);
+  assert.equal(
+    JSON.parse(storage.getItem("ipwr:defaultIPsInitialized:v1") ?? "false"),
+    true,
+  );
+});
+
+test("已有恢复数据时不生成默认IP并补初始化标记", async () => {
+  const { initializeIPs } = await import("./ip-store");
+  const restored = [makeIP("restored-ip", "已恢复IP", "2026-07-29T00:00:00.000Z")];
+  storage.clear();
+  storage.setItem("ipwr:ips_v2", JSON.stringify(restored));
+
+  const initialized = initializeIPs();
+
+  assert.deepEqual(initialized.map(ip => ip.id), ["restored-ip"]);
+  assert.equal(
+    JSON.parse(storage.getItem("ipwr:defaultIPsInitialized:v1") ?? "false"),
+    true,
+  );
+});
+
+test("重复初始化仍然只有两个固定ID", async () => {
+  const { initializeIPs } = await import("./ip-store");
+  storage.clear();
+
+  initializeIPs();
+  const initializedAgain = initializeIPs();
+
+  assert.deepEqual(initializedAgain.map(ip => ip.id), [
+    "demo-ip-pengpeng-ai-v1",
+    "demo-ip-weiyu-v1",
+  ]);
+  const saved = JSON.parse(storage.getItem("ipwr:ips_v2") ?? "[]") as IPProfile[];
+  assert.equal(saved.length, 2);
+});
+
+test("IP列表被明确清空后不重新生成默认IP", async () => {
+  const { initializeIPs } = await import("./ip-store");
+  storage.clear();
+  storage.setItem("ipwr:ips_v2", "[]");
+
+  assert.deepEqual(initializeIPs(), []);
+  assert.equal(
+    JSON.parse(storage.getItem("ipwr:defaultIPsInitialized:v1") ?? "false"),
+    true,
+  );
+});
+
+test("已有初始化标记但IP存储键缺失时不重新生成默认IP", async () => {
+  const { initializeIPs } = await import("./ip-store");
+  storage.clear();
+  storage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+
+  assert.deepEqual(initializeIPs(), []);
+  assert.equal(storage.getItem("ipwr:ips_v2"), null);
+});
+
+test("IP列表为空时不会尝试激活不存在的IP", async () => {
+  const { getOrInitActiveIP } = await import("./ip-store");
+  storage.clear();
+  storage.setItem("ipwr:ips_v2", "[]");
+  storage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+
+  assert.equal(getOrInitActiveIP(), null);
+  assert.equal(storage.getItem("ipwr:activeIpId"), null);
+});
+
 test("读取时保留全部同名IP", async () => {
   const { getAllIPs } = await import("./ip-store");
   seed();
