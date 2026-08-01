@@ -14,16 +14,41 @@ import { Select, SelectOption } from "@/components/ui/select";
 import { XlsxUploadPanel } from "@/components/ui/xlsx-upload-panel";
 import { getAllKnowledgeItems, filterKnowledgeItems, countByType, countByScene, deleteKnowledgeItem } from "@/lib/knowledge-adapter";
 import type { ImportedData } from "@/components/ui/xlsx-upload-panel";
+import { searchKnowledgeEntries } from "@/lib/knowledge-search-utils";
+import { GLOBAL_CATEGORIES, IP_CATEGORIES, getNormalizedCategory, type GlobalCategoryId, type IPCategoryId } from "@/lib/knowledge-categories";
+import {
+  getKnowledgeHubCorrectionCategories,
+  getKnowledgeHubAddAction,
+  KNOWLEDGE_HUB_LEGACY_SECTIONS,
+  matchesKnowledgeHubSection,
+  type KnowledgeHubSection,
+} from "@/lib/knowledge-hub-view";
 
-type TabId = "爆款案例" | "方法论" | "评论需求" | "选题案例" | "IP语料库" | "复盘经验库" | "IP口播" | "Hook";
-// MVP：5个核心分类，其余数据保留但入口隐藏
-const TABS: { id: TabId; label: string; desc: string }[] = [
-  { id: "爆款案例", label: "案例",     desc: "真实爆款内容的逐字稿/文案，供AI选题和脚本参考" },
-  { id: "方法论",   label: "方法论",   desc: "选题方法论、内容架构、增长经验等通用知识" },
-  { id: "Hook",     label: "钩子",     desc: "前3秒钩子素材库" },
-  { id: "评论需求", label: "评论洞察", desc: "从评论区收集的真实用户需求和反馈" },
-  { id: "IP语料库", label: "IP语料",   desc: "口播样本，供脚本工厂学习IP风格" },
-];
+function cleanRawContent(raw: string): string {
+  return raw.split("\n").filter(line => {
+    const text = line.trim();
+    if (!text) return false;
+    if (text.startsWith("分类JSON:")) return false;
+    if (text.startsWith("{") && text.includes('"category"')) return false;
+    return true;
+  }).join("\n").trim();
+}
+
+function parseMethodMeta(note: string): {
+  methodCard?: boolean;
+  coreMethod?: string;
+  applicableScenarios?: string[];
+  triggerKeywords?: string[];
+  aiUsage?: string;
+  unsuitableCases?: string[];
+} | null {
+  try {
+    const parsed = JSON.parse(note || "{}");
+    return parsed?.methodCard ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 type InputMethod = "paste" | "file" | "link" | "batch";
 interface PendingItem {
@@ -832,8 +857,10 @@ export default function KnowledgeHubPage() {
   const { ips, loading: ipLoading, activeIP } = useIP();
   // 视图模式：legacy=旧Tab视图（完整保留），unified=新统一视图（筛选器）
   const [viewMode, setViewMode] = useState<"legacy" | "unified">("legacy");
-  const [tab, setTab] = useState<TabId>("爆款案例");
-  const [scopeFilter, setScopeFilter] = useState<"all" | "global" | "ip">("all");
+  const [scopeFilter, setScopeFilter] = useState<KnowledgeHubSection>("global");
+  const [globalCatFilter, setGlobalCatFilter] = useState<GlobalCategoryId>("定位方法库");
+  const [ipCatFilter, setIpCatFilter] = useState<IPCategoryId>("IP人设资料");
+  const [detailExpanded, setDetailExpanded] = useState(false);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [voiceSamples, setVoiceSamples] = useState<VoiceSample[]>([]);
   const [hookEntries, setHookEntries] = useState<HookEntry[]>([]);
@@ -842,6 +869,13 @@ export default function KnowledgeHubPage() {
   const [xlsxImportResult, setXlsxImportResult] = useState<{ count: number; skipped: number } | null>(null);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState<KnowledgeEntry | null>(null);
+
+  useEffect(() => {
+    const scope = new URLSearchParams(window.location.search).get("scope");
+    if (["global", "ip", "viral", "hook", "voice"].includes(scope ?? "")) {
+      setScopeFilter(scope as KnowledgeHubSection);
+    }
+  }, []);
 
   // 统一视图状态
   const [uniItems, setUniItems] = useState<KnowledgeItem[]>([]);
@@ -909,7 +943,7 @@ export default function KnowledgeHubPage() {
     for (const row of data.knowledgeRows) {
       if (!row.title && !row.content) { skipped++; continue; }
       addKnowledgeEntry({
-        category: tab as KnowledgeCategory,
+        category: (scopeFilter === "global" ? globalCatFilter : ipCatFilter) as KnowledgeCategory,
         title: row.title || row.content.slice(0, 30),
         rawContent: row.content || row.title,
         tags: row.tags ? row.tags.split(/[,，、]/).map(t => t.trim()).filter(Boolean) : [],
@@ -937,11 +971,11 @@ export default function KnowledgeHubPage() {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   function refresh() {
-    if (tab === "IP口播") setVoiceSamples(getAllVoiceSamples());
-    else if (tab === "Hook") setHookEntries(getHookEntries());
-    else setEntries(getKnowledgeEntries(tab as KnowledgeCategory));
+    setEntries(getKnowledgeEntries());
+    setVoiceSamples(getAllVoiceSamples());
+    setHookEntries(getHookEntries());
   }
-  useEffect(refresh, [tab]);
+  useEffect(refresh, []);
 
   async function handleBatchAnalyze() {
     const pending = getUnanalyzedHookEntries();
@@ -984,17 +1018,51 @@ export default function KnowledgeHubPage() {
 
   const ipMap = new Map(ips.map(ip => [ip.id, ip]));
   const q = search.trim().toLowerCase();
-  const filteredEntries = entries.filter(e => {
-    // scope 过滤：global=ipId为空, ip=ipId有值
-    if (scopeFilter === "global" && e.ipId) return false;
-    if (scopeFilter === "ip" && !e.ipId) return false;
-    return true;
-  }).filter(e =>
-    !q || e.title.toLowerCase().includes(q) || e.tags.some(t => t.toLowerCase().includes(q)) || e.keywords.some(k => k.toLowerCase().includes(q))
-  );
+  const selectedCategory = scopeFilter === "global"
+    ? globalCatFilter
+    : scopeFilter === "ip"
+      ? ipCatFilter
+      : null;
+  const scopeEntries = entries.filter(e => matchesKnowledgeHubSection({
+    category: e.category,
+    normalizedCategory: getNormalizedCategory(e),
+    ipId: e.ipId,
+  }, {
+    section: scopeFilter,
+    selectedCategory: null,
+    activeIPId: activeIP?.id ?? null,
+  }));
+  const scopedEntries = entries.filter(e => matchesKnowledgeHubSection({
+    category: e.category,
+    normalizedCategory: getNormalizedCategory(e),
+    ipId: e.ipId,
+  }, {
+    section: scopeFilter,
+    selectedCategory,
+    activeIPId: activeIP?.id ?? null,
+  }));
+  const searchSourceEntries = q ? scopeEntries : scopedEntries;
+  const filteredEntries = q
+    ? searchKnowledgeEntries(q, searchSourceEntries.map(e => ({
+      ...e,
+      normalizedCategory: getNormalizedCategory(e),
+      content: e.rawContent,
+      summary: e.note,
+      referenceReason: e.sourceTierReason,
+      note: e.note,
+      metadata: { sourcePlatform: e.sourcePlatform, contentDirection: e.contentDirection, viralEvaluation: e.viralEvaluation },
+    })), { limit: searchSourceEntries.length || 1, minScore: 2 }).results
+      .map(match => searchSourceEntries.find(e => e.id === match.id))
+      .filter((e): e is KnowledgeEntry => Boolean(e))
+    : scopedEntries;
   const filteredSamples = voiceSamples.filter(s => !q || s.title.toLowerCase().includes(q));
   const filteredHooks = hookEntries.filter(h => !q || h.hookText.toLowerCase().includes(q) || h.title.toLowerCase().includes(q));
   const unanalyzedCount = hookEntries.filter(h => !h.analyzed).length;
+  const addAction = getKnowledgeHubAddAction(scopeFilter);
+
+  function openSectionAddFlow() {
+    if (addAction !== "smart-intake") setShowAdd(true);
+  }
 
   return (
     <div className="min-h-screen p-6 md:p-8">
@@ -1149,28 +1217,61 @@ export default function KnowledgeHubPage() {
       {/* ════════ 旧分类视图（完整保留）════════ */}
       {viewMode === "legacy" && (<>
 
-      <div className="mb-5 flex flex-wrap gap-2">
-        {TABS.map(t => (
-          <button
-            key={t.id} onClick={() => setTab(t.id)}
-            className="rounded-[12px] px-4 py-2.5 text-left text-[13px] font-semibold transition-all"
-            style={tab === t.id ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}
-          >
-            {t.label}
+      <div className="mb-5 rounded-[16px] border border-[#E5E4DE] bg-white p-4">
+        <div className="mb-3 flex rounded-[10px] bg-[#F2F1ED] p-1">
+          <button onClick={() => { setScopeFilter("global"); setGlobalCatFilter("定位方法库" as GlobalCategoryId); }}
+            className="flex-1 rounded-[8px] py-2 text-[13px] font-semibold transition-all"
+            style={scopeFilter === "global" ? { background: "#1C1C1B", color: "#fff" } : { background: "transparent", color: "#888" }}>
+            通用知识库
           </button>
-        ))}
-      </div>
-      <p className="mb-3 text-[12.5px] text-[#999]">{TABS.find(t => t.id === tab)?.desc}</p>
-      {/* 范围筛选 */}
-      <div className="mb-4 flex items-center gap-1.5">
-        <span className="text-[11.5px] text-[#888]">范围：</span>
-        {([["all","全部"],["global","通用知识库"],["ip","当前IP语料"]] as const).map(([v,l]) => (
-          <button key={v} onClick={() => setScopeFilter(v)}
-            className="rounded-full px-3 py-1 text-[11.5px] font-semibold transition-all"
-            style={scopeFilter === v ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>
-            {l}
+          <button onClick={() => { setScopeFilter("ip"); setIpCatFilter("IP人设资料"); }}
+            className="flex-1 rounded-[8px] py-2 text-[13px] font-semibold transition-all"
+            style={scopeFilter === "ip" ? { background: "#1C1C1B", color: "#fff" } : { background: "transparent", color: "#888" }}>
+            当前IP知识库
           </button>
-        ))}
+        </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-[11.5px] text-[#999]">历史专项库：</span>
+          {KNOWLEDGE_HUB_LEGACY_SECTIONS.map(({ section, label }) => (
+            <button
+              key={section}
+              onClick={() => setScopeFilter(section)}
+              className="rounded-full border px-3 py-1 text-[11.5px] font-semibold transition-all"
+              style={scopeFilter === section
+                ? { background: "#1C1C1B", color: "#fff", borderColor: "#1C1C1B" }
+                : { background: "white", color: "#666", borderColor: "#E5E4DE" }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="mb-3 text-[12px] text-[#888]">
+          {scopeFilter === "global" ? "沉淀内容生产方法，所有 IP 都可调用，用于辅助选题、标题、开头和脚本生成。"
+          : scopeFilter === "ip" ? "沉淀当前账号的人设、语气、历史表达和受众反馈，用于让 AI 生成内容更符合当前 IP。"
+          : scopeFilter === "viral" ? "保留真实爆款案例、表现数据、钩子评分和结构拆解。"
+          : scopeFilter === "hook" ? "保留可复用的前3秒Hook素材及其分析结果。"
+          : "保留按IP绑定的历史口播样本和表达素材。"}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {scopeFilter === "global" && GLOBAL_CATEGORIES.map(c => {
+            const cnt = entries.filter(e => !e.ipId && getNormalizedCategory(e) === c.id).length;
+            return (<button key={c.id} onClick={() => setGlobalCatFilter(c.id as GlobalCategoryId)}
+              className="rounded-full border px-3.5 py-1.5 text-[12px] font-semibold transition-all"
+              style={globalCatFilter === c.id ? { background: "#EAF3DE", color: "#3B6D11", borderColor: "#A8D87A" } : { background: "white", color: "#666", borderColor: "#E5E4DE" }}>
+              {c.id} <span className="ml-1 text-[10.5px] opacity-60">{cnt}</span>
+            </button>);
+          })}
+          {scopeFilter === "ip" && IP_CATEGORIES.map(c => {
+            const cnt = entries.filter(e => e.ipId === activeIP?.id && getNormalizedCategory(e) === c.id).length;
+            return (<button key={c.id} onClick={() => setIpCatFilter(c.id as IPCategoryId)}
+              className="rounded-full border px-3.5 py-1.5 text-[12px] font-semibold transition-all"
+              style={ipCatFilter === c.id ? { background: "#DBEAFE", color: "#1D4ED8", borderColor: "#93C5FD" } : { background: "white", color: "#666", borderColor: "#E5E4DE" }}>
+              {c.id} <span className="ml-1 text-[10.5px] opacity-60">{cnt}</span>
+            </button>);
+          })}
+        </div>
+        {scopeFilter === "global" && (() => { const cat = GLOBAL_CATEGORIES.find(c => c.id === globalCatFilter); return cat ? (<div className="mt-3 flex items-start gap-2 rounded-[10px] bg-[#F7FCF0] px-3 py-2.5"><span className="mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#639922]" /><div><span className="text-[12px] font-bold text-[#3B6D11]">{cat.id}</span><p className="mt-0.5 text-[11.5px] leading-4 text-[#555]">{cat.desc}</p></div></div>) : null; })()}
+        {scopeFilter === "ip" && (() => { const cat = IP_CATEGORIES.find(c => c.id === ipCatFilter); return cat ? (<div className="mt-3 flex items-start gap-2 rounded-[10px] bg-[#EFF6FF] px-3 py-2.5"><span className="mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#1D4ED8]" /><div><span className="text-[12px] font-bold text-[#1D4ED8]">{cat.id}</span><p className="mt-0.5 text-[11.5px] leading-4 text-[#555]">{cat.desc}</p></div></div>) : null; })()}
       </div>
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -1180,7 +1281,7 @@ export default function KnowledgeHubPage() {
           className="h-[40px] w-full max-w-[320px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[13px] outline-none focus:border-[#639922]"
         />
         <div className="flex items-center gap-2">
-          {tab === "Hook" && (
+          {scopeFilter === "hook" && (
             <>
               <span className="text-[12px] text-[#888]">{unanalyzedCount}条待分析</span>
               <button
@@ -1192,24 +1293,28 @@ export default function KnowledgeHubPage() {
               </button>
             </>
           )}
-          <button
-            onClick={() => setShowAdd(true)}
-            disabled={ipLoading}
-            className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#1C1C1B] px-4 text-[12.5px] font-semibold text-white disabled:opacity-50"
-          >
-            <Icon name="plus" size="sm" /> 添加{tab === "IP口播" ? "口播样本" : tab === "Hook" ? "钩子" : "条目"}
-          </button>
-          {tab !== "IP口播" && tab !== "Hook" && (
+          {addAction === "smart-intake" ? (
+            <a
+              href="/knowledge-intake"
+              className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#1C1C1B] px-4 text-[12.5px] font-semibold text-white"
+            >
+              <Icon name="plus" size="sm" /> 新增知识
+            </a>
+          ) : (
+            <button
+              onClick={openSectionAddFlow}
+              disabled={ipLoading}
+              className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#1C1C1B] px-4 text-[12.5px] font-semibold text-white disabled:opacity-50"
+            >
+              <Icon name="plus" size="sm" /> {addAction === "voice-form" ? "添加口播样本" : addAction === "hook-form" ? "添加钩子" : "添加爆款案例"}
+            </button>
+          )}
+          {(scopeFilter === "global" || scopeFilter === "ip") && (
             <button onClick={() => { setShowXlsx(v => !v); setXlsxImportResult(null); }}
               className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#EAF3DE] px-4 text-[12.5px] font-semibold text-[#3B6D11]">
               📊 从 Excel 批量导入
             </button>
           )}
-          <a href="/knowledge-intake"
-            className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] px-4 text-[12.5px] font-bold"
-            style={{ background: "#C8F04A", color: "#1A1A1A" }}>
-            🤖 智能入库
-          </a>
         </div>
       </div>
       {analyzeError && <div className="mb-4 rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{analyzeError}</div>}
@@ -1239,7 +1344,7 @@ export default function KnowledgeHubPage() {
         </div>
       )}
 
-      {tab === "IP口播" ? (
+      {scopeFilter === "voice" ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
           {filteredSamples.length === 0 && (
             <div className="col-span-full rounded-[14px] border border-dashed border-[#E5E4DE] py-12 text-center text-[13px] text-[#999]">还没有口播样本，点击右上角添加。</div>
@@ -1267,7 +1372,7 @@ export default function KnowledgeHubPage() {
             );
           })}
         </div>
-      ) : tab === "Hook" ? (
+      ) : scopeFilter === "hook" ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
           {filteredHooks.length === 0 && (
             <div className="col-span-full rounded-[14px] border border-dashed border-[#E5E4DE] py-12 text-center text-[13px] text-[#999]">还没有钩子，点击右上角添加。</div>
@@ -1298,25 +1403,52 @@ export default function KnowledgeHubPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
-          {filteredEntries.length === 0 && (
-            <div className="col-span-full rounded-[14px] border border-dashed border-[#E5E4DE] py-12 text-center text-[13px] text-[#999]">还没有条目，点击右上角添加。</div>
-          )}
+          {filteredEntries.length === 0 && (() => {
+              const curCat = scopeFilter === "global"
+                ? globalCatFilter
+                : scopeFilter === "ip"
+                  ? ipCatFilter
+                  : "爆款案例";
+              const hintMap: Record<string, string> = {
+                "定位方法库": "你可以添加账号定位、人设定位、受众定位、差异化定位相关方法。",
+                "选题方法库": "你可以添加选题判断、爆款选题、用户痛点、内容角度相关资料。",
+                "标题方法库": "你可以添加标题公式、爆款标题案例、关键词组合相关资料。",
+                "开头方法库": "你可以添加3秒钩子、冲突开头、问题开头、反常识开头相关资料。",
+                "文案框架方法库": "你可以添加口播结构、故事框架、论证框架、脚本结构相关资料。",
+                "IP人设资料": "你可以添加当前 IP 的身份设定、定位和专业背景。",
+                "IP表达语料": "你可以添加当前 IP 的常用语气、句式和口头禅。",
+                "IP历史内容": "你可以添加当前 IP 过去发布过的文案和逐字稿。",
+                "IP高表现内容": "你可以添加当前 IP 数据表现较好的内容。",
+                "IP受众反馈": "你可以添加评论区高赞反馈和用户真实需求。",
+                "IP禁用规则": "你可以添加当前 IP 不应使用的表达和内容边界。",
+              };
+              return (
+                <div className="col-span-full flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-[#E5E4DE] py-12 text-center">
+                  <p className="text-[13px] font-semibold text-[#555]">{curCat}暂无内容</p>
+                  <p className="max-w-[400px] text-[12.5px] leading-5 text-[#999]">{hintMap[curCat] ?? "你可以手动添加或从 Excel 导入相关资料。"}</p>
+                  {scopeFilter === "viral" ? (
+                    <button onClick={openSectionAddFlow} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 添加爆款案例</button>
+                  ) : (
+                    <div className="flex gap-2">
+                      <a href="/knowledge-intake" className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 智能入库</a>
+                      <button onClick={() => setShowXlsx(true)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#555]">从Excel导入</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           {filteredEntries.map(e => {
             const ip = e.ipId ? ipMap.get(e.ipId) : null;
+            const methodMeta = parseMethodMeta(e.note);
             return (
               <Card key={e.id} className="relative flex cursor-pointer flex-col overflow-hidden hover:border-[#639922]">
-                <div className="min-w-0 flex-1" onClick={() => setDetail(e)}>
+                <div className="min-w-0 flex-1" onClick={() => { setDetail(e); setDetailExpanded(false); }}>
                   {/* 标题 + 徽章：flex 布局，左侧标题 flex-1 min-w-0，右侧徽章 flex-shrink-0 */}
                   <div className="mb-2 flex items-start gap-2">
                     <span className="line-clamp-2 min-w-0 flex-1 text-[13px] font-semibold leading-5 text-[#1C1C1B]">{e.title}</span>
-                    <span className="flex-shrink-0">
-                      {e.viralEvaluation
-                        ? <GradeBadge grade={e.viralEvaluation.grade} />
-                        : <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${e.ipId ? "bg-[#DBEAFE] text-[#1D4ED8]" : "bg-[#EAF3DE] text-[#3B6D11]"}`}>
-                            {e.ipId ? "IP语料" : "通用知识"}
-                          </span>
-                      }
-                    </span>
+                    {e.viralEvaluation
+                      ? <GradeBadge grade={e.viralEvaluation.grade} />
+                      : <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${e.ipId ? "bg-[#DBEAFE] text-[#1D4ED8]" : "bg-[#EAF3DE] text-[#3B6D11]"}`}>{getNormalizedCategory(e)}</span>}
                   </div>
                   {/* 状态 + 标签：每个 tag 有 max-w 和 truncate 防止 URL 撑破 */}
                   <div className="mb-2 flex flex-wrap items-center gap-1">
@@ -1328,6 +1460,12 @@ export default function KnowledgeHubPage() {
                   </div>
                   {/* 摘要：最多3行 */}
                   <p className="line-clamp-3 text-[11.5px] leading-5 text-[#999]">{e.rawContent.slice(0, 150)}</p>
+                  {methodMeta && (
+                    <div className="mt-2 rounded-[10px] bg-[#F7FCF0] px-2.5 py-2 text-[11.5px] leading-5 text-[#3B6D11]">
+                      {methodMeta.applicableScenarios?.length ? <p>适用场景：{methodMeta.applicableScenarios.slice(0, 3).join("、")}</p> : null}
+                      {methodMeta.aiUsage ? <p className="line-clamp-2">AI调用：{methodMeta.aiUsage}</p> : null}
+                    </div>
+                  )}
                 </div>
                 {/* 底部：来源左侧截断，删除按钮右侧固定 */}
                 <div className="mt-2 flex min-w-0 items-center justify-between gap-2 border-t border-[#F0EFE9] pt-2">
@@ -1340,30 +1478,48 @@ export default function KnowledgeHubPage() {
         </div>
       )}
 
-      {showAdd && tab === "IP口播" && (
+      {showAdd && scopeFilter === "voice" && (
         <AddVoiceSampleModal ips={ips} onClose={() => setShowAdd(false)} onSaved={refresh} />
       )}
-      {showAdd && tab === "Hook" && (
+      {showAdd && scopeFilter === "hook" && (
         <AddHookModal onClose={() => setShowAdd(false)} onSaved={refresh} />
       )}
-      {showAdd && tab === "爆款案例" && (
+      {showAdd && scopeFilter === "viral" && (
         <AddViralCaseModal ips={ips} onClose={() => setShowAdd(false)} onSaved={refresh} />
       )}
-      {showAdd && (tab === "方法论" || tab === "评论需求" || tab === "选题案例" || tab === "IP语料库" || tab === "复盘经验库") && (
-        <AddEntryModal category={tab as "方法论" | "评论需求" | "选题案例" | "IP语料库" | "复盘经验库"} ips={ips} onClose={() => setShowAdd(false)} onSaved={refresh} />
-      )}
-
       {detail && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-5" onClick={() => setDetail(null)}>
           <div className="card max-h-[85vh] w-full max-w-[640px] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
-            <div className="mb-1 flex items-start justify-between gap-2">
+            {/* 标题 + 知识范围徽章 */}
+            <div className="mb-3 flex items-start justify-between gap-2">
               <span className="text-[16px] font-bold text-[#1C1C1B]">{detail.title}</span>
-              {detail.viralEvaluation ? <GradeBadge grade={detail.viralEvaluation.grade} /> : <TierBadge tier={detail.sourceTier} />}
+              {detail.viralEvaluation
+                ? <GradeBadge grade={detail.viralEvaluation.grade} />
+                : <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${detail.ipId ? "bg-[#DBEAFE] text-[#1D4ED8]" : "bg-[#EAF3DE] text-[#3B6D11]"}`}>
+                    {detail.ipId ? "IP语料" : "通用知识"}
+                  </span>}
             </div>
-            <p className="mb-3 text-[11.5px] text-[#999]">{detail.sourceTierReason}</p>
+
+            {/* 分类 + 来源 + 时间 */}
+            <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-[#888]">
+              <span>分类：{detail.category}</span>
+              {detail.sourcePlatform && <span>来源：{detail.sourcePlatform}</span>}
+              <span>录入时间：{new Date(detail.createdAt).toLocaleDateString()}</span>
+              {detail.sourceUrl && (
+                <a href={detail.sourceUrl} target="_blank" rel="noopener noreferrer"
+                  className="text-[#639922] underline underline-offset-2">来源链接</a>
+              )}
+            </div>
+
+            {/* 标签 */}
+            {detail.tags.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {detail.tags.map((t, i) => <span key={i} className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[11px] text-[#555]">#{t}</span>)}
+              </div>
+            )}
 
             {detail.viralEvaluation && (
-              <div className="mb-3 flex flex-col gap-2 rounded-[12px] bg-[#FBFEF2] border border-[#E4F0C0] p-3.5">
+              <div className="mb-3 flex flex-col gap-2 rounded-[12px] border border-[#E4F0C0] bg-[#FBFEF2] p-3.5">
                 <div className="text-[11px] font-bold text-[#639922]">钩子评分 {detail.viralEvaluation.hookScore.total}/50 · {detail.viralEvaluation.hookType}</div>
                 <p className="text-[12px] leading-5 text-[#444]">{detail.viralEvaluation.whyViral}</p>
                 <p className="text-[11.5px] leading-5 text-[#666]">{detail.viralEvaluation.structureBreakdown}</p>
@@ -1373,13 +1529,79 @@ export default function KnowledgeHubPage() {
               </div>
             )}
 
-            <div className="mb-3 flex flex-wrap gap-1.5">
-              {detail.tags.map((t, i) => <span key={i} className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[11px] text-[#555]">#{t}</span>)}
+            {/* 分类证据区 */}
+            {(() => {
+              try {
+                const ev = detail.note ? JSON.parse(detail.note) : null;
+                if (!ev || !ev.confidence) return null;
+                const confColor = ev.confidence === "高" ? "#3B6D11" : ev.confidence === "中" ? "#92400E" : "#A32D2D";
+                const confBg = ev.confidence === "高" ? "#EAF3DE" : ev.confidence === "中" ? "#FEF3C7" : "#FCEBEB";
+                return (
+                  <div className="mb-3 rounded-[10px] border border-[#E5E4DE] p-3">
+                    <div className="mb-1.5 flex items-center gap-2">
+                      <span className="text-[11.5px] font-bold text-[#555]">分类判断</span>
+                      <span className="rounded-full px-2 py-0.5 text-[10.5px] font-semibold" style={{ background: confBg, color: confColor }}>
+                        {ev.confidence}置信度
+                      </span>
+                      {ev.needsReview && <span className="rounded-full bg-[#FEF3C7] px-2 py-0.5 text-[10.5px] text-[#92400E]">建议人工确认</span>}
+                    </div>
+                    <p className="mb-1 text-[12px] text-[#555]"><span className="text-[#888]">分类依据：</span>{ev.reason}</p>
+                    {ev.matchedRules?.length > 0 && <p className="text-[11.5px] text-[#888]">命中关键词：{ev.matchedRules.join("、")}</p>}
+                    {ev.originalCategory && ev.originalCategory !== ev.normalizedCategory && (
+                      <p className="mt-1 text-[11px] text-[#BBB]">原始分类：{ev.originalCategory} → {ev.normalizedCategory}</p>
+                    )}
+                    {ev.needsReview && (
+                      <div className="mt-2 border-t border-[#F0EFE9] pt-2">
+                        <p className="mb-1.5 text-[11.5px] text-[#888]">手动选择正确分类：</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {getKnowledgeHubCorrectionCategories(detail.ipId).map(cat => (
+                            <button key={cat}
+                              onClick={() => {
+                                const newNote = JSON.stringify({ ...ev, normalizedCategory: cat, confidence: "高", needsReview: false, reason: `人工确认分类为「${cat}」` });
+                                updateKnowledgeEntry(detail.id, { category: cat as KnowledgeCategory, note: newNote, sourceTier: "高", sourceTierReason: `人工确认分类为「${cat}」` });
+                                setDetail(prev => prev ? { ...prev, category: cat as KnowledgeCategory, note: newNote } : null);
+                                refresh();
+                              }}
+                              className="rounded-full border px-3 py-1 text-[11.5px] font-semibold transition-all hover:border-[#639922] hover:bg-[#EAF3DE] hover:text-[#3B6D11]"
+                              style={{ background: "white", color: "#666", borderColor: "#E5E4DE" }}>
+                              {cat}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              } catch { return null; }
+            })()}
+
+            {/* 内容原文 */}
+            <div className="mb-4">
+              <div className="whitespace-pre-wrap rounded-[12px] bg-[#F7F6F2] p-4 text-[13px] leading-6 text-[#333]">
+                {(() => {
+                  const c = cleanRawContent(detail.rawContent);
+                  return detailExpanded || c.length <= 300 ? c : c.slice(0, 300) + "…";
+                })()}
+              </div>
+              {(() => {
+                const methodMeta = parseMethodMeta(detail.note);
+                if (!methodMeta) return null;
+                return (
+                  <div className="mt-3 rounded-[12px] bg-[#F7FCF0] px-4 py-3 text-[12.5px] leading-6 text-[#3B6D11]">
+                    {methodMeta.coreMethod && <p><span className="font-bold">核心方法：</span>{methodMeta.coreMethod}</p>}
+                    {methodMeta.applicableScenarios?.length ? <p><span className="font-bold">适用场景：</span>{methodMeta.applicableScenarios.join("、")}</p> : null}
+                    {methodMeta.triggerKeywords?.length ? <p><span className="font-bold">触发关键词：</span>{methodMeta.triggerKeywords.join("、")}</p> : null}
+                    {methodMeta.aiUsage && <p><span className="font-bold">AI调用方式：</span>{methodMeta.aiUsage}</p>}
+                    {methodMeta.unsuitableCases?.length ? <p><span className="font-bold">不适用：</span>{methodMeta.unsuitableCases.join("、")}</p> : null}
+                  </div>
+                );
+              })()}
+              {cleanRawContent(detail.rawContent).length > 300 && (
+                <button onClick={() => setDetailExpanded(v => !v)} className="mt-1.5 text-[12px] text-[#639922] hover:underline">
+                  {detailExpanded ? "▲ 收起" : "▼ 展开全文"}
+                </button>
+              )}
             </div>
-            <div className="mb-3 whitespace-pre-wrap rounded-[12px] bg-[#F7F6F2] p-4 text-[13px] leading-6 text-[#333]">{detail.rawContent}</div>
-            <div className="text-[11.5px] text-[#888]">关键词：{detail.keywords.join("、") || "无"}</div>
-            <div className="text-[11.5px] text-[#888]">内容方向：{detail.contentDirection.join("、") || "无"}</div>
-            {detail.sourceUrl && <div className="text-[11.5px] text-[#888]">来源链接：{detail.sourceUrl}</div>}
 
             <div className="mt-4 border-t border-[#F0EFE9] pt-3.5">
               <div className="mb-2 flex items-center gap-2">
