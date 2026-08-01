@@ -1205,6 +1205,11 @@ export default function KnowledgeHubPage() {
               📊 从 Excel 批量导入
             </button>
           )}
+          <a href="/knowledge-intake"
+            className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] px-4 text-[12.5px] font-bold"
+            style={{ background: "#C8F04A", color: "#1A1A1A" }}>
+            🤖 智能入库
+          </a>
         </div>
       </div>
       {analyzeError && <div className="mb-4 rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{analyzeError}</div>}
