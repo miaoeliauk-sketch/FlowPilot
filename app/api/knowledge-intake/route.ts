@@ -28,8 +28,25 @@ interface IntakeResponse {
   items: Record<string, unknown>[];
 }
 
+interface IntakeDiagnosticDetails {
+  itemCount?: number;
+  itemIndex?: number;
+  fieldCount?: number;
+}
+
 const CONFIDENCE_LEVELS = ["高", "中", "低"] as const;
 const INGEST_RECOMMENDATIONS = ["建议入库", "待确认", "不建议入库"] as const;
+
+function intakeValidationError(
+  diagnosticCode: string,
+  message: string,
+  diagnosticDetails: IntakeDiagnosticDetails = {},
+): Error {
+  return Object.assign(new Error(message), {
+    diagnosticCode,
+    diagnosticDetails,
+  });
+}
 
 const SYSTEM = `你是一个短视频内容知识库的入库助手。
 用户会粘贴一段原始资料（可能是逐字稿、文案、方法论笔记、评论等）。
@@ -101,42 +118,88 @@ ${content.slice(0, 4000)}
 }`;
 
 function parseInitialResponse(content: string): IntakeResponse {
-  const parsed = JSON.parse(content) as { items?: unknown };
-  if (!Array.isArray(parsed.items)) {
-    throw new Error("AI返回缺少items数组");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    throw intakeValidationError("INVALID_JSON", "AI返回不是完整JSON");
   }
-  if (parsed.items.length > 8) {
-    throw new Error("AI返回的知识条目超过8条");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw intakeValidationError("INVALID_ROOT", "AI返回的顶层结构不是对象");
   }
-  for (const item of parsed.items) {
+  const parsedRecord = parsed as { items?: unknown };
+  if (!Array.isArray(parsedRecord.items)) {
+    throw intakeValidationError("ITEMS_MISSING", "AI返回缺少items数组", {
+      fieldCount: Object.keys(parsedRecord).length,
+    });
+  }
+  if (parsedRecord.items.length > 8) {
+    throw intakeValidationError("ITEM_COUNT_EXCEEDED", "AI返回的知识条目超过8条", {
+      itemCount: parsedRecord.items.length,
+      fieldCount: Object.keys(parsedRecord).length,
+    });
+  }
+  for (const [itemIndex, item] of parsedRecord.items.entries()) {
     if (!item || typeof item !== "object") {
-      throw new Error("AI返回包含非法知识条目");
+      throw intakeValidationError("INVALID_ITEM", "AI返回包含非法知识条目", {
+        itemCount: parsedRecord.items.length,
+        itemIndex,
+      });
     }
     const record = item as Record<string, unknown>;
+    const diagnosticDetails = {
+      itemCount: parsedRecord.items.length,
+      itemIndex,
+      fieldCount: Object.keys(record).length,
+    };
     if (typeof record.title !== "string" || !record.title.trim()) {
-      throw new Error("AI返回的知识条目缺少标题");
+      throw intakeValidationError(
+        "TITLE_MISSING",
+        "AI返回的知识条目缺少标题",
+        diagnosticDetails,
+      );
     }
     if (record.title.trim().length > 20) {
-      throw new Error("AI返回的知识条目标题过长");
+      throw intakeValidationError(
+        "TITLE_TOO_LONG",
+        "AI返回的知识条目标题过长",
+        diagnosticDetails,
+      );
     }
     if (typeof record.summary !== "string" || !record.summary.trim()) {
-      throw new Error("AI返回的知识条目缺少摘要");
+      throw intakeValidationError(
+        "SUMMARY_MISSING",
+        "AI返回的知识条目缺少摘要",
+        diagnosticDetails,
+      );
     }
     if (
       typeof record.category !== "string" ||
       !ALL_NEW_CATS.includes(record.category as never)
     ) {
-      throw new Error("AI返回的知识条目分类无效");
+      throw intakeValidationError(
+        "INVALID_CATEGORY",
+        "AI返回的知识条目分类无效",
+        diagnosticDetails,
+      );
     }
     if (!CONFIDENCE_LEVELS.includes(record.confidence as never)) {
-      throw new Error("AI返回的知识条目置信度无效");
+      throw intakeValidationError(
+        "INVALID_CONFIDENCE",
+        "AI返回的知识条目置信度无效",
+        diagnosticDetails,
+      );
     }
     if (!INGEST_RECOMMENDATIONS.includes(record.ingestRecommend as never)) {
-      throw new Error("AI返回的知识条目入库建议无效");
+      throw intakeValidationError(
+        "INVALID_RECOMMENDATION",
+        "AI返回的知识条目入库建议无效",
+        diagnosticDetails,
+      );
     }
   }
   return {
-    items: parsed.items as Record<string, unknown>[],
+    items: parsedRecord.items as Record<string, unknown>[],
   };
 }
 
@@ -261,6 +324,7 @@ export async function POST(req: NextRequest) {
     : null;
 
   const calledAt = new Date().toISOString();
+  const diagnosticId = crypto.randomUUID();
   const baseApiMeta = {
     apiCalled: true,
     calledAt,
@@ -307,12 +371,28 @@ export async function POST(req: NextRequest) {
         : error instanceof Error
           ? error.message
           : "提取失败，请重试";
+    const lastAttemptDiagnostic = structuredError?.attemptDiagnostics.at(-1);
+    const failureCode = lastAttemptDiagnostic?.failureCode ??
+      (structuredError?.stage === "timeout" ? "TIMEOUT" : "REQUEST_FAILED");
+    console.warn("[knowledge-intake]", JSON.stringify({
+      diagnosticId,
+      calledAt,
+      sourceType: body.sourceType === "excel" ? "excel" : "text",
+      inputChars: content.length,
+      availableIPCount: availableIPs.length,
+      activeIPSelected: activeIPId !== null,
+      maxTokens: 2000,
+      failureCode,
+      attempts: structuredError?.attemptDiagnostics ?? [],
+    }));
     return NextResponse.json(
       {
         error: message,
         apiMeta: {
           ...baseApiMeta,
           attempts: structuredError?.attempts ?? 1,
+          diagnosticId,
+          failureCode,
           error: message,
         },
       },

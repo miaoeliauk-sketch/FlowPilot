@@ -18,19 +18,39 @@ export interface StructuredDeepSeekResult<T> {
   data: T;
   attempts: number;
   responseMeta: DeepSeekResponseMeta;
+  attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[];
 }
 
 export type StructuredDeepSeekErrorStage = "timeout" | "request" | "parse";
+
+export interface StructuredDeepSeekAttemptDiagnostic {
+  attempt: number;
+  stage: StructuredDeepSeekErrorStage | "success";
+  failureCode?: string;
+  responseChars: number | null;
+  finishReason: string | null;
+  completionTokens: number | null;
+  itemCount?: number;
+  itemIndex?: number;
+  fieldCount?: number;
+}
+
+interface StructuredParseDiagnosticSource {
+  diagnosticCode?: unknown;
+  diagnosticDetails?: unknown;
+}
 
 export class StructuredDeepSeekError extends Error {
   readonly stage: StructuredDeepSeekErrorStage;
   readonly attempts: number;
   readonly cause: unknown;
+  readonly attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[];
 
   constructor(
     stage: StructuredDeepSeekErrorStage,
     attempts: number,
     cause: unknown,
+    attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[] = [],
   ) {
     const message = cause instanceof Error ? cause.message : "结构化AI调用失败";
     super(message);
@@ -38,6 +58,7 @@ export class StructuredDeepSeekError extends Error {
     this.stage = stage;
     this.attempts = attempts;
     this.cause = cause;
+    this.attemptDiagnostics = attemptDiagnostics;
   }
 }
 
@@ -55,6 +76,41 @@ const EMPTY_RESPONSE_META: DeepSeekResponseMeta = {
   completionTokens: null,
 };
 
+function safeFailureCode(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
+    ? value
+    : fallback;
+}
+
+function safeDiagnosticNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function parseFailureDiagnostic(
+  error: unknown,
+): Pick<StructuredDeepSeekAttemptDiagnostic,
+  "failureCode" | "itemCount" | "itemIndex" | "fieldCount"> {
+  const source = error && typeof error === "object"
+    ? error as StructuredParseDiagnosticSource
+    : {};
+  const details = source.diagnosticDetails && typeof source.diagnosticDetails === "object"
+    ? source.diagnosticDetails as Record<string, unknown>
+    : {};
+  const diagnostic: Pick<StructuredDeepSeekAttemptDiagnostic,
+    "failureCode" | "itemCount" | "itemIndex" | "fieldCount"> = {
+    failureCode: safeFailureCode(source.diagnosticCode, "PARSE_FAILED"),
+  };
+  const itemCount = safeDiagnosticNumber(details.itemCount);
+  const itemIndex = safeDiagnosticNumber(details.itemIndex);
+  const fieldCount = safeDiagnosticNumber(details.fieldCount);
+  if (itemCount !== undefined) diagnostic.itemCount = itemCount;
+  if (itemIndex !== undefined) diagnostic.itemIndex = itemIndex;
+  if (fieldCount !== undefined) diagnostic.fieldCount = fieldCount;
+  return diagnostic;
+}
+
 export async function callStructuredDeepSeek<T>(
   options: StructuredDeepSeekOptions<T>,
 ): Promise<StructuredDeepSeekResult<T>> {
@@ -63,6 +119,7 @@ export async function callStructuredDeepSeek<T>(
   const totalAttempts = (options.maxRetries ?? 1) + 1;
   let lastError: unknown;
   let lastStage: StructuredDeepSeekErrorStage = "request";
+  const attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[] = [];
 
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
     let responseMeta = EMPTY_RESPONSE_META;
@@ -98,12 +155,33 @@ export async function callStructuredDeepSeek<T>(
         error instanceof Error &&
         error.message.includes("未配置 DeepSeek API Key")
       ) {
-        throw new StructuredDeepSeekError("request", attempt, error);
+        attemptDiagnostics.push({
+          attempt,
+          stage: "request",
+          failureCode: "MISSING_API_KEY",
+          responseChars: null,
+          finishReason: null,
+          completionTokens: null,
+        });
+        throw new StructuredDeepSeekError(
+          "request",
+          attempt,
+          error,
+          attemptDiagnostics,
+        );
       }
       lastError = error;
       lastStage = error instanceof StructuredDeepSeekTimeoutError
         ? "timeout"
         : "request";
+      attemptDiagnostics.push({
+        attempt,
+        stage: lastStage,
+        failureCode: lastStage === "timeout" ? "TIMEOUT" : "REQUEST_FAILED",
+        responseChars: null,
+        finishReason: null,
+        completionTokens: null,
+      });
       continue;
     } finally {
       if (timer) clearTimeout(timer);
@@ -114,12 +192,35 @@ export async function callStructuredDeepSeek<T>(
         data: options.parse(content),
         attempts: attempt,
         responseMeta,
+        attemptDiagnostics: [
+          ...attemptDiagnostics,
+          {
+            attempt,
+            stage: "success",
+            responseChars: content.length,
+            finishReason: responseMeta.finishReason,
+            completionTokens: responseMeta.completionTokens,
+          },
+        ],
       };
     } catch (error) {
       lastError = error;
       lastStage = "parse";
+      attemptDiagnostics.push({
+        attempt,
+        stage: "parse",
+        responseChars: content.length,
+        finishReason: responseMeta.finishReason,
+        completionTokens: responseMeta.completionTokens,
+        ...parseFailureDiagnostic(error),
+      });
     }
   }
 
-  throw new StructuredDeepSeekError(lastStage, totalAttempts, lastError);
+  throw new StructuredDeepSeekError(
+    lastStage,
+    totalAttempts,
+    lastError,
+    attemptDiagnostics,
+  );
 }

@@ -137,6 +137,82 @@ test("reports parse stage after all structured responses are invalid", async () 
   }
 });
 
+test("records safe metadata for every failed structured response", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    const content = calls === 1 ? '{"items":[' : '{"items":[]}';
+    return new Response(JSON.stringify({
+      id: `request-${calls}`,
+      choices: [{
+        finish_reason: calls === 1 ? "length" : "stop",
+        message: { content },
+      }],
+      usage: {
+        prompt_tokens: 80,
+        completion_tokens: calls === 1 ? 100 : 20,
+      },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    await assert.rejects(
+      () => callStructuredDeepSeek({
+        systemPrompt: "system",
+        userPrompt: "private article content",
+        apiKey: "test-key",
+        maxTokens: 100,
+        timeoutMs: 100,
+        maxRetries: 1,
+        parse: (content) => {
+          if (content === '{"items":[') {
+            throw Object.assign(new Error("truncated"), {
+              diagnosticCode: "INVALID_JSON",
+              diagnosticDetails: { fieldCount: 0 },
+            });
+          }
+          throw Object.assign(new Error("empty items"), {
+            diagnosticCode: "ITEMS_EMPTY",
+            diagnosticDetails: { itemCount: 0, fieldCount: 1 },
+          });
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredDeepSeekError);
+        assert.deepEqual(error.attemptDiagnostics, [
+          {
+            attempt: 1,
+            stage: "parse",
+            failureCode: "INVALID_JSON",
+            responseChars: 10,
+            finishReason: "length",
+            completionTokens: 100,
+            fieldCount: 0,
+          },
+          {
+            attempt: 2,
+            stage: "parse",
+            failureCode: "ITEMS_EMPTY",
+            responseChars: 12,
+            finishReason: "stop",
+            completionTokens: 20,
+            itemCount: 0,
+            fieldCount: 1,
+          },
+        ]);
+        assert.doesNotMatch(JSON.stringify(error.attemptDiagnostics), /private article content/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("aborts timed out attempts before retrying", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;

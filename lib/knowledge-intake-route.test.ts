@@ -273,6 +273,118 @@ test("连续两次非法结构后返回可读错误且不保存半成品", async
   }
 });
 
+test("格式失败只记录安全诊断元信息，不记录正文和IP内容", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warningArgs: unknown[][] = [];
+  const privateContent = "这是一段不能进入日志的私密文章正文";
+  const privateIPName = "不能进入日志的IP名称";
+  const privateIPId = "private-ip-id";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    id: "knowledge-intake-truncated",
+    choices: [{
+      finish_reason: "length",
+      message: { content: '{"items":[' },
+    }],
+    usage: {
+      prompt_tokens: 80,
+      completion_tokens: 2000,
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  console.warn = (...args: unknown[]) => {
+    warningArgs.push(args);
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: privateContent,
+      sourceType: "text",
+      activeIPId: privateIPId,
+      availableIPs: [{ id: privateIPId, name: privateIPName }],
+    }));
+    const body = await response.json();
+    const warningPayload = JSON.parse(String(warningArgs[0]?.[1])) as {
+      inputChars: number;
+      failureCode: string;
+      attempts: Array<{
+        finishReason: string | null;
+        failureCode?: string;
+      }>;
+    };
+    const serializedWarnings = JSON.stringify(warningArgs);
+
+    assert.equal(response.status, 500);
+    assert.equal(body.apiMeta.attempts, 2);
+    assert.equal(body.apiMeta.failureCode, "INVALID_JSON");
+    assert.match(body.apiMeta.diagnosticId, /^[0-9a-f-]{36}$/);
+    assert.equal(warningArgs.length, 1);
+    assert.match(serializedWarnings, /knowledge-intake/);
+    assert.equal(warningPayload.failureCode, "INVALID_JSON");
+    assert.equal(warningPayload.inputChars, privateContent.length);
+    assert.equal(warningPayload.attempts.length, 2);
+    assert.deepEqual(
+      warningPayload.attempts.map((attempt) => ({
+        finishReason: attempt.finishReason,
+        failureCode: attempt.failureCode,
+      })),
+      [
+        { finishReason: "length", failureCode: "INVALID_JSON" },
+        { finishReason: "length", failureCode: "INVALID_JSON" },
+      ],
+    );
+    assert.doesNotMatch(serializedWarnings, new RegExp(privateContent));
+    assert.doesNotMatch(serializedWarnings, new RegExp(privateIPName));
+    assert.doesNotMatch(serializedWarnings, new RegExp(privateIPId));
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test("顶层不是对象时返回INVALID_ROOT且不记录条目位置", async () => {
+  const invalidRoots = ["null", "[]", '"plain text"'];
+
+  for (const invalidRoot of invalidRoots) {
+    const originalFetch = globalThis.fetch;
+    const originalWarn = console.warn;
+    const warningArgs: unknown[][] = [];
+    globalThis.fetch = async () => deepSeekResponse(invalidRoot);
+    console.warn = (...args: unknown[]) => {
+      warningArgs.push(args);
+    };
+
+    try {
+      const response = await POST(intakeRequest({
+        rawContent: "用于验证顶层结构的短文字",
+        sourceType: "text",
+        availableIPs: [],
+      }));
+      const body = await response.json();
+      const warningPayload = JSON.parse(String(warningArgs[0]?.[1])) as {
+        failureCode: string;
+        attempts: Array<Record<string, unknown>>;
+      };
+
+      assert.equal(response.status, 500);
+      assert.equal(body.apiMeta.failureCode, "INVALID_ROOT");
+      assert.equal(warningPayload.failureCode, "INVALID_ROOT");
+      assert.equal(warningPayload.attempts.length, 2);
+      for (const attempt of warningPayload.attempts) {
+        assert.equal(attempt.failureCode, "INVALID_ROOT");
+        assert.equal("itemCount" in attempt, false);
+        assert.equal("itemIndex" in attempt, false);
+        assert.equal("fieldCount" in attempt, false);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.warn = originalWarn;
+    }
+  }
+});
+
 test("Excel序列化内容通过真实路由进入AI提示词", async () => {
   const originalFetch = globalThis.fetch;
   let outboundBody = "";
