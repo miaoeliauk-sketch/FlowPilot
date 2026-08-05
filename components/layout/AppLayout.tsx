@@ -7,6 +7,7 @@ import { getIPDisplayLabel } from "@/lib/ip-display";
 import { getUserProfile, setUserProfile, getOperatorDisplayName } from "@/lib/ip-store";
 import { UserProfile } from "@/lib/types";
 import { Icon, IconName } from "@/components/ui/icon";
+import { TopicCalibrationSeeder } from "@/components/TopicCalibrationSeeder";
 
 const MAIN_NAV: { label: string; href: string; icon: IconName }[] = [
   { label: "工作台", href: "/", icon: "grid" },
@@ -172,6 +173,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen" style={{ background: "#F2F1ED" }}>
+      <TopicCalibrationSeeder />
       <aside className="flex w-[220px] flex-shrink-0 flex-col p-3 sticky top-0 h-screen gap-1 overflow-y-auto">
         <div className="card mb-3 p-3.5 flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-[10px] text-[13px] font-black" style={{ background: "#C8F04A", color: "#1A1A1A" }}>FP</div>
