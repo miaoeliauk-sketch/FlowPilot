@@ -176,12 +176,26 @@ test("用户从页面选中水木然之后，董事会请求携带完整的水�
     assert.ok(currentIPButton);
     assert.match(currentIPButton.textContent ?? "", /设计师石空/);
 
+    const topicInput = screen.getByRole("textbox") as HTMLTextAreaElement;
+    assert.equal(topicInput.value, "普通人如何判断一个机会是否真的适合自己？");
+    assert.ok(screen.getByRole("button", { name: "为什么同样的方法，有人有效，有人却没效果？" }));
+    assert.ok(screen.getByRole("button", { name: "一个专业服务最容易被用户误解的地方是什么？" }));
+    assert.ok(screen.getByRole("button", { name: "新手开始一件事时，最应该避开的误区是什么？" }));
+    assert.match(
+      (await screen.findByText(/评估背景：当前操盘IP为设计师石空/)).textContent ?? "",
+      /将结合其受众、内容方向和表达风格进行判断/,
+    );
+
     await user.click(currentIPButton);
     await user.click(screen.getByRole("button", { name: /水木然/ }));
     assert.match(currentIPButton.textContent ?? "", /水木然/);
+    assert.match(
+      (await screen.findByText(/评估背景：当前操盘IP为水木然/)).textContent ?? "",
+      /将结合其受众、内容方向和表达风格进行判断/,
+    );
+    assert.equal(screen.queryByText(/演示背景：当前IP为设计师石空/), null);
 
     const topic = "普通人如何判断行业趋势";
-    const topicInput = screen.getByRole("textbox");
     await user.clear(topicInput);
     await user.type(topicInput, topic);
     const requestBody = await act(async () => {

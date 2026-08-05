@@ -64,7 +64,12 @@ const VOTE_STYLES: Record<string, string> = {
   "反对": "bg-[#FCEBEB] text-[#A32D2D]",
 };
 
-const EXAMPLES = ["AI小白如何用ChatGPT做副业","普通人怎么用Codex做工具","抖音视频拆解到底在拆什么","AI剪辑能不能取代人工剪辑师"];
+const DEMO_TOPIC = "普通人如何判断一个机会是否真的适合自己？";
+const EXAMPLES = [
+  "为什么同样的方法，有人有效，有人却没效果？",
+  "一个专业服务最容易被用户误解的地方是什么？",
+  "新手开始一件事时，最应该避开的误区是什么？",
+];
 
 function levelColor(s: number) {
   return s >= 90 ? "#3DA876" : s >= 80 ? "#639922" : s >= 70 ? "#C99A1E" : "#E0608E";
@@ -163,7 +168,7 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
 // ── Main ──
 export default function TopicBoardPage() {
   const { activeIP } = useIP();
-  const [topic, setTopic] = useState("AI小白如何用ChatGPT做副业");
+  const [topic, setTopic] = useState(DEMO_TOPIC);
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -273,7 +278,7 @@ export default function TopicBoardPage() {
         <label className="mb-2.5 block text-[13px] font-semibold text-[#8A8A86]">输入你的选题</label>
         <div className="flex flex-col gap-3 md:flex-row">
           <textarea value={topic} onChange={e => setTopic(e.target.value)}
-            placeholder="例如：AI小白如何用ChatGPT做副业"
+            placeholder={`例如：${DEMO_TOPIC}`}
             className="min-h-[52px] flex-1 resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"/>
           <button onClick={handleSubmit} disabled={loading}
             className="flex h-[52px] items-center justify-center gap-2 whitespace-nowrap rounded-[14px] bg-[#1C1C1B] px-8 text-[14px] font-semibold text-white disabled:opacity-60">
@@ -281,6 +286,11 @@ export default function TopicBoardPage() {
             {loading ? "评审中…" : "召开董事会"}
           </button>
         </div>
+        <p className="mt-3 rounded-[10px] bg-[#F7FCF0] px-3 py-2 text-[12px] leading-5 text-[#4F6F32]">
+          {activeIP
+            ? `评估背景：当前操盘IP为${activeIP.name}，将结合其受众、内容方向和表达风格进行判断。`
+            : "评估背景：请先在左侧选择当前操盘IP，系统将结合对应档案进行判断。"}
+        </p>
         <div className="mt-3 flex flex-wrap gap-2">
           {EXAMPLES.map(ex => (
             <button key={ex} onClick={() => setTopic(ex)}
