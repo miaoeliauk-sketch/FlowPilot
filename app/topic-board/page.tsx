@@ -6,6 +6,7 @@ import { getKnowledgeEntries, recordKnowledgeUsage, getLatestPersonas } from "@/
 import { KnowledgeEntry } from "@/lib/types";
 import { CitationSummary } from "@/components/ui/citation-summary";
 import { useIP } from "@/lib/ip-context";
+import { buildTopicReviewRequestPayload } from "@/lib/topic-review-request";
 
 // ── Types ──
 interface Dim { label: string; score: number; max: number; }
@@ -238,7 +239,7 @@ export default function TopicBoardPage() {
       const personas = activeIP ? getLatestPersonas(activeIP.id) : [];
       const res = await apiFetch("/api/topic-review", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, userPersonas: personas }),
+        body: JSON.stringify(buildTopicReviewRequestPayload({ topic, userPersonas: personas }, activeIP)),
       });
       let data: BoardResult | { error: string } | null = null;
       try { data = await res.json(); } catch { throw new Error(`接口返回非JSON（${res.status}）`); }
