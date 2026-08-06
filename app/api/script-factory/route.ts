@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
+import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import {
   callDeepSeek,
   DeepSeekResponseMeta,
@@ -103,71 +104,6 @@ interface RequestBody {
   knowledgeRefs?: { id: string; title: string; category: string; rawContent: string; reason: string }[];
   // IP语料库：前端传入，服务端注入 prompt
   voiceSamples?: { id: string; title: string; rawText: string; type: string }[];
-}
-
-const STYLE_PROFILE_ARRAY_FIELDS = [
-  "openingHabits",
-  "emotionalTone",
-  "commonPhrases",
-  "closingHabits",
-  "forbiddenExpressions",
-  "sourceSampleIds",
-  "sourceSampleTitles",
-] as const;
-
-const STYLE_PROFILE_STRING_FIELDS = [
-  "ipId",
-  "viewpointStyle",
-  "styleSummary",
-  "extractedAt",
-  "model",
-] as const;
-
-const STYLE_PROFILE_SENTENCE_LENGTHS: IPStyleProfile["sentenceLength"][] = [
-  "短句为主",
-  "中句为主",
-  "长句为主",
-  "长短句结合",
-];
-
-interface StyleProfileValidationError {
-  field: string;
-  message: string;
-}
-
-function validateStyleProfile(value: unknown): StyleProfileValidationError | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { field: "styleProfile", message: "styleProfile必须是对象" };
-  }
-
-  const profile = value as Record<string, unknown>;
-  for (const field of STYLE_PROFILE_ARRAY_FIELDS) {
-    const fieldValue = profile[field];
-    if (
-      !Array.isArray(fieldValue) ||
-      !fieldValue.every(item => typeof item === "string")
-    ) {
-      return { field, message: `${field}必须是字符串数组` };
-    }
-  }
-
-  for (const field of STYLE_PROFILE_STRING_FIELDS) {
-    if (typeof profile[field] !== "string" || !profile[field].trim()) {
-      return { field, message: `${field}必须是非空字符串` };
-    }
-  }
-
-  if (
-    !STYLE_PROFILE_SENTENCE_LENGTHS.includes(
-      profile.sentenceLength as IPStyleProfile["sentenceLength"],
-    )
-  ) {
-    return {
-      field: "sentenceLength",
-      message: "sentenceLength不是支持的句子长度类型",
-    };
-  }
-  return null;
 }
 
 // ── 内容形式配置：每种形式对应完全不同的内容架构指令，不是简单改字数 ──
@@ -343,16 +279,12 @@ export async function POST(req: NextRequest) {
   if (!topic) return NextResponse.json({ error: "请输入视频选题", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
 
   const ip = body.ipProfile ?? FALLBACK_IP;
-  const styleProfileValue: unknown = body.styleProfile;
-  const hasStyleProfile = styleProfileValue !== null && styleProfileValue !== undefined;
-  const styleProfileError = hasStyleProfile
-    ? validateStyleProfile(styleProfileValue)
-    : null;
-  if (styleProfileError) {
+  const styleProfileResult = parseIPStyleProfileForIP(body.styleProfile, ip.id);
+  if (!styleProfileResult.ok) {
     return NextResponse.json({
-      error: `风格画像字段不合法：${styleProfileError.message}`,
-      errorCode: "invalid_style_profile",
-      errorField: styleProfileError.field,
+      error: styleProfileResult.error,
+      errorCode: styleProfileResult.errorCode,
+      errorField: styleProfileResult.errorField,
       apiMeta: {
         apiCalled: false,
         calledAt: new Date().toISOString(),
@@ -362,22 +294,7 @@ export async function POST(req: NextRequest) {
       },
     }, { status: 400 });
   }
-  const styleProfile = hasStyleProfile
-    ? styleProfileValue as IPStyleProfile
-    : null;
-  if (styleProfile && styleProfile.ipId !== ip.id) {
-    return NextResponse.json({
-      error: "风格画像与当前IP不匹配，请重新选择当前操盘IP",
-      errorCode: "style_profile_ip_mismatch",
-      apiMeta: {
-        apiCalled: false,
-        calledAt: new Date().toISOString(),
-        model: MODEL,
-        ipUsed: ip.name,
-        mockHit: false,
-      },
-    }, { status: 400 });
-  }
+  const styleProfile = styleProfileResult.styleProfile;
   const platform = body.platform || (ip.platforms[0] ?? "抖音");
   const formatId = body.formatCategory || "short";
   const format = getFormatConfig(formatId);

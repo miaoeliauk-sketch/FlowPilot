@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { IPProfile } from "@/lib/types";
+import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
+import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import { callDeepSeek, parseDeepSeekJSON as parseJSON, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
 
 /**
@@ -34,7 +35,18 @@ interface RequestBody {
   industry?: string;
   platform?: string;
   ipProfile?: IPProfile;
-  styleProfile?: { expressionStyle?: string; highFrequencyWords?: string[]; forbiddenWords?: string[]; catchphrases?: string[] } | null;
+  styleProfile?: IPStyleProfile | null;
+}
+
+function firstNonEmptyString(
+  values: Array<string | null | undefined>,
+  fallback: string,
+): string {
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized) return normalized;
+  }
+  return fallback;
 }
 
 // ── 工作流系统提示词 ──
@@ -63,7 +75,6 @@ const PROMPT = (
   industry: string,
   platform: string,
   ipBlock: string,
-  styleHints: string,
 ) => `${ipBlock}
 
 ---
@@ -73,7 +84,6 @@ const PROMPT = (
 内容目标：${goal}（traffic=流量/转粉 | conversion=变现/转化 | persona=人设/建立信任）
 行业/赛道：${industry}
 目标平台：${platform}
-${styleHints}
 
 请按以下 5 步生成完整内容包，严格按 JSON 格式输出：
 
@@ -140,26 +150,40 @@ export async function POST(req: NextRequest) {
   if (!topic) return NextResponse.json({ error: "请输入选题或关键词" }, { status: 400 });
 
   const ip = body.ipProfile ?? FALLBACK_IP as IPProfile;
-  const ipBlock = buildIPContextBlock(ip);
+  const styleProfileResult = parseIPStyleProfileForIP(body.styleProfile, ip.id);
+  if (!styleProfileResult.ok) {
+    return NextResponse.json({
+      error: styleProfileResult.error,
+      errorCode: styleProfileResult.errorCode,
+      errorField: styleProfileResult.errorField,
+      apiMeta: {
+        apiCalled: false,
+        calledAt: new Date().toISOString(),
+        model: MODEL,
+        ipUsed: ip.name,
+        mockHit: false,
+      },
+    }, { status: 400 });
+  }
+  const styleProfile = styleProfileResult.styleProfile;
+  const ipBlock = buildIPContextBlock(ip, styleProfile);
 
   // 受众优先级：请求体显式传入 > IP配置里的受众 > 待定义
-  const audience = (body.targetAudience ?? ip.audience ?? "").trim() || "待AI根据话题定义";
+  const audience = firstNonEmptyString(
+    [body.targetAudience, ip.audience],
+    "待AI根据话题定义",
+  );
   const goal = body.contentGoal ?? "traffic";
-  const industry = (body.industry ?? ip.contentDirection?.[0] ?? "AI工具").trim();
+  const industry = firstNonEmptyString(
+    [body.industry, ip.contentDirection?.[0]],
+    "待补充行业/赛道",
+  );
   const platform = body.platform ?? ip.platforms?.[0] ?? "抖音";
-
-  // 风格提示（来自PersonaSkill或IPStyleProfile）
-  const sp = body.styleProfile;
-  const styleHints = sp ? `\nIP风格提示：
-- 表达风格：${sp.expressionStyle ?? ""}
-- 高频用词：${sp.highFrequencyWords?.join("、") ?? ""}
-- 禁用表达：${sp.forbiddenWords?.join("、") ?? ""}
-- 口头禅：${sp.catchphrases?.join("、") ?? ""}` : "";
 
   const calledAt = new Date().toISOString();
 
   try {
-    const raw = await callDeepSeek(SYSTEM, PROMPT(topic, audience, goal, industry, platform, ipBlock, styleHints), 4000, 0.3, apiKey);
+    const raw = await callDeepSeek(SYSTEM, PROMPT(topic, audience, goal, industry, platform, ipBlock), 4000, 0.3, apiKey);
     const parsed = parseJSON(raw, null as Record<string, unknown> | null);
 
     if (!parsed) {
