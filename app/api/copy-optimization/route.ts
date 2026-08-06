@@ -12,6 +12,17 @@ import {
 } from "@/lib/copy-optimization-response";
 
 const DEVIATION_THRESHOLD = 30;
+const MAX_SOURCE_TEXT_CHARACTERS = 120_000;
+const MIN_REWRITE_OUTPUT_TOKENS = 8_000;
+const MAX_INITIAL_REWRITE_OUTPUT_TOKENS = 192_000;
+const MAX_RETRY_REWRITE_OUTPUT_TOKENS = 384_000;
+
+function rewriteOutputTokenBudget(sourceText: string): number {
+  return Math.min(
+    MAX_INITIAL_REWRITE_OUTPUT_TOKENS,
+    Math.max(MIN_REWRITE_OUTPUT_TOKENS, 4_000 + sourceText.length * 2),
+  );
+}
 
 const FALLBACK_IP: IPProfile = {
   id: "unknown", name: "未指定IP", avatar: "?", positioning: "未填写", platforms: [],
@@ -158,6 +169,9 @@ export async function POST(req: NextRequest) {
   if (!sourceText) {
     return NextResponse.json({ error: "请输入要改写的逐字稿/文案/爆款内容", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
   }
+  if (sourceText.length > MAX_SOURCE_TEXT_CHARACTERS) {
+    return NextResponse.json({ error: "原文过长，单次最多支持12万字，请分段后再试", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
+  }
 
   if (!body.breakdown?.coreElements) {
     return NextResponse.json({ error: "缺少拆解阶段的锁定核心要素，请先完成拆解步骤", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
@@ -181,27 +195,59 @@ export async function POST(req: NextRequest) {
   const isDevelopment = process.env.NODE_ENV !== "production";
   const apiMeta = { apiCalled: true, calledAt, model: MODEL, ipUsed: ip.name, mockHit: false };
   let responseMeta: DeepSeekResponseMeta | null = null;
+  let attempts = 0;
 
   try {
-    const raw = await callDeepSeek(
-      REWRITE_SYSTEM,
-      REWRITE_PROMPT(ipBlock, sourceText, mode, goal, goalInstruction, lockedElements, constraintsText),
-      6000,
-      0.3,
-      apiKey,
-      {
-        thinking: { type: "disabled" },
-        responseFormat: { type: "json_object" },
-        onResponseMeta: (meta) => { responseMeta = meta; },
-      },
-    );
-    if ((responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length") {
+    const initialTokenBudget = rewriteOutputTokenBudget(sourceText);
+    const tokenBudgets = [
+      initialTokenBudget,
+      Math.min(initialTokenBudget * 2, MAX_RETRY_REWRITE_OUTPUT_TOKENS),
+    ];
+    let parsed: ReturnType<typeof parseCopyOptimizationResponse> | null = null;
+
+    for (const tokenBudget of tokenBudgets) {
+      attempts += 1;
+      responseMeta = null;
+      try {
+        const raw = await callDeepSeek(
+          REWRITE_SYSTEM,
+          REWRITE_PROMPT(ipBlock, sourceText, mode, goal, goalInstruction, lockedElements, constraintsText),
+          tokenBudget,
+          0.3,
+          apiKey,
+          {
+            thinking: { type: "disabled" },
+            responseFormat: { type: "json_object" },
+            onResponseMeta: (meta) => { responseMeta = meta; },
+          },
+        );
+        if ((responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length") {
+          throw new CopyOptimizationResponseError(
+            "invalid_json",
+            "AI返回格式异常：内容被截断，请重试",
+          );
+        }
+        parsed = parseCopyOptimizationResponse(raw);
+        break;
+      } catch (error) {
+        const wasTruncated = (responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length";
+        if (wasTruncated && attempts < tokenBudgets.length) continue;
+        if (wasTruncated) {
+          throw new CopyOptimizationResponseError(
+            "invalid_json",
+            "AI返回格式异常：内容被截断，请重试",
+          );
+        }
+        throw error;
+      }
+    }
+
+    if (!parsed) {
       throw new CopyOptimizationResponseError(
         "invalid_json",
-        "AI返回格式异常：内容被截断，请重试",
+        "AI返回格式异常",
       );
     }
-    const parsed = parseCopyOptimizationResponse(raw);
 
     return NextResponse.json({
       ipId: ip.id,
