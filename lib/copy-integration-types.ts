@@ -10,8 +10,19 @@ export interface CopyIntegrationNote {
 }
 
 export interface CopyIntegrationConflictAlternative {
+  brief: string;
   text: string;
   sourceIds: string[];
+}
+
+export interface CopyIntegrationConflict {
+  topic: string;
+  conflictPoint: string;
+  alternatives: CopyIntegrationConflictAlternative[];
+}
+
+export interface CopyIntegrationReviewItem extends CopyIntegrationNote {
+  reason: string;
 }
 
 export interface CopyIntegrationResult {
@@ -23,12 +34,12 @@ export interface CopyIntegrationResult {
     }>;
     fullText: string;
   };
-  integrationNotes: {
-    mergedDuplicates: CopyIntegrationNote[];
-    conflicts: Array<{
-      summary: string;
-      alternatives: CopyIntegrationConflictAlternative[];
-    }>;
-    exclusions: Array<CopyIntegrationNote & { reason: string }>;
+  decisionSummary: {
+    items: string[];
+  };
+  conflicts: CopyIntegrationConflict[];
+  contentReview: {
+    exclusions: CopyIntegrationReviewItem[];
+    evidenceGaps: CopyIntegrationReviewItem[];
   };
 }

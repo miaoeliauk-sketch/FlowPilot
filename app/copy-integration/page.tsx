@@ -172,7 +172,7 @@ export default function CopyIntegrationPage() {
               <div>
                 <div className="text-[30px]">⌘</div>
                 <h2 className="mt-3 text-[15px] font-bold text-[#555]">整合结果将在这里出现</h2>
-                <p className="mt-2 text-[12px] leading-5 text-[#999]">正文保持连贯；重复、冲突和未采用内容单独说明。</p>
+                <p className="mt-2 text-[12px] leading-5 text-[#999]">结果分为内容母稿、决策摘要、待确认冲突和内容核查四部分。</p>
               </div>
             </div>
           ) : (
@@ -198,52 +198,69 @@ export default function CopyIntegrationPage() {
                 </div>
               </div>
 
-              <div className="border-t border-[#E5E4DE] pt-5">
-                <h2 className="text-[16px] font-bold text-[#1C1C1B]">整合说明</h2>
+              <section className="rounded-[16px] border border-[#2F2F2C] bg-[#1C1C1B] p-4 text-white">
+                <div className="mb-3 flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-[#C8F04A]" aria-hidden="true" />
+                  <h2 className="text-[16px] font-bold">决策摘要</h2>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {result.decisionSummary.items.map((item, index) => (
+                    <p key={index} className="text-[13px] leading-6 text-[#F3F3EF]">{item}</p>
+                  ))}
+                </div>
+              </section>
+
+              <section className="border-t border-[#E5E4DE] pt-5">
+                <h2 className="text-[16px] font-bold text-[#A06700]">待确认冲突</h2>
+                {result.conflicts.length === 0
+                  ? <p className="mt-2 text-[12px] text-[#AAA]">没有发现实质冲突。</p>
+                  : result.conflicts.map((item, index) => (
+                    <article key={index} className="mt-3 rounded-[12px] border border-[#F0DC9A] bg-[#FFFBF0] p-3.5">
+                      <h3 className="text-[13px] font-bold text-[#6E5200]">{item.topic}</h3>
+                      <div className="mt-2 flex flex-col gap-2">
+                        {item.alternatives.map((alternative, alternativeIndex) => (
+                          <div key={alternativeIndex} className="rounded-[8px] bg-white/75 px-3 py-2 text-[12.5px] leading-5 text-[#555]">
+                            <p>{alternative.text}</p>
+                            <NoteSources sourceIds={alternative.sourceIds} names={sourceNames} />
+                          </div>
+                        ))}
+                      </div>
+                      <p className="mt-2.5 text-[12.5px] font-semibold leading-5 text-[#6E5200]">
+                        两者矛盾点在于：{item.conflictPoint}
+                      </p>
+                    </article>
+                  ))}
+              </section>
+
+              <section className="border-t border-[#E5E4DE] pt-5">
+                <h2 className="text-[16px] font-bold text-[#1C1C1B]">未采用及依据不足内容</h2>
 
                 <div className="mt-4">
-                  <h3 className="text-[12px] font-bold text-[#666]">重复观点合并</h3>
-                  {result.integrationNotes.mergedDuplicates.length === 0
-                    ? <p className="mt-2 text-[12px] text-[#AAA]">没有需要说明的重复观点。</p>
-                    : result.integrationNotes.mergedDuplicates.map((item, index) => (
-                      <div key={index} className="mt-2 rounded-[10px] bg-[#F7F6F2] p-3 text-[12.5px] leading-5 text-[#555]">
-                        {item.summary}<NoteSources sourceIds={item.sourceIds} names={sourceNames} />
-                      </div>
-                    ))}
-                </div>
-
-                <div className="mt-5">
-                  <h3 className="text-[12px] font-bold text-[#A06700]">待确认冲突</h3>
-                  {result.integrationNotes.conflicts.length === 0
-                    ? <p className="mt-2 text-[12px] text-[#AAA]">没有发现实质冲突。</p>
-                    : result.integrationNotes.conflicts.map((item, index) => (
-                      <div key={index} className="mt-2 rounded-[10px] border border-[#F0DC9A] bg-[#FFFBF0] p-3">
-                        <p className="text-[12.5px] font-semibold text-[#6E5200]">{item.summary}</p>
-                        <div className="mt-2 flex flex-col gap-2">
-                          {item.alternatives.map((alternative, alternativeIndex) => (
-                            <div key={alternativeIndex} className="rounded-[8px] bg-white/70 px-3 py-2 text-[12.5px] leading-5 text-[#555]">
-                              <p>{alternative.text}</p>
-                              <NoteSources sourceIds={alternative.sourceIds} names={sourceNames} />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                </div>
-
-                <div className="mt-5">
-                  <h3 className="text-[12px] font-bold text-[#666]">未采用内容</h3>
-                  {result.integrationNotes.exclusions.length === 0
+                  <h3 className="text-[12px] font-bold text-[#666]">未采用</h3>
+                  {result.contentReview.exclusions.length === 0
                     ? <p className="mt-2 text-[12px] text-[#AAA]">没有未采用内容。</p>
-                    : result.integrationNotes.exclusions.map((item, index) => (
+                    : result.contentReview.exclusions.map((item, index) => (
                       <div key={index} className="mt-2 rounded-[10px] bg-[#F7F6F2] p-3 text-[12.5px] leading-5 text-[#555]">
                         <p>{item.summary}</p>
-                        <p className="mt-1 text-[#888]">原因：{item.reason}</p>
+                        <p className="mt-1 text-[#888]">排除原因：{item.reason}</p>
                         <NoteSources sourceIds={item.sourceIds} names={sourceNames} />
                       </div>
                     ))}
                 </div>
-              </div>
+
+                <div className="mt-5">
+                  <h3 className="text-[12px] font-bold text-[#A06700]">依据不足／建议核实</h3>
+                  {result.contentReview.evidenceGaps.length === 0
+                    ? <p className="mt-2 text-[12px] text-[#AAA]">没有需要额外核实的内容。</p>
+                    : result.contentReview.evidenceGaps.map((item, index) => (
+                      <div key={index} className="mt-2 rounded-[10px] border border-[#F0DC9A] bg-[#FFFBF0] p-3 text-[12.5px] leading-5 text-[#555]">
+                        <p>{item.summary}</p>
+                        <p className="mt-1 text-[#888]">核实提示：{item.reason}</p>
+                        <NoteSources sourceIds={item.sourceIds} names={sourceNames} />
+                      </div>
+                    ))}
+                </div>
+              </section>
             </div>
           )}
         </section>

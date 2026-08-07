@@ -62,7 +62,7 @@ after(() => {
   restoreBrowser?.();
 });
 
-test("用户提交两份素材后看到内容母稿和待确认冲突", async () => {
+test("用户提交两份素材后按固定顺序看到四部分整合结果", async () => {
   const originalFetch = globalThis.fetch;
   let requestBody: { sources?: Array<{ name: string; content: string }> } = {};
   globalThis.fetch = async (_input, init) => {
@@ -76,16 +76,31 @@ test("用户提交两份素材后看到内容母稿和待确认冲突", async ()
         }],
         fullText: "## 信任与成交\n\n信任是影响成交的重要因素。",
       },
-      integrationNotes: {
-        mergedDuplicates: [],
-        conflicts: [{
-          summary: "建立信任所需时间不一致",
-          alternatives: [
-            { text: "需要7天", sourceIds: ["source-1"] },
-            { text: "需要30天", sourceIds: ["source-2"] },
-          ],
+      decisionSummary: {
+        items: [
+          "关于建立信任所需时间，素材1和素材2存在冲突：需要7天 vs 需要30天。正式使用前需确定统一立场。",
+          "另有1处内容标记为依据不足，详见下文“未采用及依据不足内容”部分。",
+        ],
+      },
+      conflicts: [{
+        topic: "建立信任所需时间",
+        conflictPoint: "建立信任需要7天还是30天",
+        alternatives: [
+          { brief: "需要7天", text: "素材1认为建立信任需要7天。", sourceIds: ["source-1"] },
+          { brief: "需要30天", text: "素材2认为建立信任需要30天。", sourceIds: ["source-2"] },
+        ],
+      }],
+      contentReview: {
+        exclusions: [{
+          summary: "2026年10月一定完成转变",
+          reason: "属于缺乏依据的具体时间断言",
+          sourceIds: ["source-1"],
         }],
-        exclusions: [],
+        evidenceGaps: [{
+          summary: "建立信任周期存在固定规律",
+          reason: "缺乏可核实的权威来源，但仍有整理价值",
+          sourceIds: ["source-2"],
+        }],
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
@@ -109,12 +124,24 @@ test("用户提交两份素材后看到内容母稿和待确认冲突", async ()
 
     assert.equal(requestBody.sources?.length, 2);
     assert.equal(requestBody.sources?.[0].name, "逐字稿");
-    assert.ok(await view.findByText("内容母稿"));
+    const draftHeading = await view.findByRole("heading", { name: "内容母稿" });
+    const summaryHeading = view.getByRole("heading", { name: "决策摘要" });
+    const conflictsHeading = view.getByRole("heading", { name: "待确认冲突" });
+    const reviewHeading = view.getByRole("heading", { name: "未采用及依据不足内容" });
+
+    assert.ok(draftHeading.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.ok(summaryHeading.compareDocumentPosition(conflictsHeading) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.ok(conflictsHeading.compareDocumentPosition(reviewHeading) & Node.DOCUMENT_POSITION_FOLLOWING);
     assert.ok(view.getByText("信任是影响成交的重要因素。"));
-    assert.ok(view.getByText("待确认冲突"));
-    assert.ok(view.getByText("建立信任所需时间不一致"));
-    assert.ok(view.getByText("需要7天"));
-    assert.ok(view.getByText("需要30天"));
+    assert.ok(view.getByText(/关于建立信任所需时间，素材1和素材2存在冲突/));
+    assert.ok(view.getByText("两者矛盾点在于：建立信任需要7天还是30天"));
+    assert.ok(view.getByText("素材1认为建立信任需要7天。"));
+    assert.ok(view.getByText("素材2认为建立信任需要30天。"));
+    assert.ok(view.getByRole("heading", { name: "未采用" }));
+    assert.ok(view.getByRole("heading", { name: "依据不足／建议核实" }));
+    assert.ok(view.getByText("2026年10月一定完成转变"));
+    assert.ok(view.getByText("建立信任周期存在固定规律"));
+    assert.equal(view.queryByText("重复观点合并"), null);
 
     await user.clear(nameInputs[0]);
     await user.type(nameInputs[0], "改名后的素材");

@@ -37,7 +37,213 @@ function integrationRequest() {
   });
 }
 
-test("返回连贯母稿和整合说明，但不向用户端暴露内部诊断", async () => {
+/**
+ * 新构造的代表性测试用例，非原始试用素材。
+ * 同时覆盖观点冲突、依据不足但保留，以及无依据的具体时间预测未采用。
+ */
+const REPRESENTATIVE_SOURCES = [
+  {
+    id: "source-1",
+    name: "素材1",
+    content: "灵魂总量始终恒定，人口增长只是灵魂重新分配。动物经过修行可能转世为人，这种说法缺乏可核实的权威来源。有人断言2026年10月所有神灵都会归位。",
+  },
+  {
+    id: "source-2",
+    name: "素材2",
+    content: "人口增长说明灵魂总量会变化，新增灵魂可能来自动物转世。动物转世的具体机制目前没有可靠来源支持，但这个观点仍有整理价值。另有说法称2026年10月会完成神灵归位。",
+  },
+] satisfies Array<{ id: string; name: string; content: string }>;
+
+function representativeRequest() {
+  return new NextRequest("http://localhost/api/copy-integration", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-DeepSeek-Key": "test-key",
+    },
+    body: JSON.stringify({ sources: REPRESENTATIVE_SOURCES }),
+  });
+}
+
+test("代表性素材生成固定四部分，并区分依据不足与未采用内容", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalError = console.error;
+  console.error = () => undefined;
+  globalThis.fetch = async () => deepSeekResponse(JSON.stringify({
+    draft: {
+      sections: [
+        {
+          heading: "人口增长与灵魂来源",
+          paragraphs: [
+            "两份素材都尝试从灵魂来源解释人口增长，但对灵魂总量是否恒定存在不同判断。",
+            "在这一分歧之外，两份素材都提到动物可能转世为人，不过该说法缺乏权威来源支撑，使用前仍需核实。",
+          ],
+          sourceIds: ["source-1", "source-2"],
+        },
+      ],
+    },
+    conflicts: [{
+      topic: "灵魂总量",
+      conflictPoint: "灵魂总量是否会随人口增长而变化",
+      alternatives: [
+        {
+          brief: "灵魂总量恒定",
+          text: "素材1认为灵魂总量始终恒定，人口增长只是重新分配。",
+          sourceIds: ["source-1"],
+        },
+        {
+          brief: "灵魂总量会变化",
+          text: "素材2认为人口增长说明灵魂总量会变化。",
+          sourceIds: ["source-2"],
+        },
+      ],
+    }],
+    contentReview: {
+      exclusions: [{
+        summary: "2026年10月神灵归位的具体时间预测",
+        reason: "属于缺乏依据的具体时间断言",
+        sourceIds: ["source-1", "source-2"],
+      }],
+      evidenceGaps: [{
+        summary: "动物可能转世为人的说法",
+        reason: "缺乏可核实的权威来源，但仍有整理价值",
+        draftExcerpt: "动物可能转世为人，不过该说法缺乏权威来源支撑，使用前仍需核实",
+        sourceIds: ["source-1", "source-2"],
+      }],
+    },
+  }));
+
+  try {
+    const response = await POST(representativeRequest());
+    const body = await response.json() as {
+      draft: { sections: Array<{ paragraphs: string[] }> };
+      decisionSummary: { items: string[] };
+      conflicts: unknown[];
+      contentReview: {
+        exclusions: Array<{ summary: string; reason: string; sourceIds: string[] }>;
+        evidenceGaps: Array<{ summary: string; reason: string; sourceIds: string[] }>;
+      };
+      integrationNotes?: unknown;
+    };
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(Object.keys(body), ["draft", "decisionSummary", "conflicts", "contentReview"]);
+    assert.deepEqual(body.decisionSummary, {
+      items: [
+        "关于灵魂总量，素材1和素材2存在冲突：灵魂总量恒定 vs 灵魂总量会变化。正式使用前需确定统一立场。",
+        "另有1处内容标记为依据不足，详见下文“未采用及依据不足内容”部分。",
+      ],
+    });
+    const draftText = body.draft.sections.flatMap((section) => section.paragraphs).join("\n");
+    assert.match(draftText, /动物可能转世为人/);
+    assert.doesNotMatch(draftText, /2026年10月|神灵.*归位/);
+    assert.deepEqual(body.contentReview.exclusions, [{
+      summary: "2026年10月神灵归位的具体时间预测",
+      reason: "属于缺乏依据的具体时间断言",
+      sourceIds: ["source-1", "source-2"],
+    }]);
+    assert.deepEqual(body.contentReview.evidenceGaps, [{
+      summary: "动物可能转世为人的说法",
+      reason: "缺乏可核实的权威来源，但仍有整理价值",
+      sourceIds: ["source-1", "source-2"],
+    }]);
+    assert.doesNotMatch(body.decisionSummary.items.join("\n"), /2026年10月|神灵.*归位/);
+    assert.equal("integrationNotes" in body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+});
+
+test("依据不足条目必须提供确实保留在母稿中的对应片段", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    const retainedParagraph = calls === 1
+      ? "两份素材都建议先确定当天最重要的任务。"
+      : "两份素材都建议先确定当天最重要的任务。晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实。";
+    return deepSeekResponse(JSON.stringify({
+      draft: {
+        sections: [{
+          heading: calls === 1
+            ? "晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实"
+            : "晨间安排",
+          paragraphs: [retainedParagraph],
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+      conflicts: [],
+      contentReview: {
+        exclusions: [],
+        evidenceGaps: [{
+          summary: "晨间独处可能增强直觉",
+          reason: "缺乏权威来源，建议使用前核实",
+          draftExcerpt: "晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实",
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+    }));
+  };
+
+  try {
+    const response = await POST(representativeRequest());
+    const body = await response.json() as {
+      draft: { fullText: string };
+      contentReview: { evidenceGaps: Array<Record<string, unknown>> };
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.match(body.draft.fullText, /晨间独处可能增强直觉/);
+    assert.equal("draftExcerpt" in body.contentReview.evidenceGaps[0], false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("依据不足的母稿片段必须包含清晰的核实提示", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    const draftExcerpt = calls === 1
+      ? "晨间独处可能增强直觉"
+      : "晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实";
+    return deepSeekResponse(JSON.stringify({
+      draft: {
+        sections: [{
+          heading: "晨间安排",
+          paragraphs: [`两份素材都建议先确定当天最重要的任务。${draftExcerpt}。`],
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+      conflicts: [],
+      contentReview: {
+        exclusions: [],
+        evidenceGaps: [{
+          summary: "晨间独处可能增强直觉",
+          reason: "缺乏权威来源，建议使用前核实",
+          draftExcerpt,
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+    }));
+  };
+
+  try {
+    const response = await POST(representativeRequest());
+    const body = await response.json() as { draft: { fullText: string } };
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.match(body.draft.fullText, /缺乏权威来源支撑，建议使用前核实/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("返回固定四部分结果，但不向用户端暴露内部诊断", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => deepSeekResponse(JSON.stringify({
     draft: {
@@ -50,15 +256,10 @@ test("返回连贯母稿和整合说明，但不向用户端暴露内部诊断",
       ],
       fullText: "## 信任是成交的前提\n\n客户是否愿意购买，往往取决于信任是否已经建立。",
     },
-    integrationNotes: {
-      mergedDuplicates: [
-        {
-          summary: "两份素材都认为缺乏信任会阻碍成交。",
-          sourceIds: ["source-1", "source-2"],
-        },
-      ],
-      conflicts: [],
+    conflicts: [],
+    contentReview: {
       exclusions: [],
+      evidenceGaps: [],
     },
   }));
 
@@ -78,15 +279,13 @@ test("返回连贯母稿和整合说明，但不向用户端暴露内部诊断",
         ],
         fullText: "## 信任是成交的前提\n\n客户是否愿意购买，往往取决于信任是否已经建立。",
       },
-      integrationNotes: {
-        mergedDuplicates: [
-          {
-            summary: "两份素材都认为缺乏信任会阻碍成交。",
-            sourceIds: ["source-1", "source-2"],
-          },
-        ],
-        conflicts: [],
+      decisionSummary: {
+        items: ["当前没有需要老师决策或核实的事项。"],
+      },
+      conflicts: [],
+      contentReview: {
         exclusions: [],
+        evidenceGaps: [],
       },
     });
     assert.equal("attempts" in body, false);
@@ -175,10 +374,10 @@ test("拒绝AI编造的素材来源编号", async () => {
         }],
         fullText: "信任影响成交。",
       },
-      integrationNotes: {
-        mergedDuplicates: [],
-        conflicts: [],
+      conflicts: [],
+      contentReview: {
         exclusions: [],
+        evidenceGaps: [],
       },
     }));
   };
@@ -317,10 +516,10 @@ test("可复制全文由已校验段落生成，不采用模型另写的fullText
       }],
       fullText: "关注我并发送关键词领取资料。",
     },
-    integrationNotes: {
-      mergedDuplicates: [],
-      conflicts: [],
+    conflicts: [],
+    contentReview: {
       exclusions: [],
+      evidenceGaps: [],
     },
   }));
 
@@ -336,16 +535,16 @@ test("可复制全文由已校验段落生成，不采用模型另写的fullText
   }
 });
 
-test("冲突至少包含两个说法，且每个说法分别绑定真实来源", async () => {
+test("冲突必须恰好包含两个说法，且每个说法分别绑定真实来源", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
     const alternatives = calls === 1
-      ? [{ text: "需要7天", sourceIds: ["source-1"] }]
+      ? [{ brief: "需要7天", text: "需要7天", sourceIds: ["source-1"] }]
       : [
-          { text: "需要7天", sourceIds: ["source-1"] },
-          { text: "需要30天", sourceIds: ["source-2"] },
+          { brief: "需要7天", text: "需要7天", sourceIds: ["source-1"] },
+          { brief: "需要30天", text: "需要30天", sourceIds: ["source-2"] },
         ];
     return deepSeekResponse(JSON.stringify({
       draft: {
@@ -355,13 +554,14 @@ test("冲突至少包含两个说法，且每个说法分别绑定真实来源",
           sourceIds: ["source-1", "source-2"],
         }],
       },
-      integrationNotes: {
-        mergedDuplicates: [],
-        conflicts: [{
-          summary: "建立信任所需时间不一致",
-          alternatives,
-        }],
+      conflicts: [{
+        topic: "建立信任所需时间",
+        conflictPoint: "建立信任需要7天还是30天",
+        alternatives,
+      }],
+      contentReview: {
         exclusions: [],
+        evidenceGaps: [],
       },
     }));
   };
@@ -369,18 +569,16 @@ test("冲突至少包含两个说法，且每个说法分别绑定真实来源",
   try {
     const response = await POST(integrationRequest());
     const body = await response.json() as {
-      integrationNotes: {
-        conflicts: Array<{
-          alternatives: Array<{ text: string; sourceIds: string[] }>;
-        }>;
-      };
+      conflicts: Array<{
+        alternatives: Array<{ brief: string; text: string; sourceIds: string[] }>;
+      }>;
     };
 
     assert.equal(response.status, 200);
     assert.equal(calls, 2);
-    assert.deepEqual(body.integrationNotes.conflicts[0].alternatives, [
-      { text: "需要7天", sourceIds: ["source-1"] },
-      { text: "需要30天", sourceIds: ["source-2"] },
+    assert.deepEqual(body.conflicts[0].alternatives, [
+      { brief: "需要7天", text: "需要7天", sourceIds: ["source-1"] },
+      { brief: "需要30天", text: "需要30天", sourceIds: ["source-2"] },
     ]);
   } finally {
     globalThis.fetch = originalFetch;
