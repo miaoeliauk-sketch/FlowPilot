@@ -13,6 +13,7 @@ const MAIN_NAV: { label: string; href: string; icon: IconName }[] = [
   { label: "工作台", href: "/", icon: "grid" },
   { label: "IP身份中心", href: "/ip", icon: "id" },
   { label: "知识库中心", href: "/knowledge-hub", icon: "book" },
+  { label: "文案整合", href: "/copy-integration", icon: "edit" },
   { label: "设置", href: "/settings", icon: "settings" },
 ];
 const MEMORY_NAV: { label: string; href: string; icon: IconName }[] = [
