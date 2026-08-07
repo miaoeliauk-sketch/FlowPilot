@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
+import { parseRequiredIPProfile } from "@/lib/ip-profile-validation";
 import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import { callDeepSeek, parseDeepSeekJSON as parseJSON, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
 
@@ -21,12 +22,6 @@ import { callDeepSeek, parseDeepSeekJSON as parseJSON, DEEPSEEK_MODEL as MODEL }
  * - 结构选择要匹配受众和目标，不能只看话题
  * - 脚本语言要口语化，句子短，有具体案例
  */
-
-const FALLBACK_IP: Partial<IPProfile> = {
-  name: "未指定IP", positioning: "待填写", audience: "待填写",
-  contentDirection: [], tone: "未填写",
-  commonOpenings: [], commonClosings: [], catchphrases: [], forbiddenExpressions: [],
-};
 
 interface RequestBody {
   topic: string;
@@ -146,10 +141,26 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); }
   catch { return NextResponse.json({ error: "请求格式错误" }, { status: 400 }); }
 
+  const ipProfileResult = parseRequiredIPProfile(body.ipProfile);
+  if (!ipProfileResult.ok) {
+    return NextResponse.json({
+      error: ipProfileResult.error,
+      errorCode: ipProfileResult.errorCode,
+      errorField: ipProfileResult.errorField,
+      apiMeta: {
+        apiCalled: false,
+        calledAt: new Date().toISOString(),
+        model: MODEL,
+        ipUsed: null,
+        mockHit: false,
+      },
+    }, { status: 400 });
+  }
+  const ip = ipProfileResult.ipProfile;
+
   const topic = (body.topic ?? "").trim();
   if (!topic) return NextResponse.json({ error: "请输入选题或关键词" }, { status: 400 });
 
-  const ip = body.ipProfile ?? FALLBACK_IP as IPProfile;
   const styleProfileResult = parseIPStyleProfileForIP(body.styleProfile, ip.id);
   if (!styleProfileResult.ok) {
     return NextResponse.json({

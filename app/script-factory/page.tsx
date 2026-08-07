@@ -400,6 +400,7 @@ export default function ScriptFactoryPage() {
 
   async function handleEngineGenerate() {
     if (!topic.trim()) { setCeError("请输入选题或关键词"); return; }
+    if (!activeIP) { setCeError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
     setCeLoading(true); setCeError(null); setCeResult(null);
     try {
       const res = await apiFetch("/api/skill/content-engine", {
@@ -407,7 +408,7 @@ export default function ScriptFactoryPage() {
         body: JSON.stringify({
           topic, targetAudience: ceAudience, contentGoal: ceGoal,
           industry: ceIndustry,
-          ipProfile: activeIP ?? undefined,
+          ipProfile: activeIP,
           styleProfile: activeIP ? getStyleProfile(activeIP.id) : null,
         }),
       });
@@ -726,7 +727,11 @@ export default function ScriptFactoryPage() {
         <div className="flex flex-col gap-5">
           {!ipLoading && (
             <div className="flex flex-wrap items-center gap-2 rounded-[12px] bg-[#FBF3D6] px-4 py-2.5 text-[13px] text-[#7A5C00]">
-              当前IP：<b>{activeIP?.name ?? "未选择IP"}</b> · 内容引擎会结合IP定位和受众生成全套内容
+              {activeIP ? (
+                <>当前IP：<b>{activeIP.name}</b> · 内容引擎会结合IP定位和受众生成全套内容</>
+              ) : (
+                <>请先在「IP身份中心」选择一个当前操盘IP，再使用内容引擎生成。</>
+              )}
             </div>
           )}
 
@@ -763,7 +768,7 @@ export default function ScriptFactoryPage() {
             </div>
             {ceError && <div className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{ceError}</div>}
             <div className="mt-4 flex justify-end">
-              <button onClick={handleEngineGenerate} disabled={ceLoading || !topic.trim()}
+              <button onClick={handleEngineGenerate} disabled={ceLoading || !topic.trim() || !activeIP}
                 className="rounded-[12px] bg-[#1C1C1B] px-8 py-3 text-[13.5px] font-bold text-white disabled:opacity-40">
                 {ceLoading ? "生成中（约30秒）…" : "⚡ 一键生成完整内容包"}
               </button>

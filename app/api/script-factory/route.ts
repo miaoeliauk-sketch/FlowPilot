@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
+import { parseRequiredIPProfile } from "@/lib/ip-profile-validation";
 import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import {
   callDeepSeek,
@@ -78,16 +79,6 @@ function getCompatibleGenerationRequirement(
 
   return normalized;
 }
-
-const FALLBACK_IP: IPProfile = {
-  id: "unknown", name: "未指定IP", avatar: "?", positioning: "未填写", platforms: [],
-  audience: "未填写", contentDirection: [],
-  personaKeywords: [], professionalIdentity: "未填写", personalityTags: [], credibilitySource: "未填写", representativeViewpoints: [],
-  tone: "未填写", commonOpenings: [], commonClosings: [], catchphrases: [], forbiddenExpressions: [], pacing: "未填写",
-  commonScenes: [], commonShotTypes: [], showsFace: true, usesScreenRecording: true, needsBroll: false, needsCaseScreenshots: false, needsSubtitleHighlight: false,
-  sampleViralTitles: [], styleNotes: "",
-  bio: "", color: "#999", createdAt: "", updatedAt: "",
-};
 
 interface RequestBody {
   ipProfile?: IPProfile;
@@ -275,10 +266,26 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); }
   catch { return NextResponse.json({ error: "请求格式错误", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 }); }
 
+  const ipProfileResult = parseRequiredIPProfile(body.ipProfile);
+  if (!ipProfileResult.ok) {
+    return NextResponse.json({
+      error: ipProfileResult.error,
+      errorCode: ipProfileResult.errorCode,
+      errorField: ipProfileResult.errorField,
+      apiMeta: {
+        apiCalled: false,
+        calledAt: new Date().toISOString(),
+        model: MODEL,
+        ipUsed: null,
+        mockHit: false,
+      },
+    }, { status: 400 });
+  }
+  const ip = ipProfileResult.ipProfile;
+
   const topic = (body.topic ?? "").trim();
   if (!topic) return NextResponse.json({ error: "请输入视频选题", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
 
-  const ip = body.ipProfile ?? FALLBACK_IP;
   const styleProfileResult = parseIPStyleProfileForIP(body.styleProfile, ip.id);
   if (!styleProfileResult.ok) {
     return NextResponse.json({
