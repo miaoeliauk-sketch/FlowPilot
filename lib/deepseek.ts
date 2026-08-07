@@ -14,6 +14,34 @@ export interface DeepSeekResponseMeta {
   finishReason: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
+  totalTokens: number | null;
+  reasoningTokens: number | null;
+  hasReasoningContent: boolean;
+  reasoningChars: number;
+}
+
+export type DeepSeekResponseErrorCode =
+  | "EMPTY_CONTENT"
+  | "OUTPUT_TRUNCATED"
+  | "CONTENT_FILTERED"
+  | "INSUFFICIENT_SYSTEM_RESOURCE";
+
+export class DeepSeekResponseError extends Error {
+  readonly code: DeepSeekResponseErrorCode;
+  readonly responseMeta: DeepSeekResponseMeta;
+  readonly responseChars: number | null;
+
+  constructor(
+    code: DeepSeekResponseErrorCode,
+    responseMeta: DeepSeekResponseMeta,
+    responseChars: number | null,
+  ) {
+    super("DeepSeek API 返回格式异常：choices[0].message.content 为空或不是字符串");
+    this.name = "DeepSeekResponseError";
+    this.code = code;
+    this.responseMeta = responseMeta;
+    this.responseChars = responseChars;
+  }
 }
 
 export interface DeepSeekCallOptions {
@@ -73,15 +101,35 @@ export async function callDeepSeek(
   }
 
   const data = await res.json();
-  options.onResponseMeta?.({
+  const message = data.choices?.[0]?.message;
+  const reasoningContent = message?.reasoning_content;
+  const responseMeta: DeepSeekResponseMeta = {
     requestId: typeof data.id === "string" ? data.id : null,
     finishReason: typeof data.choices?.[0]?.finish_reason === "string" ? data.choices[0].finish_reason : null,
     promptTokens: typeof data.usage?.prompt_tokens === "number" ? data.usage.prompt_tokens : null,
     completionTokens: typeof data.usage?.completion_tokens === "number" ? data.usage.completion_tokens : null,
-  });
-  const content = data.choices?.[0]?.message?.content;
+    totalTokens: typeof data.usage?.total_tokens === "number" ? data.usage.total_tokens : null,
+    reasoningTokens: typeof data.usage?.completion_tokens_details?.reasoning_tokens === "number"
+      ? data.usage.completion_tokens_details.reasoning_tokens
+      : null,
+    hasReasoningContent: typeof reasoningContent === "string" && reasoningContent.length > 0,
+    reasoningChars: typeof reasoningContent === "string" ? reasoningContent.length : 0,
+  };
+  options.onResponseMeta?.(responseMeta);
+  const content = message?.content;
   if (typeof content !== "string" || !content.trim()) {
-    throw new Error("DeepSeek API 返回格式异常：choices[0].message.content 为空或不是字符串");
+    const code: DeepSeekResponseErrorCode = responseMeta.finishReason === "length"
+      ? "OUTPUT_TRUNCATED"
+      : responseMeta.finishReason === "content_filter"
+        ? "CONTENT_FILTERED"
+        : responseMeta.finishReason === "insufficient_system_resource"
+          ? "INSUFFICIENT_SYSTEM_RESOURCE"
+          : "EMPTY_CONTENT";
+    throw new DeepSeekResponseError(
+      code,
+      responseMeta,
+      typeof content === "string" ? content.length : null,
+    );
   }
   return content;
 }

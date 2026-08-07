@@ -3,7 +3,12 @@ import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { parseRequiredIPProfile } from "@/lib/ip-profile-validation";
 import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
-import { callDeepSeek, parseDeepSeekJSON as parseJSON, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import { parseDeepSeekJSON, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import {
+  callStructuredDeepSeek,
+  StructuredDeepSeekError,
+  type StructuredDeepSeekAttemptDiagnostic,
+} from "@/lib/structured-deepseek";
 
 /**
  * FlowPilot Content Engine Skill
@@ -31,6 +36,66 @@ interface RequestBody {
   platform?: string;
   ipProfile?: IPProfile;
   styleProfile?: IPStyleProfile | null;
+}
+
+const MAX_TOKENS = 4000;
+
+class ContentEngineParseError extends Error {
+  readonly diagnosticCode: string;
+
+  constructor(diagnosticCode: string) {
+    super("Content Engine返回结构无效");
+    this.name = "ContentEngineParseError";
+    this.diagnosticCode = diagnosticCode;
+  }
+}
+
+function parseContentEngineResponse(content: string): Record<string, unknown> {
+  const parsed = parseDeepSeekJSON(
+    content,
+    null as Record<string, unknown> | null,
+  );
+  if (parsed === null) throw new ContentEngineParseError("INVALID_JSON");
+  if (typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ContentEngineParseError("INVALID_ROOT");
+  }
+  return parsed;
+}
+
+function lastFailureCode(
+  attempts: StructuredDeepSeekAttemptDiagnostic[],
+): string | null {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index];
+    if (attempt.failureCode) return attempt.failureCode;
+  }
+  return null;
+}
+
+function logSafeDiagnostic(input: {
+  diagnosticId: string;
+  calledAt: string;
+  inputChars: number;
+  failureCode: string;
+  attempts: StructuredDeepSeekAttemptDiagnostic[];
+}) {
+  const attempts = input.attempts.map((attempt) => ({
+    attempt: attempt.attempt,
+    ...(attempt.failureCode ? { failureCode: attempt.failureCode } : {}),
+    finishReason: attempt.finishReason,
+    completionTokens: attempt.completionTokens,
+    responseChars: attempt.responseChars,
+    hasReasoningContent: attempt.hasReasoningContent ?? false,
+    reasoningChars: attempt.reasoningChars ?? 0,
+  }));
+  console.warn("[content-engine]", JSON.stringify({
+    diagnosticId: input.diagnosticId,
+    calledAt: input.calledAt,
+    inputChars: input.inputChars,
+    maxTokens: MAX_TOKENS,
+    failureCode: input.failureCode,
+    attempts,
+  }));
 }
 
 function firstNonEmptyString(
@@ -192,13 +257,30 @@ export async function POST(req: NextRequest) {
   const platform = body.platform ?? ip.platforms?.[0] ?? "抖音";
 
   const calledAt = new Date().toISOString();
+  const diagnosticId = crypto.randomUUID();
+  const userPrompt = PROMPT(topic, audience, goal, industry, platform, ipBlock);
 
   try {
-    const raw = await callDeepSeek(SYSTEM, PROMPT(topic, audience, goal, industry, platform, ipBlock), 4000, 0.3, apiKey);
-    const parsed = parseJSON(raw, null as Record<string, unknown> | null);
-
-    if (!parsed) {
-      return NextResponse.json({ error: "内容生成失败，AI返回格式异常，请重试" }, { status: 500 });
+    const result = await callStructuredDeepSeek({
+      systemPrompt: SYSTEM,
+      userPrompt,
+      parse: parseContentEngineResponse,
+      apiKey,
+      maxTokens: MAX_TOKENS,
+      temperature: 0.3,
+      timeoutMs: 60_000,
+      maxRetries: 1,
+    });
+    const parsed = result.data;
+    const recoveredFailureCode = lastFailureCode(result.attemptDiagnostics);
+    if (recoveredFailureCode) {
+      logSafeDiagnostic({
+        diagnosticId,
+        calledAt,
+        inputChars: userPrompt.length,
+        failureCode: recoveredFailureCode,
+        attempts: result.attemptDiagnostics,
+      });
     }
 
     // 验证10条钩子和20条标题是否齐全，不足时在日志里记录但不报错
@@ -213,10 +295,47 @@ export async function POST(req: NextRequest) {
         ipName: ip.name,
         hookCount, titleCount, coverCount,
         model: MODEL, calledAt,
+        diagnosticId,
+        attempts: result.attempts,
       },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "生成失败，请重试";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const structuredError = err instanceof StructuredDeepSeekError ? err : null;
+    const failureCode = structuredError
+      ? lastFailureCode(structuredError.attemptDiagnostics) ?? "REQUEST_FAILED"
+      : "UNEXPECTED_ERROR";
+    const attempts = structuredError?.attemptDiagnostics ?? [];
+    logSafeDiagnostic({
+      diagnosticId,
+      calledAt,
+      inputChars: userPrompt.length,
+      failureCode,
+      attempts,
+    });
+    const message = structuredError?.stage === "timeout"
+      ? "内容生成超时，已自动重试，请稍后再试"
+      : structuredError?.stage === "parse"
+        ? "AI返回格式不完整，已自动重试，请稍后再试"
+        : failureCode === "EMPTY_CONTENT" || failureCode === "OUTPUT_TRUNCATED"
+          ? "AI未返回有效内容，已自动重试，请稍后再试"
+          : err instanceof Error
+            ? err.message
+            : "生成失败，请重试";
+    const status = failureCode === "MISSING_API_KEY"
+      ? 400
+      : structuredError?.stage === "timeout"
+        ? 504
+        : 502;
+    return NextResponse.json({
+      error: message,
+      code: failureCode,
+      diagnosticId,
+      apiMeta: {
+        apiCalled: failureCode !== "MISSING_API_KEY",
+        calledAt,
+        model: MODEL,
+        attempts: structuredError?.attempts ?? 0,
+      },
+    }, { status });
   }
 }

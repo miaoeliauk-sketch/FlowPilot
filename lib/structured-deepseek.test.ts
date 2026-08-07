@@ -45,6 +45,10 @@ test("returns parsed data and response metadata after one successful attempt", a
       finishReason: "stop",
       promptTokens: 12,
       completionTokens: 8,
+      totalTokens: null,
+      reasoningTokens: null,
+      hasReasoningContent: false,
+      reasoningChars: 0,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -75,6 +79,130 @@ test("retries one failed request and returns the second result", async () => {
 
     assert.deepEqual(result.data, { status: "recovered" });
     assert.equal(result.attempts, 2);
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("preserves safe response metadata when empty content retries and then succeeds", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({
+        id: "request-empty",
+        choices: [{
+          finish_reason: "length",
+          message: { content: null, reasoning_content: "private reasoning" },
+        }],
+        usage: {
+          prompt_tokens: 80,
+          completion_tokens: 100,
+          total_tokens: 180,
+          completion_tokens_details: { reasoning_tokens: 100 },
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return deepSeekResponse('{"status":"recovered"}');
+  };
+
+  try {
+    const result = await callStructuredDeepSeek({
+      systemPrompt: "system",
+      userPrompt: "private transcript",
+      apiKey: "test-key",
+      maxTokens: 100,
+      timeoutMs: 100,
+      maxRetries: 1,
+      parse: (content) => JSON.parse(content) as { status: string },
+    });
+
+    assert.deepEqual(result.data, { status: "recovered" });
+    assert.equal(result.attempts, 2);
+    assert.deepEqual(result.attemptDiagnostics[0], {
+      attempt: 1,
+      stage: "request",
+      failureCode: "OUTPUT_TRUNCATED",
+      responseChars: null,
+      finishReason: "length",
+      promptTokens: 80,
+      completionTokens: 100,
+      totalTokens: 180,
+      reasoningTokens: 100,
+      hasReasoningContent: true,
+      reasoningChars: 17,
+    });
+    assert.doesNotMatch(JSON.stringify(result.attemptDiagnostics), /private transcript|private reasoning/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("accepts a complete parseable response even when finish reason is length", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    id: "request-complete-at-limit",
+    choices: [{
+      finish_reason: "length",
+      message: { content: '{"status":"complete"}' },
+    }],
+    usage: { prompt_tokens: 80, completion_tokens: 100 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const result = await callStructuredDeepSeek({
+      systemPrompt: "system",
+      userPrompt: "user",
+      apiKey: "test-key",
+      maxTokens: 100,
+      timeoutMs: 100,
+      maxRetries: 1,
+      parse: (content) => JSON.parse(content) as { status: string },
+    });
+    assert.deepEqual(result.data, { status: "complete" });
+    assert.equal(result.attempts, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reports stable empty-content diagnostics when both attempts have no final answer", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({
+      id: `request-empty-${calls}`,
+      choices: [{ finish_reason: "stop", message: { content: "" } }],
+      usage: { prompt_tokens: 20, completion_tokens: 0, total_tokens: 20 },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    await assert.rejects(
+      () => callStructuredDeepSeek({
+        systemPrompt: "system",
+        userPrompt: "private transcript",
+        apiKey: "test-key",
+        maxTokens: 100,
+        timeoutMs: 100,
+        maxRetries: 1,
+        parse: (content) => JSON.parse(content),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredDeepSeekError);
+        assert.equal(error.attempts, 2);
+        assert.equal(error.attemptDiagnostics.length, 2);
+        assert.ok(error.attemptDiagnostics.every((attempt) =>
+          attempt.failureCode === "EMPTY_CONTENT" &&
+          attempt.finishReason === "stop" &&
+          attempt.responseChars === 0 &&
+          attempt.hasReasoningContent === false));
+        return true;
+      },
+    );
     assert.equal(calls, 2);
   } finally {
     globalThis.fetch = originalFetch;
@@ -187,10 +315,13 @@ test("records safe metadata for every failed structured response", async () => {
           {
             attempt: 1,
             stage: "parse",
-            failureCode: "INVALID_JSON",
+            failureCode: "OUTPUT_TRUNCATED",
             responseChars: 10,
             finishReason: "length",
+            promptTokens: 80,
             completionTokens: 100,
+            hasReasoningContent: false,
+            reasoningChars: 0,
             fieldCount: 0,
           },
           {
@@ -199,7 +330,10 @@ test("records safe metadata for every failed structured response", async () => {
             failureCode: "ITEMS_EMPTY",
             responseChars: 12,
             finishReason: "stop",
+            promptTokens: 80,
             completionTokens: 20,
+            hasReasoningContent: false,
+            reasoningChars: 0,
             itemCount: 0,
             fieldCount: 1,
           },

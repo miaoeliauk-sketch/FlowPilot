@@ -1,5 +1,6 @@
 import {
   callDeepSeek,
+  DeepSeekResponseError,
   type DeepSeekResponseMeta,
 } from "./deepseek";
 
@@ -29,7 +30,12 @@ export interface StructuredDeepSeekAttemptDiagnostic {
   failureCode?: string;
   responseChars: number | null;
   finishReason: string | null;
+  promptTokens?: number;
   completionTokens: number | null;
+  totalTokens?: number;
+  reasoningTokens?: number;
+  hasReasoningContent?: boolean;
+  reasoningChars?: number;
   itemCount?: number;
   itemIndex?: number;
   fieldCount?: number;
@@ -74,7 +80,26 @@ const EMPTY_RESPONSE_META: DeepSeekResponseMeta = {
   finishReason: null,
   promptTokens: null,
   completionTokens: null,
+  totalTokens: null,
+  reasoningTokens: null,
+  hasReasoningContent: false,
+  reasoningChars: 0,
 };
+
+function responseMetaDiagnostic(meta: DeepSeekResponseMeta) {
+  const diagnostic: Pick<StructuredDeepSeekAttemptDiagnostic,
+    "finishReason" | "completionTokens" | "promptTokens" | "totalTokens" |
+    "reasoningTokens" | "hasReasoningContent" | "reasoningChars"> = {
+    finishReason: meta.finishReason,
+    completionTokens: meta.completionTokens,
+    hasReasoningContent: meta.hasReasoningContent,
+    reasoningChars: meta.reasoningChars,
+  };
+  if (meta.promptTokens !== null) diagnostic.promptTokens = meta.promptTokens;
+  if (meta.totalTokens !== null) diagnostic.totalTokens = meta.totalTokens;
+  if (meta.reasoningTokens !== null) diagnostic.reasoningTokens = meta.reasoningTokens;
+  return diagnostic;
+}
 
 function safeFailureCode(value: unknown, fallback: string): string {
   return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
@@ -174,13 +199,16 @@ export async function callStructuredDeepSeek<T>(
       lastStage = error instanceof StructuredDeepSeekTimeoutError
         ? "timeout"
         : "request";
+      const responseError = error instanceof DeepSeekResponseError ? error : null;
+      const failureMeta = responseError?.responseMeta ?? responseMeta;
       attemptDiagnostics.push({
         attempt,
         stage: lastStage,
-        failureCode: lastStage === "timeout" ? "TIMEOUT" : "REQUEST_FAILED",
-        responseChars: null,
-        finishReason: null,
-        completionTokens: null,
+        failureCode: lastStage === "timeout"
+          ? "TIMEOUT"
+          : responseError?.code ?? "REQUEST_FAILED",
+        responseChars: responseError?.responseChars ?? null,
+        ...responseMetaDiagnostic(failureMeta),
       });
       continue;
     } finally {
@@ -198,21 +226,23 @@ export async function callStructuredDeepSeek<T>(
             attempt,
             stage: "success",
             responseChars: content.length,
-            finishReason: responseMeta.finishReason,
-            completionTokens: responseMeta.completionTokens,
+            ...responseMetaDiagnostic(responseMeta),
           },
         ],
       };
     } catch (error) {
       lastError = error;
       lastStage = "parse";
+      const parseDiagnostic = parseFailureDiagnostic(error);
+      if (responseMeta.finishReason === "length") {
+        parseDiagnostic.failureCode = "OUTPUT_TRUNCATED";
+      }
       attemptDiagnostics.push({
         attempt,
         stage: "parse",
         responseChars: content.length,
-        finishReason: responseMeta.finishReason,
-        completionTokens: responseMeta.completionTokens,
-        ...parseFailureDiagnostic(error),
+        ...responseMetaDiagnostic(responseMeta),
+        ...parseDiagnostic,
       });
     }
   }

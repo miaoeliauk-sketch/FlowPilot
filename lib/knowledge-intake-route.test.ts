@@ -318,11 +318,11 @@ test("格式失败只记录安全诊断元信息，不记录正文和IP内容", 
 
     assert.equal(response.status, 500);
     assert.equal(body.apiMeta.attempts, 2);
-    assert.equal(body.apiMeta.failureCode, "INVALID_JSON");
+    assert.equal(body.apiMeta.failureCode, "OUTPUT_TRUNCATED");
     assert.match(body.apiMeta.diagnosticId, /^[0-9a-f-]{36}$/);
     assert.equal(warningArgs.length, 1);
     assert.match(serializedWarnings, /knowledge-intake/);
-    assert.equal(warningPayload.failureCode, "INVALID_JSON");
+    assert.equal(warningPayload.failureCode, "OUTPUT_TRUNCATED");
     assert.equal(warningPayload.inputChars, privateContent.length);
     assert.equal(warningPayload.attempts.length, 2);
     assert.deepEqual(
@@ -331,8 +331,8 @@ test("格式失败只记录安全诊断元信息，不记录正文和IP内容", 
         failureCode: attempt.failureCode,
       })),
       [
-        { finishReason: "length", failureCode: "INVALID_JSON" },
-        { finishReason: "length", failureCode: "INVALID_JSON" },
+        { finishReason: "length", failureCode: "OUTPUT_TRUNCATED" },
+        { finishReason: "length", failureCode: "OUTPUT_TRUNCATED" },
       ],
     );
     assert.doesNotMatch(serializedWarnings, new RegExp(privateContent));
