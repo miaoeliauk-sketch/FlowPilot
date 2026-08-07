@@ -3,6 +3,8 @@ import { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import {
   callDeepSeek,
+  createDeepSeekResponseMetaReader,
+  DeepSeekResponseError,
   type DeepSeekResponseMeta,
   DEEPSEEK_MODEL as MODEL,
 } from "@/lib/deepseek";
@@ -16,6 +18,64 @@ const MAX_SOURCE_TEXT_CHARACTERS = 120_000;
 const MIN_REWRITE_OUTPUT_TOKENS = 8_000;
 const MAX_INITIAL_REWRITE_OUTPUT_TOKENS = 192_000;
 const MAX_RETRY_REWRITE_OUTPUT_TOKENS = 384_000;
+
+interface CopyOptimizationAttemptDiagnostic {
+  attempt: number;
+  tokenBudget: number;
+  finishReason: string | null;
+  completionTokens: number | null;
+  responseChars: number | null;
+  hasReasoningContent: boolean;
+  reasoningChars: number;
+  failureCode?: string;
+}
+
+function diagnosticFailureCode(
+  error: unknown,
+  responseMeta: DeepSeekResponseMeta | null,
+): string {
+  if (responseMeta?.finishReason === "length") return "OUTPUT_TRUNCATED";
+  if (error instanceof DeepSeekResponseError) return error.code;
+  if (error instanceof CopyOptimizationResponseError) {
+    return error.code.toUpperCase();
+  }
+  if (error instanceof Error && (
+    error.message.includes("DeepSeek API 请求失败")
+    || error.message.includes("未配置 DeepSeek API Key")
+  )) {
+    return "REQUEST_FAILED";
+  }
+  return "PROCESSING_FAILED";
+}
+
+function safeAttemptDiagnostic(
+  attempt: CopyOptimizationAttemptDiagnostic,
+): CopyOptimizationAttemptDiagnostic {
+  return {
+    attempt: attempt.attempt,
+    tokenBudget: attempt.tokenBudget,
+    finishReason: attempt.finishReason,
+    completionTokens: attempt.completionTokens,
+    responseChars: attempt.responseChars,
+    hasReasoningContent: attempt.hasReasoningContent,
+    reasoningChars: attempt.reasoningChars,
+    ...(attempt.failureCode ? { failureCode: attempt.failureCode } : {}),
+  };
+}
+
+function logSafeDiagnostic(input: {
+  diagnosticId: string;
+  inputChars: number;
+  failureCode: string;
+  attempts: CopyOptimizationAttemptDiagnostic[];
+}) {
+  console.warn("[copy-optimization]", JSON.stringify({
+    diagnosticId: input.diagnosticId,
+    inputChars: input.inputChars,
+    failureCode: input.failureCode,
+    attempts: input.attempts.map(safeAttemptDiagnostic),
+  }));
+}
 
 function rewriteOutputTokenBudget(sourceText: string): number {
   return Math.min(
@@ -192,10 +252,11 @@ export async function POST(req: NextRequest) {
 
   const ipBlock = buildIPContextBlock(ip, styleProfile);
   const calledAt = new Date().toISOString();
-  const isDevelopment = process.env.NODE_ENV !== "production";
+  const diagnosticId = crypto.randomUUID();
   const apiMeta = { apiCalled: true, calledAt, model: MODEL, ipUsed: ip.name, mockHit: false };
-  let responseMeta: DeepSeekResponseMeta | null = null;
+  const responseMeta = createDeepSeekResponseMetaReader();
   let attempts = 0;
+  const attemptDiagnostics: CopyOptimizationAttemptDiagnostic[] = [];
 
   try {
     const initialTokenBudget = rewriteOutputTokenBudget(sourceText);
@@ -207,7 +268,8 @@ export async function POST(req: NextRequest) {
 
     for (const tokenBudget of tokenBudgets) {
       attempts += 1;
-      responseMeta = null;
+      responseMeta.clear();
+      let responseChars: number | null = null;
       try {
         const raw = await callDeepSeek(
           REWRITE_SYSTEM,
@@ -218,19 +280,43 @@ export async function POST(req: NextRequest) {
           {
             thinking: { type: "disabled" },
             responseFormat: { type: "json_object" },
-            onResponseMeta: (meta) => { responseMeta = meta; },
+            onResponseMeta: responseMeta.capture,
           },
         );
-        if ((responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length") {
+        responseChars = raw.length;
+        if (responseMeta.read()?.finishReason === "length") {
           throw new CopyOptimizationResponseError(
             "invalid_json",
             "AI返回格式异常：内容被截断，请重试",
           );
         }
         parsed = parseCopyOptimizationResponse(raw);
+        const successfulResponseMeta = responseMeta.read();
+        attemptDiagnostics.push({
+          attempt: attempts,
+          tokenBudget,
+          finishReason: successfulResponseMeta?.finishReason ?? null,
+          completionTokens: successfulResponseMeta?.completionTokens ?? null,
+          responseChars,
+          hasReasoningContent: successfulResponseMeta?.hasReasoningContent ?? false,
+          reasoningChars: successfulResponseMeta?.reasoningChars ?? 0,
+        });
         break;
       } catch (error) {
-        const wasTruncated = (responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length";
+        const responseError = error instanceof DeepSeekResponseError ? error : null;
+        const failureMeta = responseError?.responseMeta ?? responseMeta.read();
+        const failureCode = diagnosticFailureCode(error, failureMeta);
+        attemptDiagnostics.push({
+          attempt: attempts,
+          tokenBudget,
+          finishReason: failureMeta?.finishReason ?? null,
+          completionTokens: failureMeta?.completionTokens ?? null,
+          responseChars: responseError?.responseChars ?? responseChars,
+          hasReasoningContent: failureMeta?.hasReasoningContent ?? false,
+          reasoningChars: failureMeta?.reasoningChars ?? 0,
+          failureCode,
+        });
+        const wasTruncated = failureCode === "OUTPUT_TRUNCATED";
         if (wasTruncated && attempts < tokenBudgets.length) continue;
         if (wasTruncated) {
           throw new CopyOptimizationResponseError(
@@ -247,6 +333,16 @@ export async function POST(req: NextRequest) {
         "invalid_json",
         "AI返回格式异常",
       );
+    }
+
+    const recoveredFailure = attemptDiagnostics.find((attempt) => attempt.failureCode);
+    if (recoveredFailure) {
+      logSafeDiagnostic({
+        diagnosticId,
+        inputChars: sourceText.length,
+        failureCode: recoveredFailure.failureCode ?? "PROCESSING_FAILED",
+        attempts: attemptDiagnostics,
+      });
     }
 
     return NextResponse.json({
@@ -268,25 +364,24 @@ export async function POST(req: NextRequest) {
       referencedSamples: styleProfile?.sourceSampleTitles ?? [],
       ipStyleExplanation: parsed.ipStyleExplanation,
       goalImpact: parsed.goalImpact,
-      apiMeta: {
-        ...apiMeta,
-        ...(isDevelopment
-          ? {
-              requestId: (responseMeta as DeepSeekResponseMeta | null)?.requestId ?? null,
-              finishReason: (responseMeta as DeepSeekResponseMeta | null)?.finishReason ?? null,
-              completionTokens: (responseMeta as DeepSeekResponseMeta | null)?.completionTokens ?? null,
-            }
-          : {}),
-      },
+      apiMeta: { ...apiMeta, diagnosticId },
     });
   } catch (err) {
+    const failureCode = attemptDiagnostics.at(-1)?.failureCode
+      ?? diagnosticFailureCode(err, responseMeta.read());
+    logSafeDiagnostic({
+      diagnosticId,
+      inputChars: sourceText.length,
+      failureCode,
+      attempts: attemptDiagnostics,
+    });
     const originalMessage = err instanceof Error ? err.message : "改写失败，请重试";
     const errorCode = err instanceof CopyOptimizationResponseError
       ? err.code
       : originalMessage.includes("content 为空或不是字符串")
         ? "empty_content"
-        : originalMessage.includes("DeepSeek API 请求失败") ||
-            originalMessage.includes("未配置 DeepSeek API Key")
+        : originalMessage.includes("DeepSeek API 请求失败")
+            || originalMessage.includes("未配置 DeepSeek API Key")
           ? "request_failed"
           : "processing_failed";
     const message = errorCode === "empty_content"
@@ -300,29 +395,14 @@ export async function POST(req: NextRequest) {
           : errorCode === "request_failed"
             ? "AI请求失败"
             : "优化失败，请重试";
-
-    if (isDevelopment) {
-      console.error("[copy-optimization]", {
-        stage: errorCode === "request_failed" ? "request" : "response",
-        errorCode,
-        requestId: (responseMeta as DeepSeekResponseMeta | null)?.requestId ?? null,
-        finishReason: (responseMeta as DeepSeekResponseMeta | null)?.finishReason ?? null,
-      });
-    }
     return NextResponse.json(
       {
         error: message,
         errorCode,
         apiMeta: {
           ...apiMeta,
+          diagnosticId,
           error: message,
-          ...(isDevelopment
-            ? {
-                requestId: (responseMeta as DeepSeekResponseMeta | null)?.requestId ?? null,
-                finishReason: (responseMeta as DeepSeekResponseMeta | null)?.finishReason ?? null,
-                errorStage: errorCode === "request_failed" ? "request" : "response",
-              }
-            : {}),
         },
       },
       { status: 502 },

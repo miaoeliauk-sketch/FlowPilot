@@ -20,6 +20,21 @@ export interface DeepSeekResponseMeta {
   reasoningChars: number;
 }
 
+export interface DeepSeekResponseMetaReader {
+  clear: () => void;
+  capture: (meta: DeepSeekResponseMeta) => void;
+  read: () => DeepSeekResponseMeta | null;
+}
+
+export function createDeepSeekResponseMetaReader(): DeepSeekResponseMetaReader {
+  let current: DeepSeekResponseMeta | null = null;
+  return {
+    clear: () => { current = null; },
+    capture: (meta) => { current = meta; },
+    read: () => current,
+  };
+}
+
 export type DeepSeekResponseErrorCode =
   | "EMPTY_CONTENT"
   | "OUTPUT_TRUNCATED"
