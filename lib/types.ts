@@ -1,3 +1,5 @@
+import type { TopicBoardResult, TopicEvaluationSummary } from "./topic-board-contract";
+
 // ── IP风格改写引擎：口播逐字稿样本库 + 风格学习机制 ──
 // 注：原 StyleProfile / AIMemory / TrainingSource 三个接口是早期"AI人格训练"功能
 // 留下的死代码（ip-store.ts 里有读写函数，但全项目零调用），已在本次重构中移除，
@@ -75,14 +77,24 @@ export interface IPProfile {
   updatedAt: string;
 }
 
+export type TopicAssetStatus = "草稿" | "已评估" | "已采用" | "已拍摄" | "已废弃";
+
+export interface TopicAssetEvaluationIssue {
+  code: "INVALID_LEGACY_BOARD_RESULT";
+  message: string;
+}
+
 export interface TopicAsset {
   id: string;
   ipId: string;
   title: string;
   source: "manual" | "comment-radar";
-  status: "草稿" | "已采用" | "已废弃";
-  boardResult?: unknown;
+  status: TopicAssetStatus;
+  evaluationSummary?: TopicEvaluationSummary;
+  boardResult?: TopicBoardResult;
+  evaluationIssue?: TopicAssetEvaluationIssue;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface CommentAsset {

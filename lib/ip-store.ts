@@ -1,5 +1,11 @@
 "use client";
 import { IPProfile, VoiceSample, IPStyleProfile, TopicAsset, CommentAsset, ScriptAsset, KnowledgeEntry, KnowledgeCategory, HookEntry, LikesSnapshot, KnowledgeUsageRecord, KnowledgeStatus, ConsumerModule, HotMaterialAnalysis, UserProfile, VideoReview } from "./types";
+import type { TopicAssetStatus } from "./types";
+import {
+  createTopicEvaluationSummary,
+  parseTopicBoardResult,
+  TopicBoardContractError,
+} from "./topic-board-contract";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -285,16 +291,177 @@ export function deleteStyleProfile(ipId: string): void {
 }
 
 // ── IP 资产库：选题 ──
-export function getTopicAssets(ipId: string): TopicAsset[] {
-  const all = readJSON<TopicAsset[]>(KEY_TOPIC_ASSETS, []);
-  return all.filter(a => a.ipId === ipId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export class TopicAssetUpdateError extends Error {
+  readonly code: "IP_MISMATCH" | "INVALID_STATUS_TRANSITION";
+
+  constructor(code: TopicAssetUpdateError["code"], message: string) {
+    super(message);
+    this.name = "TopicAssetUpdateError";
+    this.code = code;
+  }
 }
 
-export function addTopicAsset(input: Omit<TopicAsset, "id" | "createdAt">): TopicAsset {
+type TopicAssetManualStatus = Exclude<TopicAssetStatus, "已评估">;
+
+const TOPIC_STATUS_TRANSITIONS: Record<TopicAssetStatus, TopicAssetManualStatus[]> = {
+  "草稿": [],
+  "已评估": ["已采用", "已废弃"],
+  "已采用": ["已拍摄", "已废弃"],
+  "已拍摄": [],
+  "已废弃": [],
+};
+
+type StoredTopicAsset = Omit<TopicAsset, "boardResult" | "evaluationSummary" | "updatedAt"> & {
+  boardResult?: unknown;
+  evaluationSummary?: unknown;
+  updatedAt?: string;
+};
+
+function normalizeTopicAsset(asset: StoredTopicAsset): TopicAsset {
+  const {
+    boardResult: storedBoardResult,
+    evaluationSummary: _storedEvaluationSummary,
+    ...baseAsset
+  } = asset;
+  const updatedAt = asset.updatedAt ?? asset.createdAt;
+  const normalized: TopicAsset = {
+    ...baseAsset,
+    updatedAt,
+  };
+
+  if (storedBoardResult === undefined) return normalized;
+
+  try {
+    const boardResult = parseTopicBoardResult(storedBoardResult);
+    if (boardResult.ipId !== asset.ipId) {
+      throw new TopicAssetUpdateError("IP_MISMATCH", "旧评估结果所属IP与选题所属IP不一致");
+    }
+    return {
+      ...normalized,
+      boardResult,
+      evaluationSummary: createTopicEvaluationSummary(boardResult, updatedAt),
+      evaluationIssue: undefined,
+    };
+  } catch (error) {
+    const isExpectedContractError = error instanceof TopicBoardContractError;
+    const isExpectedIPError = error instanceof TopicAssetUpdateError && error.code === "IP_MISMATCH";
+    if (!isExpectedContractError && !isExpectedIPError) throw error;
+
+    return {
+      ...normalized,
+      status: "草稿",
+      boardResult: undefined,
+      evaluationSummary: undefined,
+      evaluationIssue: {
+        code: "INVALID_LEGACY_BOARD_RESULT",
+        message: "历史评估数据不完整，请重新评估此选题",
+      },
+    };
+  }
+}
+
+export function getTopicAssets(ipId: string): TopicAsset[] {
+  const all = readJSON<StoredTopicAsset[]>(KEY_TOPIC_ASSETS, []);
+  return all
+    .map(normalizeTopicAsset)
+    .filter(a => a.ipId === ipId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getTopicAsset(id: string): TopicAsset | null {
+  const all = readJSON<StoredTopicAsset[]>(KEY_TOPIC_ASSETS, []);
+  const asset = all.find(item => item.id === id);
+  return asset ? normalizeTopicAsset(asset) : null;
+}
+
+export function addTopicAsset(
+  input: Pick<TopicAsset, "ipId" | "title" | "source">,
+): TopicAsset {
   const all = readJSON<TopicAsset[]>(KEY_TOPIC_ASSETS, []);
-  const asset: TopicAsset = { ...input, id: genId(), createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const asset: TopicAsset = {
+    ...input,
+    id: genId(),
+    status: "草稿",
+    createdAt: now,
+    updatedAt: now,
+  };
   writeJSON(KEY_TOPIC_ASSETS, [...all, asset]);
   return asset;
+}
+
+export function updateTopicAssetEvaluation(
+  id: string,
+  boardResultInput: unknown,
+): TopicAsset | null {
+  const all = readJSON<Array<TopicAsset & { updatedAt?: string }>>(KEY_TOPIC_ASSETS, []);
+  const index = all.findIndex(asset => asset.id === id);
+  if (index < 0) return null;
+
+  const current = normalizeTopicAsset(all[index]);
+  const boardResult = parseTopicBoardResult(boardResultInput);
+  if (boardResult.ipId !== current.ipId) {
+    throw new TopicAssetUpdateError(
+      "IP_MISMATCH",
+      `评估结果所属IP（${boardResult.ipId}）与选题所属IP（${current.ipId}）不一致`,
+    );
+  }
+  if (current.status !== "草稿" && current.status !== "已评估") {
+    throw new TopicAssetUpdateError(
+      "INVALID_STATUS_TRANSITION",
+      `状态为${current.status}的选题不能重新保存评估结果`,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const { evaluationIssue: _previousEvaluationIssue, ...currentWithoutEvaluationIssue } = current;
+  const updated: TopicAsset = {
+    ...currentWithoutEvaluationIssue,
+    status: "已评估",
+    boardResult,
+    evaluationSummary: createTopicEvaluationSummary(boardResult, now),
+    updatedAt: now,
+  };
+  all[index] = updated;
+  writeJSON(KEY_TOPIC_ASSETS, all);
+  return updated;
+}
+
+export function updateTopicAssetStatus(
+  id: string,
+  nextStatus: TopicAssetManualStatus,
+): TopicAsset | null;
+export function updateTopicAssetStatus(
+  id: string,
+  nextStatus: TopicAssetStatus,
+): TopicAsset | null {
+  if (nextStatus === "已评估") {
+    throw new TopicAssetUpdateError(
+      "INVALID_STATUS_TRANSITION",
+      "已评估状态只能通过保存完整评估结果产生",
+    );
+  }
+
+  const all = readJSON<Array<TopicAsset & { updatedAt?: string }>>(KEY_TOPIC_ASSETS, []);
+  const index = all.findIndex(asset => asset.id === id);
+  if (index < 0) return null;
+
+  const current = normalizeTopicAsset(all[index]);
+  if (!TOPIC_STATUS_TRANSITIONS[current.status]?.includes(nextStatus)) {
+    throw new TopicAssetUpdateError(
+      "INVALID_STATUS_TRANSITION",
+      `选题状态不能从${current.status}变更为${nextStatus}`,
+    );
+  }
+
+  const updated: TopicAsset = {
+    ...current,
+    status: nextStatus,
+    updatedAt: new Date().toISOString(),
+  };
+  all[index] = updated;
+  writeJSON(KEY_TOPIC_ASSETS, all);
+  return updated;
 }
 
 export function deleteTopicAsset(id: string): void {
