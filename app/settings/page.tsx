@@ -2,26 +2,12 @@
 import { useState, useEffect, useRef } from "react";
 import { getStoredApiKey, setStoredApiKey, clearStoredApiKey, hasApiKey } from "@/lib/api-settings";
 import { apiFetch } from "@/lib/api-fetch";
+import { CONTENT_MASTER_STORAGE_KEY } from "@/lib/content-master-store";
 import { DECISION_MEMORY_STORAGE_KEY } from "@/lib/decision-memory-store";
-
-// API Key不进导出，其余所有数据key都导出
-const EXPORT_KEYS = [
-  "ipwr:ips_v2",
-  "ipwr:activeIpId",
-  "ipwr:voiceSamples",
-  "ipwr:voiceSamplesMigrated",
-  "ipwr:ipStyleProfiles",
-  "ipwr:topicAssets",
-  "ipwr:commentAssets",
-  "ipwr:scriptAssets",
-  "ipwr:knowledgeEntries",
-  "ipwr:hookEntries",
-  "ipwr:hotAnalyses",
-  "ipwr:videoReviews",
-  "ipwr:userProfile",
-  "ipwr:weeklyReports",
-  DECISION_MEMORY_STORAGE_KEY,
-];
+import {
+  createFlowPilotBackup,
+  restoreFlowPilotBackup,
+} from "@/lib/settings-backup";
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <div className={`rounded-[14px] border border-[#E5E4DE] bg-white p-5 ${className}`}>{children}</div>;
@@ -206,21 +192,7 @@ function BackupSection() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   function handleExport() {
-    const data: Record<string, unknown> = {
-      _meta: {
-        version: "1.0",
-        exportedAt: new Date().toISOString(),
-        app: "FlowPilot Desktop Preview 0.1",
-        note: "API Key 不在导出内容中",
-      },
-    };
-    for (const key of EXPORT_KEYS) {
-      const val = localStorage.getItem(key);
-      if (val !== null) {
-        try { data[key] = JSON.parse(val); }
-        catch { data[key] = val; }
-      }
-    }
+    const data = createFlowPilotBackup(localStorage);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -235,7 +207,7 @@ function BackupSection() {
     if (!file) return;
     setImporting(true); setImportResult(null);
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
         const raw = ev.target?.result as string;
         const data = JSON.parse(raw) as Record<string, unknown>;
@@ -243,13 +215,7 @@ function BackupSection() {
           setImportResult({ ok: false, msg: "文件格式不正确，请选择 FlowPilot 导出的备份文件" });
           return;
         }
-        let count = 0;
-        for (const key of EXPORT_KEYS) {
-          if (key in data) {
-            localStorage.setItem(key, JSON.stringify(data[key]));
-            count++;
-          }
-        }
+        const count = await restoreFlowPilotBackup(data, localStorage);
         setImportResult({ ok: true, msg: `✓ 导入成功，恢复了 ${count} 项数据。请刷新页面（Cmd+Shift+R）使数据生效。` });
       } catch {
         setImportResult({ ok: false, msg: "文件解析失败，请确认是有效的 JSON 备份文件" });
@@ -265,7 +231,7 @@ function BackupSection() {
     const summary: string[] = [];
     const counts: Record<string, number> = {
       "IP配置": 0, "知识库条目": 0, "脚本记录": 0,
-      "选题记录": 0, "复盘记录": 0, "爆款分析": 0, "判断记录": 0,
+      "选题记录": 0, "母稿记录": 0, "复盘记录": 0, "爆款分析": 0, "判断记录": 0,
     };
     try {
       const ips = JSON.parse(localStorage.getItem("ipwr:ips_v2") || "[]");
@@ -276,6 +242,10 @@ function BackupSection() {
       counts["脚本记录"] = Array.isArray(scripts) ? scripts.length : 0;
       const topics = JSON.parse(localStorage.getItem("ipwr:topicAssets") || "[]");
       counts["选题记录"] = Array.isArray(topics) ? topics.length : 0;
+      const contentMasters = JSON.parse(
+        localStorage.getItem(CONTENT_MASTER_STORAGE_KEY) || '{"schemaVersion":1,"drafts":[]}',
+      );
+      counts["母稿记录"] = Array.isArray(contentMasters?.drafts) ? contentMasters.drafts.length : 0;
       const reviews = JSON.parse(localStorage.getItem("ipwr:videoReviews") || "[]");
       counts["复盘记录"] = Array.isArray(reviews) ? reviews.length : 0;
       const hot = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") || "[]");

@@ -2,6 +2,8 @@
 
 import { useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
+import { ContentMasterEditor } from "@/components/ContentMasterEditor";
+import type { ContentMaster } from "@/lib/content-master-types";
 import type {
   CopyIntegrationResult,
   CopyIntegrationSource,
@@ -29,6 +31,8 @@ export default function CopyIntegrationPage() {
   const [sources, setSources] = useState<CopyIntegrationSource[]>(INITIAL_SOURCES);
   const [instruction, setInstruction] = useState("");
   const [result, setResult] = useState<CopyIntegrationResult | null>(null);
+  const [savedContentMaster, setSavedContentMaster] = useState<ContentMaster | null>(null);
+  const [resultRevision, setResultRevision] = useState(0);
   const [resultSourceNames, setResultSourceNames] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -86,9 +90,12 @@ export default function CopyIntegrationPage() {
         source.id,
         source.name.trim() || "未命名素材",
       ])));
+      setSavedContentMaster(null);
       setResult(body);
+      setResultRevision(current => current + 1);
     } catch (caught) {
       setResult(null);
+      setSavedContentMaster(null);
       setError(caught instanceof Error ? caught.message : "文案整合失败");
     } finally {
       setLoading(false);
@@ -97,9 +104,20 @@ export default function CopyIntegrationPage() {
 
   async function copyDraft() {
     if (!result) return;
-    await navigator.clipboard.writeText(result.draft.fullText);
+    await navigator.clipboard.writeText(savedContentMaster?.fullText ?? result.draft.fullText);
     setCopied(true);
   }
+
+  const displayedDraftSections = savedContentMaster
+    ? savedContentMaster.segments
+      .filter(segment => segment.status === "正常")
+      .sort((first, second) => first.order - second.order)
+      .map(segment => ({
+        heading: segment.heading,
+        paragraphs: segment.content.split(/\n{2,}/),
+        sourceIds: segment.sourceIds,
+      }))
+    : result?.draft.sections ?? [];
 
   return (
     <div className="mx-auto max-w-[1180px] p-2 md:p-5">
@@ -185,8 +203,14 @@ export default function CopyIntegrationPage() {
                     {copied ? "已复制" : "复制母稿"}
                   </button>
                 </div>
+                <ContentMasterEditor
+                  key={resultRevision}
+                  sections={result.draft.sections}
+                  sources={Array.from(sourceNames, ([id, name]) => ({ id, name }))}
+                  onDraftChange={setSavedContentMaster}
+                />
                 <div className="flex flex-col gap-5">
-                  {result.draft.sections.map((section, index) => (
+                  {displayedDraftSections.map((section, index) => (
                     <article key={`${section.heading}-${index}`}>
                       <h3 className="text-[15px] font-bold text-[#2B2B29]">{section.heading}</h3>
                       <div className="mt-2 flex flex-col gap-2 text-[13.5px] leading-7 text-[#444]">
