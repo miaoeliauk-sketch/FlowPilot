@@ -16,6 +16,7 @@ export interface ScriptGenerationSettings {
 export interface PartialScriptDraft<T = unknown> {
   version: 1;
   ipId: string;
+  topicId?: string;
   topic: string;
   savedAt: string;
   failedStage: PartialScriptFailedStage;
@@ -105,6 +106,8 @@ export function getPartialScriptDraft<T = unknown>(
       !draft ||
       draft.version !== 1 ||
       draft.ipId !== ipId ||
+      (draft.topicId !== undefined &&
+        (typeof draft.topicId !== "string" || !draft.topicId.trim())) ||
       typeof draft.topic !== "string" ||
       typeof draft.savedAt !== "string" ||
       (draft.failedStage !== "storyboard" && draft.failedStage !== "execution") ||

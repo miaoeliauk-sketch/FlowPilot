@@ -176,6 +176,15 @@ function TopicHistoryPanel({
                   {asset.evaluationIssue && <p className="mt-1.5 text-[11.5px] text-[#A32D2D]">{asset.evaluationIssue.message}</p>}
                 </div>
                 <div className="flex flex-wrap justify-end gap-1.5">
+                  {(asset.status === "已评估" || asset.status === "已采用") && asset.boardResult && (
+                    <a
+                      href={`/script-factory?topicId=${encodeURIComponent(asset.id)}`}
+                      aria-label={`用选题“${asset.title}”生成脚本`}
+                      className="rounded-full bg-[#1C1C1B] px-2.5 py-1 text-[11px] font-semibold text-white"
+                    >
+                      生成脚本
+                    </a>
+                  )}
                   {asset.boardResult && (
                     <button type="button" aria-label={`查看选题“${asset.title}”完整评估`} onClick={() => onOpen(asset)} className="rounded-full bg-[#F1EFE8] px-2.5 py-1 text-[11px] font-semibold text-[#555]">查看评估</button>
                   )}

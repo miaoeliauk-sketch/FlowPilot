@@ -3,8 +3,8 @@ import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
 import { getIPDisplayLabel } from "@/lib/ip-display";
-import { addScriptAsset, getKnowledgeEntries, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
-import { IPProfile, KnowledgeEntry } from "@/lib/types";
+import { addScriptAsset, getActiveIPId, getKnowledgeEntries, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
+import { IPProfile, KnowledgeEntry, TopicAsset } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
 import { CitationSummary } from "@/components/ui/citation-summary";
@@ -19,6 +19,7 @@ import type {
   ScriptGenerationStatus,
   ScriptPartialFailure,
 } from "@/lib/script-factory-contract";
+import { addScriptAssetForTopic, resolveTopicForScript, TopicScriptLinkError } from "@/lib/topic-script-link";
 
 const TOPIC_PLACEHOLDER = "例如：一个正在发生的变化，普通人应该如何判断？";
 
@@ -489,6 +490,7 @@ export default function ScriptFactoryPage() {
   const [apiMeta, setApiMeta] = useState<ApiMeta | null>(null);
   const [partialDraftSavedAt, setPartialDraftSavedAt] = useState<string | null>(null);
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
+  const [linkedTopic, setLinkedTopic] = useState<TopicAsset | null>(null);
 
   const currentFormat = FORMAT_CATEGORIES.find(f => f.id === formatCategory) ?? FORMAT_CATEGORIES[0];
 
@@ -505,7 +507,13 @@ export default function ScriptFactoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIP?.id]);
 
-  function restorePartialDraft(draft: PartialScriptDraft<ScriptResult>) {
+  function restorePartialDraft(
+    draft: PartialScriptDraft<ScriptResult>,
+    expectedIPId: string,
+  ): string | null {
+    if (draft.ipId !== expectedIPId || draft.result.ipId !== expectedIPId) {
+      return "本地临时草稿数据不完整，已停止自动恢复。";
+    }
     const settings = draft.generationSettings;
     setTopic(draft.topic);
     setPlatform(settings.platform);
@@ -518,30 +526,67 @@ export default function ScriptFactoryPage() {
     setResult(draft.result);
     setApiMeta(draft.result.apiMeta);
     setPartialDraftSavedAt(draft.savedAt);
+    setLinkedTopic(null);
+    if (draft.topicId) {
+      try {
+        setLinkedTopic(resolveTopicForScript(draft.topicId, draft.ipId));
+      } catch {
+        return "临时草稿已恢复，但原关联选题已失效，本次不会继续建立选题关联。";
+      }
+    }
+    return null;
   }
 
   useEffect(() => {
+    setLinkedTopic(null);
+    setResult(null);
+    setApiMeta(null);
+    setPartialDraftSavedAt(null);
     if (!activeIP) {
-      setResult(null);
-      setApiMeta(null);
-      setPartialDraftSavedAt(null);
       return;
     }
     const draft = getPartialScriptDraft(activeIP.id);
     if (draft && isStoredScriptResult(draft.result)) {
-      restorePartialDraft(draft as PartialScriptDraft<ScriptResult>);
-      setDraftStorageError(null);
+      setDraftStorageError(restorePartialDraft(draft as PartialScriptDraft<ScriptResult>, activeIP.id));
     }
     else {
-      setResult(null);
-      setApiMeta(null);
-      setPartialDraftSavedAt(null);
       setDraftStorageError(draft ? "本地临时草稿数据不完整，已停止自动恢复。" : null);
     }
     setError(null);
     // 仅在切换IP时恢复该IP自己的临时草稿。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIP?.id]);
+
+  useEffect(() => {
+    if (ipLoading || typeof window === "undefined") return;
+    const topicId = new URLSearchParams(window.location.search).get("topicId");
+    if (!topicId) return;
+    if (!activeIP) {
+      setLinkedTopic(null);
+      setError("这个选题需要绑定当前操盘IP，请先选择对应IP后重试。");
+      return;
+    }
+    try {
+      const asset = resolveTopicForScript(topicId, activeIP.id);
+      const currentDraft = getPartialScriptDraft(activeIP.id);
+      if (currentDraft?.topicId?.trim() !== asset.id) {
+        setResult(null);
+        setApiMeta(null);
+        setPartialDraftSavedAt(null);
+      }
+      setMode("classic");
+      setTopic(asset.title);
+      setLinkedTopic(asset);
+      setError(null);
+    } catch (linkError) {
+      setLinkedTopic(null);
+      setError(
+        linkError instanceof TopicScriptLinkError
+          ? linkError.message
+          : "读取关联选题失败，请返回选题库重试。",
+      );
+    }
+  }, [activeIP?.id, ipLoading]);
 
   function handleClearPartialDraft() {
     if (!activeIP) return;
@@ -616,9 +661,32 @@ export default function ScriptFactoryPage() {
   async function handleGenerate() {
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
+    const requestIP = activeIP;
+    const requestedTopic = topic.trim();
+    let linkedTopicAtRequest: TopicAsset | null = null;
+    try {
+      if (getActiveIPId() !== requestIP.id) {
+        throw new Error("当前操盘IP刚刚发生变化，请确认后重新生成。");
+      }
+      if (linkedTopic) {
+        linkedTopicAtRequest = resolveTopicForScript(linkedTopic.id, requestIP.id);
+      }
+    } catch (ownershipError) {
+      setError(ownershipError instanceof Error ? ownershipError.message : "选题与当前IP校验失败，请重试。");
+      return;
+    }
     setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setLoading(true);
     try {
-      const data = await generateFor(activeIP, topic);
+      const data = await generateFor(requestIP, requestedTopic);
+      if (data.ipId !== requestIP.id) {
+        throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
+      }
+      if (getActiveIPId() !== requestIP.id) {
+        throw new Error("生成期间当前操盘IP已切换，结果未保存；请切回原IP后重新生成。");
+      }
+      if (linkedTopicAtRequest) {
+        linkedTopicAtRequest = resolveTopicForScript(linkedTopicAtRequest.id, requestIP.id);
+      }
       setResult(data);
       if (data.generationStatus === "partial") {
         if (!data.partialFailure) {
@@ -627,8 +695,9 @@ export default function ScriptFactoryPage() {
         const savedAt = new Date().toISOString();
         const saved = savePartialScriptDraft<ScriptResult>({
           version: 1,
-          ipId: activeIP.id,
-          topic,
+          ipId: requestIP.id,
+          topicId: linkedTopicAtRequest?.id,
+          topic: requestedTopic,
           savedAt,
           failedStage: data.partialFailure.stage,
           warning: data.partialFailure.message,
@@ -648,23 +717,33 @@ export default function ScriptFactoryPage() {
           setDraftStorageError("核心脚本可以继续查看，但浏览器未能自动保存临时草稿。刷新或离开前请先复制内容。");
         }
       } else {
-        addScriptAsset({
-          ipId: activeIP.id,
+        const scriptInput = {
+          ipId: requestIP.id,
           title: data.titles?.[0]?.title || topic,
           cover: data.coverCopy?.[0] || "",
           content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
-          status: "草稿",
+          status: "草稿" as const,
           scriptResult: data,
-        });
-        if (!clearPartialScriptDraft(activeIP.id)) {
+        };
+        if (getActiveIPId() !== requestIP.id) {
+          throw new Error("保存前检测到当前操盘IP已切换，结果未保存。");
+        }
+        if (linkedTopicAtRequest) {
+          addScriptAssetForTopic({ ...scriptInput, topicId: linkedTopicAtRequest.id });
+        } else {
+          addScriptAsset(scriptInput);
+        }
+        if (!clearPartialScriptDraft(requestIP.id)) {
           setDraftStorageError("完整脚本已保存，但浏览器未能清除旧的本地临时草稿。");
         }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "脚本生成失败，请重试");
-      const draft = getPartialScriptDraft(activeIP.id);
-      if (draft && isStoredScriptResult(draft.result)) {
-        restorePartialDraft(draft as PartialScriptDraft<ScriptResult>);
+      if (getActiveIPId() === requestIP.id) {
+        const draft = getPartialScriptDraft(requestIP.id);
+        if (draft && isStoredScriptResult(draft.result)) {
+          setDraftStorageError(restorePartialDraft(draft as PartialScriptDraft<ScriptResult>, requestIP.id));
+        }
       }
     } finally {
       setLoading(false);
@@ -927,6 +1006,13 @@ export default function ScriptFactoryPage() {
         </div>
       )}
       {showContext && activeIP && <IPContextModal ip={activeIP} onClose={() => setShowContext(false)} />}
+
+      {linkedTopic && (
+        <div className="mb-3 rounded-[14px] border border-[#B8D98D] bg-[#F7FCF0] px-4 py-3 text-[12.5px] text-[#3B6D11]">
+          <div className="font-semibold">当前关联选题</div>
+          <div className="mt-1 text-[#1C1C1B]">{linkedTopic.title}</div>
+        </div>
+      )}
 
       <ApiStatusPanel meta={apiMeta} />
 

@@ -95,6 +95,27 @@ test("does not restore an incomplete draft record", () => {
   assert.equal(getPartialScriptDraft("ip-a", storage), null);
 });
 
+test("preserves an optional topicId and rejects malformed linked drafts", () => {
+  const storage = createMemoryStorage();
+  const linkedDraft = { ...createDraft("ip-a", "关联选题"), topicId: "topic-123" };
+  assert.equal(savePartialScriptDraft(linkedDraft, storage), true);
+  assert.equal(
+    (getPartialScriptDraft("ip-a", storage) as { topicId?: string } | null)?.topicId,
+    "topic-123",
+  );
+
+  storage.setItem(
+    SCRIPT_FACTORY_DRAFT_STORAGE_KEY,
+    JSON.stringify({
+      version: 1,
+      draftsByIP: {
+        "ip-a": { ...linkedDraft, topicId: false },
+      },
+    }),
+  );
+  assert.equal(getPartialScriptDraft("ip-a", storage), null);
+});
+
 test("a browser that blocks access to localStorage does not crash the page", () => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", {
