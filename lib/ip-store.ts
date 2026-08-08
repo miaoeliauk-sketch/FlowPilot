@@ -390,6 +390,33 @@ export function addTopicAsset(
   return asset;
 }
 
+export function addEvaluatedTopicAsset(
+  input: Pick<TopicAsset, "ipId" | "title" | "source">,
+  boardResultInput: unknown,
+): TopicAsset {
+  const boardResult = parseTopicBoardResult(boardResultInput);
+  if (boardResult.ipId !== input.ipId) {
+    throw new TopicAssetUpdateError(
+      "IP_MISMATCH",
+      `评估结果所属IP（${boardResult.ipId}）与选题所属IP（${input.ipId}）不一致`,
+    );
+  }
+
+  const all = readJSON<TopicAsset[]>(KEY_TOPIC_ASSETS, []);
+  const now = new Date().toISOString();
+  const asset: TopicAsset = {
+    ...input,
+    id: genId(),
+    status: "已评估",
+    boardResult,
+    evaluationSummary: createTopicEvaluationSummary(boardResult, now),
+    createdAt: now,
+    updatedAt: now,
+  };
+  writeJSON(KEY_TOPIC_ASSETS, [...all, asset]);
+  return asset;
+}
+
 export function updateTopicAssetEvaluation(
   id: string,
   boardResultInput: unknown,

@@ -1,4 +1,44 @@
 import type { TopicBoardResult } from "./topic-board-contract";
+import type { IPProfile } from "./types";
+
+export function createTopicBoardIPProfile(
+  overrides: Partial<IPProfile> = {},
+): IPProfile {
+  return {
+    id: "ip-shuimuran",
+    name: "水木然",
+    avatar: "水",
+    positioning: "商业认知作者",
+    platforms: ["视频号"],
+    audience: "关注商业趋势和个人成长的人",
+    contentDirection: ["商业洞察"],
+    personaKeywords: ["理性"],
+    professionalIdentity: "商业作者",
+    personalityTags: ["克制"],
+    credibilitySource: "长期研究",
+    representativeViewpoints: ["趋势影响个体"],
+    tone: "理性克制",
+    commonOpenings: ["很多人没意识到"],
+    commonClosings: ["这才是关键"],
+    catchphrases: [],
+    forbiddenExpressions: ["装修"],
+    pacing: "层层递进",
+    commonScenes: ["书房"],
+    commonShotTypes: ["口播"],
+    showsFace: true,
+    usesScreenRecording: false,
+    needsBroll: false,
+    needsCaseScreenshots: false,
+    needsSubtitleHighlight: true,
+    sampleViralTitles: [],
+    styleNotes: "商业趋势",
+    bio: "",
+    color: "#123456",
+    createdAt: "2026-08-05T00:00:00.000Z",
+    updatedAt: "2026-08-05T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 export function createValidTopicBoardResult(): TopicBoardResult {
   return {

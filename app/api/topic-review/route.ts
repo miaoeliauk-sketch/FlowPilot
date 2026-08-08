@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { IPProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
+import { parseRequiredIPProfile } from "@/lib/ip-profile-validation";
+import {
+  parseTopicBoardResult,
+  TOPIC_BOARD_CONTRACT_VERSION,
+} from "@/lib/topic-board-contract";
 
 import {
   callDeepSeek,
@@ -10,30 +14,30 @@ import {
 } from "@/lib/deepseek";
 
 
-// 兜底IP上下文（理论上前端总会传ipProfile，这里只是防止异常请求导致500）
-const FALLBACK_IP: IPProfile = {
-  id: "unknown", name: "未指定IP", avatar: "?", positioning: "未填写", platforms: [],
-  audience: "未填写", contentDirection: [],
-  personaKeywords: [], professionalIdentity: "未填写", personalityTags: [], credibilitySource: "未填写", representativeViewpoints: [],
-  tone: "未填写", commonOpenings: [], commonClosings: [], catchphrases: [], forbiddenExpressions: [], pacing: "未填写",
-  commonScenes: [], commonShotTypes: [], showsFace: true, usesScreenRecording: true, needsBroll: false, needsCaseScreenshots: false, needsSubtitleHighlight: false,
-  sampleViralTitles: [], styleNotes: "",
-  bio: "", color: "#999", createdAt: "", updatedAt: "",
-};
-
 class TopicReviewAIError extends Error {
   readonly stage: string;
   readonly responseMeta: DeepSeekResponseMeta | null;
+  readonly errorCode: TopicReviewAttemptErrorCode | null;
 
-  constructor(stage: string, message: string, responseMeta: DeepSeekResponseMeta | null) {
+  constructor(
+    stage: string,
+    message: string,
+    responseMeta: DeepSeekResponseMeta | null,
+    errorCode: TopicReviewAttemptErrorCode | null = null,
+  ) {
     super(message);
     this.name = "TopicReviewAIError";
     this.stage = stage;
     this.responseMeta = responseMeta;
+    this.errorCode = errorCode;
   }
 }
 
-type TopicReviewAttemptErrorCode = "EMPTY_CONTENT" | "TRUNCATED" | "INVALID_JSON";
+type TopicReviewAttemptErrorCode =
+  | "EMPTY_CONTENT"
+  | "TRUNCATED"
+  | "INVALID_JSON"
+  | "INVALID_SAFETY_REVIEW";
 
 class TopicReviewAttemptError extends Error {
   readonly code: TopicReviewAttemptErrorCode;
@@ -70,6 +74,76 @@ function parseTopicReviewJSON<T>(content: string, responseShape: "object" | "arr
   }
 }
 
+interface TopicReviewExpertAIResponse {
+  observation?: string;
+  reasoning?: string;
+  conclusion?: string;
+  dims?: { label: string; score: number }[];
+  vote?: string;
+  veto?: boolean;
+  vetoReason?: string | null;
+}
+
+function parseSafetyExpertResponse(value: unknown): TopicReviewExpertAIResponse {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官返回的顶层结构不合法");
+  }
+  const record = value as Record<string, unknown>;
+  for (const field of ["observation", "reasoning", "conclusion"] as const) {
+    if (typeof record[field] !== "string" || record[field].trim().length === 0) {
+      throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", `安全合规官缺少有效字段：${field}`);
+    }
+  }
+  if (!Array.isArray(record.dims) || record.dims.length !== 3) {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官缺少有效字段：dims");
+  }
+  const expectedLabels = new Set(["言行无害性", "合规性", "争议免疫力"]);
+  const dims = record.dims.map((dimension) => {
+    if (typeof dimension !== "object" || dimension === null || Array.isArray(dimension)) {
+      throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官dims条目结构不合法");
+    }
+    const item = dimension as Record<string, unknown>;
+    if (
+      typeof item.label !== "string" ||
+      !expectedLabels.has(item.label) ||
+      typeof item.score !== "number" ||
+      !Number.isFinite(item.score) ||
+      item.score < 0 ||
+      item.score > 10
+    ) {
+      throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官dims条目内容不合法");
+    }
+    return { label: item.label, score: item.score };
+  });
+  if (new Set(dims.map(dimension => dimension.label)).size !== expectedLabels.size) {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官dims缺少必需维度");
+  }
+  if (typeof record.veto !== "boolean") {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官缺少有效字段：veto");
+  }
+  if (!Object.prototype.hasOwnProperty.call(record, "vetoReason")) {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官缺少有效字段：vetoReason");
+  }
+  if (
+    (record.veto && (typeof record.vetoReason !== "string" || record.vetoReason.trim().length === 0)) ||
+    (!record.veto && record.vetoReason !== null)
+  ) {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官vetoReason与veto不一致");
+  }
+  if (typeof record.vote !== "string" || !["支持", "保留意见", "反对"].includes(record.vote)) {
+    throw new TopicReviewAttemptError("INVALID_SAFETY_REVIEW", "安全合规官缺少有效字段：vote");
+  }
+  return {
+    observation: record.observation as string,
+    reasoning: record.reasoning as string,
+    conclusion: record.conclusion as string,
+    dims,
+    vote: record.vote,
+    veto: record.veto,
+    vetoReason: record.vetoReason as string | null,
+  };
+}
+
 async function callTopicReviewAI<T>(
   stage: string,
   systemPrompt: string,
@@ -77,6 +151,7 @@ async function callTopicReviewAI<T>(
   maxTokens: number,
   apiKey: string,
   responseShape: "object" | "array",
+  validate?: (value: unknown) => T,
 ): Promise<T> {
   let responseMeta: DeepSeekResponseMeta | null = null;
   for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
@@ -92,7 +167,8 @@ async function callTopicReviewAI<T>(
       if ((responseMeta as DeepSeekResponseMeta | null)?.finishReason === "length") {
         throw new TopicReviewAttemptError("TRUNCATED", "DeepSeek返回内容被截断");
       }
-      return parseTopicReviewJSON<T>(content, responseShape);
+      const parsed = parseTopicReviewJSON<unknown>(content, responseShape);
+      return validate ? validate(parsed) : parsed as T;
     } catch (error) {
       const normalizedError = error instanceof TopicReviewAttemptError
         ? error
@@ -103,7 +179,7 @@ async function callTopicReviewAI<T>(
       const message = error instanceof Error ? error.message : "AI调用失败";
       const retryable = normalizedError !== null;
       if (retryable && tryIndex === 0) continue;
-      throw new TopicReviewAIError(stage, message, responseMeta);
+      throw new TopicReviewAIError(stage, message, responseMeta, normalizedError?.code ?? null);
     }
   }
   throw new TopicReviewAIError(stage, "AI调用失败", responseMeta);
@@ -334,6 +410,41 @@ const EXPERTS = [
   "vote": "支持或保留意见或反对"
 }`,
   },
+  {
+    role: "安全合规官",
+    color: "#8A8A86",
+    weight: 0,
+    systemPrompt: `你是一位内容安全合规官，职责是审查选题“火了之后会不会出事”，而不是“能不能火”。
+你审查【下方给出的具体IP】做这个选题的言行风险，账号粉丝量级越大、账号阶段越成熟，你的标准越严格。
+你只回答三个问题：
+1. 这个选题的言行是否可能对特定人群、行业、个体造成伤害或冒犯？
+2. 是否涉及绝对化表述、虚假宣传，或医疗、金融、法律等敏感领域的违规风险？
+3. 是否可能引发争议性解读，损害该IP的长期形象？
+子维度（每项0-10分，分数越高代表越安全）：言行无害性、合规性、争议免疫力。
+最终分数 =（各维度之和/维度数量）×10，结果取整。
+一票否决规则：任一子维度≤3分，或你判断存在不可控风险时，veto必须为true。
+特别规定：凡是点名或可识别地曝光、指控、批判具体公司、品牌、个人的选题，即使名字打码为“XX”，也涉及名誉侵权和事实核实风险，属于不可控风险，veto必须为true，除非选题本身提供了司法判决等权威依据。
+存在可控风险时，必须给出具体的规避方法，不能只说“注意措辞”。
+严格按JSON格式输出。`,
+    userPromptTemplate: (topic: string, ipBlock: string) => `${ipBlock}
+
+请站在上面这个具体IP的角度，对这个视频选题进行安全合规审查：「${topic}」
+
+严格按以下JSON格式输出：
+{
+  "observation": "风险观察（点名该选题涉及的具体人群、行业、敏感点，没有就明说没有）",
+  "reasoning": "风险推理（结合这个IP的粉丝量级和人设，分析最坏情况下的舆论解读）",
+  "conclusion": "审查结论（明确说明无风险直接过、有可控风险和具体规避措辞，或不可控风险否决）",
+  "dims": [
+    {"label": "言行无害性", "score": 数字},
+    {"label": "合规性", "score": 数字},
+    {"label": "争议免疫力", "score": 数字}
+  ],
+  "veto": true或false,
+  "vetoReason": "若veto为true，一句话说明否决原因；否则为null",
+  "vote": "支持或保留意见或反对"
+}`,
+  },
 ];
 
 // ── 首席反对官 ──
@@ -428,34 +539,39 @@ function scoreLevel(s: number) {
 
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
-  let body: { topic?: string; ipProfile?: IPProfile; userPersonas?: { name: string; coreNeeds: string[]; coreConcerns: string[]; contentPreferences: string[]; purchaseIntent: string; topicFocus: string; representativeComments: string[] }[] };
+  let body: { topic?: string; ipProfile?: unknown; userPersonas?: { name: string; coreNeeds: string[]; coreConcerns: string[]; contentPreferences: string[]; purchaseIntent: string; topicFocus: string; representativeComments: string[] }[] };
   try { body = await req.json(); }
   catch { return NextResponse.json({ error: "请求格式错误" }, { status: 400 }); }
+
+  const ipProfileResult = parseRequiredIPProfile(body.ipProfile);
+  if (!ipProfileResult.ok) {
+    return NextResponse.json({
+      error: ipProfileResult.error,
+      errorCode: ipProfileResult.errorCode,
+      errorField: ipProfileResult.errorField,
+    }, { status: 400 });
+  }
+  const ip = ipProfileResult.ipProfile;
 
   const topic = (body.topic ?? "").trim();
   if (!topic) return NextResponse.json({ error: "请输入选题内容" }, { status: 400 });
 
-  const ip = body.ipProfile ?? FALLBACK_IP;
   const ipBlock = buildIPContextBlock(ip);
   const personas = body.userPersonas ?? [];
 
   try {
-    // ── 第一步：8位专家并行调用，每位专家都拿到同一份IP上下文 ──
+    // ── 第一步：9位专家并行调用，每位专家都拿到同一份IP上下文 ──
     const expertResults = await Promise.all(
       EXPERTS.map(async (expert) => {
-        const parsed = await callTopicReviewAI<{
-          observation?: string;
-          reasoning?: string;
-          conclusion?: string;
-          dims?: { label: string; score: number }[];
-          vote?: string;
-        }>(
+        const isSafetyExpert = expert.role === "安全合规官";
+        const parsed = await callTopicReviewAI<TopicReviewExpertAIResponse>(
           `expert:${expert.role}`,
           expert.systemPrompt,
           expert.userPromptTemplate(topic, ipBlock),
           800,
           apiKey,
           "object",
+          isSafetyExpert ? parseSafetyExpertResponse : undefined,
         );
 
         const dims = parsed.dims ?? [];
@@ -467,13 +583,26 @@ export async function POST(req: NextRequest) {
           ? `(${dims.map((d: { score: number }) => d.score).join(" + ")}) / ${dims.length} × 10 = ${avgScore}`
           : `${avgScore}`;
 
+        const minimumSafetyDimension = dims.length > 0
+          ? Math.min(...dims.map((dimension: { score: number }) => dimension.score))
+          : 10;
+        const forcedSafetyVeto = isSafetyExpert && (minimumSafetyDimension <= 3 || avgScore <= 45);
+        const safetyVetoReason = isSafetyExpert
+          ? parsed.vetoReason ?? (forcedSafetyVeto
+            ? `安全评分过低（${avgScore}分），触发自动否决：${parsed.conclusion ?? "存在不可控的言行或合规风险"}`
+            : null)
+          : null;
+        const safetyVeto = isSafetyExpert && (parsed.veto === true || forcedSafetyVeto);
+
         return {
           role: expert.role,
           color: expert.color,
           weight: expert.weight,
           observation: parsed.observation ?? "",
           reasoning: parsed.reasoning ?? "",
-          conclusion: parsed.conclusion ?? "",
+          conclusion: safetyVeto
+            ? `安全否决：${safetyVetoReason ?? "存在不可控的言行或合规风险。"}`
+            : parsed.conclusion ?? "",
           initialScore: avgScore,
           finalScore: avgScore,
           scoreChange: 0,
@@ -482,14 +611,19 @@ export async function POST(req: NextRequest) {
             formula,
             computed: avgScore,
           },
-          vote: parsed.vote ?? "保留意见",
+          vote: safetyVeto ? "反对" : parsed.vote ?? "保留意见",
+          veto: safetyVeto,
+          vetoReason: safetyVetoReason,
         };
       })
     );
+    const safetyExpert = expertResults.find(expert => expert.role === "安全合规官");
+    const safetyVeto = safetyExpert?.veto === true;
+    const safetyVetoReason = safetyExpert?.vetoReason ?? "存在不可控的言行或合规风险。";
 
     // ── 第二步：首席反对官 ──
     const expertSummary = expertResults.map(e => `${e.role}：${e.initialScore}分`).join("，");
-    const chiefParsed = await callTopicReviewAI<{
+    const chiefParsed = safetyVeto ? null : await callTopicReviewAI<{
       reasons?: string[];
       riskLevel?: string;
       failProbability?: number;
@@ -503,16 +637,22 @@ export async function POST(req: NextRequest) {
       "object",
     );
 
-    const chiefOfficer = {
+    const chiefOfficer = safetyVeto ? {
       role: "首席反对官",
-      reasons: chiefParsed.reasons ?? [],
-      riskLevel: chiefParsed.riskLevel ?? "中风险",
-      failProbability: chiefParsed.failProbability ?? 40,
-      dismissalSuggestion: chiefParsed.dismissalSuggestion ?? "",
+      reasons: [safetyVetoReason],
+      riskLevel: "高风险",
+      failProbability: 100,
+      dismissalSuggestion: "当前版本不得制作或测试；完成安全改写后重新评估。",
+    } : {
+      role: "首席反对官",
+      reasons: chiefParsed?.reasons ?? [],
+      riskLevel: chiefParsed?.riskLevel ?? "中风险",
+      failProbability: chiefParsed?.failProbability ?? 40,
+      dismissalSuggestion: chiefParsed?.dismissalSuggestion ?? "",
     };
 
     // ── 第三步：专家质疑 ──
-    const challenges = await callTopicReviewAI<{
+    const challenges = safetyVeto ? [] : await callTopicReviewAI<{
       from: string;
       to: string;
       targetScore: number;
@@ -530,6 +670,17 @@ export async function POST(req: NextRequest) {
 
     // ── 第四步：修正评分（基于质疑微调） ──
     const responses = expertResults.map(e => {
+      if (e.veto) {
+        return {
+          role: e.role,
+          challenge: null,
+          response: `安全否决已生效：${e.vetoReason ?? "存在不可控的言行或合规风险。"}`,
+          initialScore: e.initialScore,
+          finalScore: e.initialScore,
+          scoreChange: 0,
+          finalFormula: e.dimData.formula,
+        };
+      }
       const beingChallenged = challenges.find(c => c.to === e.role);
       const change = beingChallenged ? Math.round((Math.random() - 0.55) * 8) : 0;
       const finalScore = Math.max(40, Math.min(98, e.initialScore + change));
@@ -562,9 +713,13 @@ export async function POST(req: NextRequest) {
     const supportCount = votes.filter(v => v.vote === "支持").length;
     const reserveCount = votes.filter(v => v.vote === "保留意见").length;
     const opposeCount = votes.filter(v => v.vote === "反对").length;
-    const verdict = supportCount > opposeCount + Math.floor(reserveCount / 2)
-      ? "通过" : supportCount + Math.floor(reserveCount / 2) > opposeCount
-      ? "有条件通过" : "暂缓";
+    const verdict = safetyVeto
+      ? "安全否决"
+      : supportCount > opposeCount + Math.floor(reserveCount / 2)
+      ? "通过"
+      : supportCount + Math.floor(reserveCount / 2) > opposeCount
+      ? "有条件通过"
+      : "暂缓";
 
     // ── 第六步：加权综合评分 ──
     const weights = expertResults.map(e => ({
@@ -574,10 +729,16 @@ export async function POST(req: NextRequest) {
       contribution: Math.round(e.finalScore * e.weight * 100) / 100,
     }));
     const totalScore = Math.round(weights.reduce((s, w) => s + w.contribution, 0) * 100) / 100;
-    const level = scoreLevel(totalScore);
+    const level = safetyVeto ? "安全否决" : scoreLevel(totalScore);
 
     // ── 第七步：综合决议 ──
-    const verdictParsed = await callTopicReviewAI<{
+    const verdictParsed = safetyVeto ? {
+      upgradedTopics: [] as string[],
+      titles: [] as string[],
+      risks: [safetyVetoReason],
+      credScore: 100,
+      credReasons: ["安全否决优先于其他评分和投票结果。"],
+    } : await callTopicReviewAI<{
       upgradedTopics?: string[];
       titles?: string[];
       risks?: string[];
@@ -594,7 +755,7 @@ export async function POST(req: NextRequest) {
 
     // ── 第八步（可选）：真实用户预演——仅在有用户人格数据时执行 ──
     let personaPreview = null;
-    if (personas.length > 0) {
+    if (!safetyVeto && personas.length > 0) {
       const PERSONA_SYSTEM = `你是一位用户行为分析师，根据用户人格画像预测他们对某个选题的真实反应。所有判断必须基于人格的已知特征，禁止编造人格中没有提到的需求或行为。严格按JSON格式输出。`;
       const PERSONA_PROMPT = `选题：「${topic}」
 
@@ -644,7 +805,22 @@ ${personas.map((p, i) => `
       } catch { personaPreview = null; }
     }
 
-    return NextResponse.json({
+    const normalizedRiskLevel = safetyVeto
+      ? "高"
+      : chiefOfficer.riskLevel.includes("高")
+      ? "高"
+      : chiefOfficer.riskLevel.includes("低")
+      ? "低"
+      : "中";
+    const finalRecommendation = safetyVeto
+      ? "不建议"
+      : verdict === "通过"
+      ? "建议做"
+      : verdict === "有条件通过"
+      ? "建议优化后做"
+      : "不建议";
+    const boardResult = parseTopicBoardResult({
+      contractVersion: TOPIC_BOARD_CONTRACT_VERSION,
       topic,
       ipId: ip.id,
       ipName: ip.name,
@@ -654,9 +830,83 @@ ${personas.map((p, i) => `
       responses,
       votes,
       voteResult: { supportCount, reserveCount, opposeCount, verdict },
+      safetyVeto,
+      safetyVetoReason: safetyVeto ? safetyVetoReason : null,
       weights,
       totalScore,
       level,
+      finalRecommendation,
+      scoreDisplay: String(totalScore),
+      beginnerAdvice: {
+        canDo: safetyVeto ? "不能做当前版本。" : finalRecommendation,
+        why: safetyVeto
+          ? `安全合规官已行使一票否决权：${safetyVetoReason}`
+          : `董事会表决结果为${verdict}。`,
+        biggestProblem: safetyVeto
+          ? safetyVetoReason
+          : chiefOfficer.reasons[0] ?? "需要先用低成本内容验证。",
+        howToImprove: safetyVeto
+          ? "先移除不可控风险并重新评估，不要直接发布当前版本。"
+          : chiefOfficer.dismissalSuggestion || "先缩小人群和场景，再进行测试。",
+        shouldTest: safetyVeto
+          ? "不要测试当前版本，完成安全改写后重新评估。"
+          : verdict === "暂缓"
+          ? "调整后再测试。"
+          : "建议先小规模测试。",
+      },
+      confidenceNotice: safetyVeto
+        ? "安全否决优先于其他评分和投票结果。"
+        : "当前结论基于IP档案与董事会评审，发布后应结合真实数据复盘。",
+      riskLevel: normalizedRiskLevel,
+      riskExplanation: safetyVeto
+        ? safetyVetoReason
+        : chiefOfficer.reasons[0] ?? "暂无额外风险说明。",
+      scoreBreakdown: weights.map(weight => ({
+        label: weight.role,
+        score: weight.score,
+        explanation: `按${Math.round(weight.weight * 100)}%权重计入综合评分。`,
+      })),
+      dataEvidence: {
+        matchedHighPerformance: false,
+        matchedCount: 0,
+        items: [],
+        impact: "本次没有接入历史表现数据，不对评分进行额外加权。",
+        debugMessage: "未提供历史表现数据。",
+        calibration: {
+          highCount: 0,
+          mediumCount: 0,
+          lowCount: 0,
+          matchedCount: 0,
+          dominant: "none",
+          hasConflict: false,
+          topMatchScore: 0,
+        },
+      },
+      knowledgeDiagnosis: {
+        matched: false,
+        reason: "本次接口未提供知识库匹配结果。",
+        nextStep: "可补充相关知识条目后重新评估。",
+      },
+      scoringBasis: {
+        knowledgeRules: [],
+        historicalData: [],
+        ipInfo: [`当前IP：${ip.name}`, `定位：${ip.positioning}`, `受众：${ip.audience}`],
+        positiveFactors: [],
+        negativeFactors: chiefOfficer.reasons,
+      },
+      optimizationPlan: {
+        coreReason: safetyVeto
+          ? safetyVetoReason
+          : chiefOfficer.reasons[0] ?? "需要进一步验证选题角度。",
+        keepParts: safetyVeto ? [] : [topic],
+        weakenParts: safetyVeto ? [safetyVetoReason] : [],
+        rewrittenDirections: safetyVeto ? [] : verdictParsed.upgradedTopics ?? [],
+        retestSuggestion: safetyVeto
+          ? "当前版本不得测试；完成安全改写后重新评估。"
+          : verdict === "暂缓"
+          ? "优化后重新评估。"
+          : "建议先小规模测试。",
+      },
       credScore: verdictParsed.credScore ?? 60,
       credReasons: verdictParsed.credReasons ?? [],
       risks: verdictParsed.risks ?? [],
@@ -665,10 +915,18 @@ ${personas.map((p, i) => `
       personaPreview,
       hasPersonas: personas.length > 0,
     });
+    return NextResponse.json(boardResult);
 
   } catch (err) {
     const isDevelopment = process.env.NODE_ENV !== "production";
     const topicError = err instanceof TopicReviewAIError ? err : null;
+    if (topicError?.errorCode === "INVALID_SAFETY_REVIEW") {
+      return NextResponse.json({
+        error: "安全校验异常，无法确认，请稍后重试。",
+        errorCode: "SAFETY_REVIEW_INVALID",
+        errorStage: topicError.stage,
+      }, { status: 502 });
+    }
     return NextResponse.json({
       error: isDevelopment && err instanceof Error ? err.message : "AI评审失败，请重试",
       ...(isDevelopment && topicError

@@ -49,12 +49,27 @@ test("当前操盘IP会进入董事会的每一次AI评审", async () => {
     };
     const systemPrompt = requestBody.messages?.[0]?.content ?? "";
     capturedUserPrompts.push(requestBody.messages?.[1]?.content ?? "");
+    const content = systemPrompt.includes("内容安全合规官")
+      ? JSON.stringify({
+          observation: "没有发现不可控风险。",
+          reasoning: "内容边界清晰。",
+          conclusion: "可以通过安全审查。",
+          dims: [
+            { label: "言行无害性", score: 9 },
+            { label: "合规性", score: 9 },
+            { label: "争议免疫力", score: 9 },
+          ],
+          veto: false,
+          vetoReason: null,
+          vote: "支持",
+        })
+      : systemPrompt.includes("JSON格式输出数组") ? "[]" : "{}";
 
     return new Response(JSON.stringify({
       id: "mock-topic-review",
       choices: [{
         finish_reason: "stop",
-        message: { content: systemPrompt.includes("JSON格式输出数组") ? "[]" : "{}" },
+        message: { content },
       }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
     }), {
