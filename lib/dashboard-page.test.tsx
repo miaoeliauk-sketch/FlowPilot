@@ -101,7 +101,7 @@ test("当前IP知识只统计并展示当前IP的数据", async () => {
 
   assert.match(label.parentElement?.textContent ?? "", /^1当前IP知识库$/);
   assert.ok(view.getByText("当前IP知识"));
-  assert.equal(view.queryByText("其他IP私有知识"), null);
+  assert.equal(Boolean(view.queryByText("其他IP私有知识")), false);
 });
 
 test("通用方法库只统计并展示明确全局的方法知识", async () => {
@@ -116,8 +116,8 @@ test("通用方法库只统计并展示明确全局的方法知识", async () =>
 
   assert.match(label.parentElement?.textContent ?? "", /^1通用方法库$/);
   assert.ok(view.getByText("明确全局方法"));
-  assert.equal(view.queryByText("无归属私有知识"), null);
-  assert.equal(view.queryByText("其他IP的方法知识"), null);
+  assert.equal(Boolean(view.queryByText("无归属私有知识")), false);
+  assert.equal(Boolean(view.queryByText("其他IP的方法知识")), false);
 });
 
 test("封面参考库只统计明确全局和当前IP的封面", async () => {
@@ -144,4 +144,30 @@ test("历史校准样本只统计当前IP的数据", async () => {
   const label = await view.findByText("历史校准样本");
 
   assert.match(label.parentElement?.textContent ?? "", /^1历史校准样本$/);
+});
+
+test("完全没有当前IP时只显示通用知识且不暴露任何IP私有数据", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([]));
+  localStorage.removeItem("ipwr:activeIpId");
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    knowledgeEntry("global", "无IP时可见的通用方法", "选题方法库", null),
+    knowledgeEntry("private", "无IP时不可见的私有知识", "IP表达语料", currentIP.id),
+    knowledgeEntry("unowned-private", "无IP时不可见的无归属私有知识", "IP表达语料", null),
+  ]));
+  localStorage.setItem("ipwr:coverRefs", JSON.stringify([
+    { id: "global", title: "无IP时可见的全局封面", scope: "global", ipId: null, createdAt: "2026-08-08T00:00:04.000Z" },
+    { id: "private", title: "无IP时不可见的私有封面", scope: "ip", ipId: currentIP.id, createdAt: "2026-08-08T00:00:03.000Z" },
+  ]));
+  localStorage.setItem("ipwr:topicCalibrationSamples", JSON.stringify([
+    { id: "private", ipId: currentIP.id, ipName: currentIP.name },
+  ]));
+
+  const view = await renderDashboard();
+
+  assert.ok(view.getByText("无IP时可见的通用方法"));
+  assert.equal(Boolean(view.queryByText("无IP时不可见的私有知识")), false);
+  assert.equal(Boolean(view.queryByText("无IP时不可见的无归属私有知识")), false);
+  assert.match(view.getByText("当前IP知识库").parentElement?.textContent ?? "", /^0当前IP知识库$/);
+  assert.match(view.getByText("封面参考库").parentElement?.textContent ?? "", /^1封面参考库$/);
+  assert.match(view.getByText("历史校准样本").parentElement?.textContent ?? "", /^0历史校准样本$/);
 });

@@ -12,6 +12,7 @@ import {
   isGlobalMethodCategory,
   isIPKnowledgeCategory,
 } from "@/lib/knowledge-categories";
+import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 
 // ── 模块配置（下半部分工具入口） ──
 const MODULES = [
@@ -72,10 +73,11 @@ export default function Home() {
     const ipId = activeIP?.id ?? null;
 
     const allKnowledge = getKnowledgeEntries();
-    const globalMethods = allKnowledge.filter((entry) => (
+    const filteredKnowledgeByScope = filterKnowledgeVisibleToIP(allKnowledge, ipId);
+    const globalMethods = filteredKnowledgeByScope.filter((entry) => (
       entry.ipId === null && isGlobalMethodCategory(getNormalizedCategory(entry))
     ));
-    const ipKnowledge = ipId === null ? [] : allKnowledge.filter((entry) => (
+    const ipKnowledge = ipId === null ? [] : filteredKnowledgeByScope.filter((entry) => (
       entry.ipId === ipId && isIPKnowledgeCategory(getNormalizedCategory(entry))
     ));
     const coverRefs = getCoverRefs(ipId);
