@@ -745,11 +745,50 @@ function requireCoverActiveIPId(activeIPId: string | null | undefined): string {
   return normalized;
 }
 
+function writeCoverRefs(refs: CoverRef[]): void {
+  if (typeof window === "undefined") {
+    throw new Error("封面参考保存失败：当前环境无法访问浏览器存储");
+  }
+  try {
+    window.localStorage.setItem(KEY_COVER_REFS, JSON.stringify(refs));
+  } catch {
+    throw new Error("封面参考保存失败，请检查浏览器存储空间");
+  }
+}
+
+function readCoverRefsStrict(): CoverRef[] {
+  if (typeof window === "undefined") {
+    throw new Error("封面参考读取失败：当前环境无法访问浏览器存储");
+  }
+  let raw: string | null;
+  try {
+    raw = window.localStorage.getItem(KEY_COVER_REFS);
+  } catch {
+    throw new Error("封面参考读取失败，请检查浏览器存储权限");
+  }
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("封面存储根节点不是数组");
+    return parsed as CoverRef[];
+  } catch {
+    throw new Error("封面参考读取失败：存储数据损坏");
+  }
+}
+
+export function getGlobalCoverRefs(): CoverRef[] {
+  return readCoverRefsStrict()
+    .filter(ref => ref.scope === "global" && ref.ipId === null)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 export function getCoverRefs(activeIPId: string | null = null): CoverRef[] {
-  return readJSON<CoverRef[]>(KEY_COVER_REFS, [])
+  const normalizedActiveIPId = activeIPId?.trim();
+  if (!normalizedActiveIPId) return [];
+  return readCoverRefsStrict()
     .filter((ref) => (
       (ref.scope === "global" && ref.ipId === null)
-      || (ref.scope === "ip" && activeIPId !== null && ref.ipId === activeIPId)
+      || (ref.scope === "ip" && ref.ipId === normalizedActiveIPId)
     ))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -768,19 +807,26 @@ export function addCoverRef(
     createdAt: now,
     updatedAt: now,
   };
-  const all = readJSON<CoverRef[]>(KEY_COVER_REFS, []);
-  writeJSON(KEY_COVER_REFS, [entry, ...all]);
+  const all = readCoverRefsStrict();
+  if (all.some(ref => ref.id === entry.id)) {
+    throw new Error("存在重复封面ID，已拒绝新增");
+  }
+  writeCoverRefs([entry, ...all]);
   return entry;
 }
 
 export function deleteCoverRef(id: string, activeIPId: string): CoverRef {
   const normalizedActiveIPId = requireCoverActiveIPId(activeIPId);
-  const all = readJSON<CoverRef[]>(KEY_COVER_REFS, []);
-  const target = all.find(cover => cover.id === id);
-  if (!target) throw new Error("没有找到该封面");
-  if (target.scope !== "ip" || target.ipId !== normalizedActiveIPId) {
+  const all = readCoverRefsStrict();
+  const matches = all.filter(cover => cover.id === id);
+  if (matches.length === 0) throw new Error("没有找到该封面");
+  if (matches.some(cover => cover.scope !== "ip" || cover.ipId !== normalizedActiveIPId)) {
     throw new Error("该封面不属于当前IP，已拒绝删除");
   }
-  writeJSON(KEY_COVER_REFS, all.filter(c => c.id !== id));
+  if (matches.length !== 1) {
+    throw new Error("存在重复封面ID，已拒绝删除");
+  }
+  const [target] = matches;
+  writeCoverRefs(all.filter(c => c.id !== id));
   return target;
 }

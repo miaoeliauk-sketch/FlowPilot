@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Icon, IconName } from "@/components/ui/icon";
 import {
   getKnowledgeEntries, getTopicAssets, getScriptAssets,
-  getVideoReviews, getOrInitActiveIP, getCoverRefs,
+  getVideoReviews, getOrInitActiveIP, getCoverRefs, getGlobalCoverRefs,
 } from "@/lib/ip-store";
 import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 import {
@@ -80,7 +80,7 @@ export default function Home() {
     const ipKnowledge = ipId === null ? [] : filteredKnowledgeByScope.filter((entry) => (
       entry.ipId === ipId && isIPKnowledgeCategory(getNormalizedCategory(entry))
     ));
-    const coverRefs = getCoverRefs(ipId);
+    const coverRefs = ipId === null ? getGlobalCoverRefs() : getCoverRefs(ipId);
     const calibrationSamples = getTopicCalibrationSamples(activeIP);
     const topics = getTopicAssets(ipId ?? "").filter(() => true);
     const scripts = getScriptAssets(ipId ?? "");
