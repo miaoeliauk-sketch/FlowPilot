@@ -739,11 +739,48 @@ export function getLatestPersonas(ipId: string): UserPersona[] {
 }
 
 // 只返回明确全局或属于当前IP的封面参考；归属不明确的数据不进入统计。
-export function getCoverRefs(activeIPId: string | null): CoverRef[] {
+function requireCoverActiveIPId(activeIPId: string | null | undefined): string {
+  const normalized = activeIPId?.trim();
+  if (!normalized) throw new Error("必须明确提供当前IP ID");
+  return normalized;
+}
+
+export function getCoverRefs(activeIPId: string | null = null): CoverRef[] {
   return readJSON<CoverRef[]>(KEY_COVER_REFS, [])
     .filter((ref) => (
       (ref.scope === "global" && ref.ipId === null)
       || (ref.scope === "ip" && activeIPId !== null && ref.ipId === activeIPId)
     ))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function addCoverRef(
+  activeIPId: string,
+  input: Omit<CoverRef, "id" | "scope" | "ipId" | "createdAt" | "updatedAt">,
+): CoverRef {
+  const normalizedActiveIPId = requireCoverActiveIPId(activeIPId);
+  const now = new Date().toISOString();
+  const entry: CoverRef = {
+    ...input,
+    id: genId(),
+    scope: "ip",
+    ipId: normalizedActiveIPId,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const all = readJSON<CoverRef[]>(KEY_COVER_REFS, []);
+  writeJSON(KEY_COVER_REFS, [entry, ...all]);
+  return entry;
+}
+
+export function deleteCoverRef(id: string, activeIPId: string): CoverRef {
+  const normalizedActiveIPId = requireCoverActiveIPId(activeIPId);
+  const all = readJSON<CoverRef[]>(KEY_COVER_REFS, []);
+  const target = all.find(cover => cover.id === id);
+  if (!target) throw new Error("没有找到该封面");
+  if (target.scope !== "ip" || target.ipId !== normalizedActiveIPId) {
+    throw new Error("该封面不属于当前IP，已拒绝删除");
+  }
+  writeJSON(KEY_COVER_REFS, all.filter(c => c.id !== id));
+  return target;
 }

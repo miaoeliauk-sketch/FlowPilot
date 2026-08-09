@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getKnowledgeHubCorrectionCategories,
   getKnowledgeHubAddAction,
+  isKnowledgeHubCorrectionAllowed,
   KNOWLEDGE_HUB_LEGACY_SECTIONS,
   matchesKnowledgeHubSection,
 } from "./knowledge-hub-view";
@@ -15,6 +16,16 @@ test("人工修正分类时不提供跨范围选项", () => {
   assert.deepEqual(getKnowledgeHubCorrectionCategories("ip-1"), [
     "IP人设资料", "IP表达语料", "IP历史内容", "IP高表现内容", "IP受众反馈", "IP禁用规则",
   ]);
+  assert.deepEqual(getKnowledgeHubCorrectionCategories(""), []);
+});
+
+test("保存人工修正前再次拒绝跨范围分类", () => {
+  assert.equal(isKnowledgeHubCorrectionAllowed(null, "标题方法库"), true);
+  assert.equal(isKnowledgeHubCorrectionAllowed(null, "IP表达语料"), false);
+  assert.equal(isKnowledgeHubCorrectionAllowed("ip-a", "IP表达语料"), true);
+  assert.equal(isKnowledgeHubCorrectionAllowed("ip-a", "标题方法库"), false);
+  assert.equal(isKnowledgeHubCorrectionAllowed("", "标题方法库"), false);
+  assert.equal(isKnowledgeHubCorrectionAllowed("", "IP表达语料"), false);
 });
 
 test("各知识区的新建入口分派到正确流程", () => {
@@ -60,6 +71,14 @@ test("分类视图按范围、当前IP和新分类筛选", () => {
     selectedCategory: null,
     activeIPId: "ip-active",
   }), true);
+  assert.equal(matchesKnowledgeHubSection({
+    ...globalEntry,
+    ipId: "",
+  }, {
+    section: "global",
+    selectedCategory: null,
+    activeIPId: "ip-active",
+  }), false);
   assert.equal(matchesKnowledgeHubSection(activeIPEntry, {
     section: "ip",
     selectedCategory: "IP人设资料",

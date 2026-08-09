@@ -18,8 +18,16 @@ export const KNOWLEDGE_HUB_LEGACY_SECTIONS: ReadonlyArray<{
 ];
 
 export function getKnowledgeHubCorrectionCategories(ipId: string | null): string[] {
-  const categories = ipId ? IP_CATEGORIES : GLOBAL_CATEGORIES;
+  if (ipId !== null && ipId.trim().length === 0) return [];
+  const categories = ipId === null ? GLOBAL_CATEGORIES : IP_CATEGORIES;
   return categories.map(category => category.id);
+}
+
+export function isKnowledgeHubCorrectionAllowed(
+  ipId: string | null,
+  category: string,
+): boolean {
+  return getKnowledgeHubCorrectionCategories(ipId).includes(category);
 }
 
 export function getKnowledgeHubAddAction(
@@ -47,7 +55,7 @@ export function matchesKnowledgeHubSection(
 ): boolean {
   if (options.section === "viral") return entry.category === "爆款案例";
   if (options.section === "global") {
-    return !entry.ipId && (
+    return entry.ipId === null && (
       !options.selectedCategory || entry.normalizedCategory === options.selectedCategory
     );
   }
