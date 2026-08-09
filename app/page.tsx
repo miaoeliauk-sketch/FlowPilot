@@ -4,8 +4,14 @@ import Link from "next/link";
 import { Icon, IconName } from "@/components/ui/icon";
 import {
   getKnowledgeEntries, getTopicAssets, getScriptAssets,
-  getVideoReviews, getAllIPs, getOrInitActiveIP,
+  getVideoReviews, getOrInitActiveIP, getCoverRefs,
 } from "@/lib/ip-store";
+import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
+import {
+  getNormalizedCategory,
+  isGlobalMethodCategory,
+  isIPKnowledgeCategory,
+} from "@/lib/knowledge-categories";
 
 // ── 模块配置（下半部分工具入口） ──
 const MODULES = [
@@ -52,7 +58,7 @@ function relTime(iso: string): string {
 export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [stats, setStats] = useState({
-    viralCases: 0, methodology: 0, commentNeeds: 0, ipCorpus: 0, reviewExp: 0,
+    globalMethods: 0, ipKnowledge: 0, coverRefs: 0, calibrationSamples: 0,
     topics: 0, scripts: 0, reviews: 0,
     pendingTopics: 0, pendingScripts: 0, pendingReviews: 0,
   });
@@ -65,21 +71,24 @@ export default function Home() {
     setActiveIPName(activeIP?.name ?? "未选择");
     const ipId = activeIP?.id ?? null;
 
-    const viral = getKnowledgeEntries("爆款案例").filter(e => !ipId || e.ipId === ipId);
-    const method = getKnowledgeEntries("方法论").filter(e => !ipId || !e.ipId || e.ipId === ipId);
-    const comment = getKnowledgeEntries("评论需求").filter(e => !ipId || e.ipId === ipId);
-    const corpus = getKnowledgeEntries("IP语料库").filter(e => !ipId || e.ipId === ipId);
-    const reviewExp = getKnowledgeEntries("复盘经验库").filter(e => !ipId || e.ipId === ipId);
+    const allKnowledge = getKnowledgeEntries();
+    const globalMethods = allKnowledge.filter((entry) => (
+      entry.ipId === null && isGlobalMethodCategory(getNormalizedCategory(entry))
+    ));
+    const ipKnowledge = ipId === null ? [] : allKnowledge.filter((entry) => (
+      entry.ipId === ipId && isIPKnowledgeCategory(getNormalizedCategory(entry))
+    ));
+    const coverRefs = getCoverRefs(ipId);
+    const calibrationSamples = getTopicCalibrationSamples(activeIP);
     const topics = getTopicAssets(ipId ?? "").filter(() => true);
     const scripts = getScriptAssets(ipId ?? "");
     const reviews = getVideoReviews(ipId ?? undefined);
 
     setStats({
-      viralCases: viral.length,
-      methodology: method.length,
-      commentNeeds: comment.length,
-      ipCorpus: corpus.length,
-      reviewExp: reviewExp.length,
+      globalMethods: globalMethods.length,
+      ipKnowledge: ipKnowledge.length,
+      coverRefs: coverRefs.length,
+      calibrationSamples: calibrationSamples.length,
       topics: topics.length,
       scripts: scripts.length,
       reviews: reviews.length,
@@ -89,13 +98,13 @@ export default function Home() {
     });
 
     // 最近7天新增的知识资产（所有分类混合）
-    const allKnowledge = [
-      ...viral, ...method, ...comment, ...corpus, ...reviewExp,
+    const visibleKnowledge = [
+      ...globalMethods, ...ipKnowledge,
     ].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 8);
-    setRecentKnowledge(allKnowledge.map(e => ({ title: e.title, category: e.category, createdAt: e.createdAt })));
+    setRecentKnowledge(visibleKnowledge.map(e => ({ title: e.title, category: e.category, createdAt: e.createdAt })));
   }, []);
 
-  const totalKnowledge = stats.viralCases + stats.methodology + stats.commentNeeds + stats.ipCorpus + stats.reviewExp;
+  const totalKnowledge = stats.globalMethods + stats.ipKnowledge + stats.coverRefs + stats.calibrationSamples;
 
   return (
     <div className="min-h-screen p-6 md:p-8">
@@ -137,12 +146,11 @@ export default function Home() {
           <span className="text-[13px] font-bold text-[#1C1C1B]">知识资产积累</span>
           <Link href="/knowledge-hub" className="text-[12px] text-[#639922]">查看全部 →</Link>
         </div>
-        <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-6">
-          <StatCard label="爆款案例" value={mounted ? stats.viralCases : "—"} href="/knowledge-hub" />
-          <StatCard label="方法论" value={mounted ? stats.methodology : "—"} href="/knowledge-hub" color="#7A5C00" />
-          <StatCard label="评论需求" value={mounted ? stats.commentNeeds : "—"} href="/knowledge-hub" color="#1A5276" />
-          <StatCard label="IP语料库" value={mounted ? stats.ipCorpus : "—"} href="/knowledge-hub" color="#5B3FA0" />
-          <StatCard label="复盘经验" value={mounted ? stats.reviewExp : "—"} href="/knowledge-hub" color="#A32D2D" />
+        <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-5">
+          <StatCard label="通用方法库" value={mounted ? stats.globalMethods : "—"} href="/knowledge-hub?scope=global" />
+          <StatCard label="当前IP知识库" value={mounted ? stats.ipKnowledge : "—"} href="/knowledge-hub?scope=ip" color="#7A5C00" />
+          <StatCard label="封面参考库" value={mounted ? stats.coverRefs : "—"} href="/knowledge-hub?scope=material" color="#1A5276" />
+          <StatCard label="历史校准样本" value={mounted ? stats.calibrationSamples : "—"} href="/topic-board" color="#5B3FA0" />
           <StatCard label="合计" value={mounted ? totalKnowledge : "—"} color="#1C1C1B" />
         </div>
       </div>

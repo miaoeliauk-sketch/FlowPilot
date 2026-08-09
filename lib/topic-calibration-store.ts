@@ -1,7 +1,5 @@
 "use client";
 
-import { getAllIPs } from "./ip-store";
-
 const KEY_TOPIC_CALIBRATION_SAMPLES = "ipwr:topicCalibrationSamples";
 const SOURCE_FILE = "shikong_topic_calibration_v0.md";
 const SOURCE_NAME = "石空账号选题校准样本";
@@ -296,8 +294,8 @@ function buildOriginalBlock(sample: RawSample) {
   return `| ${sample.title} | ${sample.publishedAt} | ${sample.likes} | ${sample.comments} | ${sample.collects} | ${sample.shares} | ${sample.interactionScore} | ${sample.videoUrl} |`;
 }
 
-function toSample(raw: RawSample, ipId: string | null, index: number): TopicCalibrationSample {
-  const id = `shikong-calibration-${String(index + 1).padStart(2, "0")}-${raw.performanceLevel}-${raw.videoUrl.split("/").pop()}`;
+function toSample(raw: RawSample, ipId: string, index: number): TopicCalibrationSample {
+  const id = `shikong-calibration-${ipId}-${String(index + 1).padStart(2, "0")}-${raw.performanceLevel}-${raw.videoUrl.split("/").pop()}`;
   const createdAt = new Date().toISOString();
   return {
     id,
@@ -337,51 +335,38 @@ function toSample(raw: RawSample, ipId: string | null, index: number): TopicCali
   };
 }
 
-function getUniqueShikongIP() {
-  const matches = getAllIPs().filter(ip => ip.name.includes("石空"));
-  return matches.length === 1 ? matches[0] : null;
-}
-
-export function upsertShikongTopicCalibrationSamples() {
-  const shikong = getUniqueShikongIP();
-  if (!shikong) {
-    return {
-      ...summarizeCalibrationSamples([]),
-      ipMatched: false,
-      ipId: null,
-    };
-  }
+export function upsertShikongTopicCalibrationSamples(targetIPId: string) {
+  const normalizedTargetIPId = targetIPId?.trim();
+  if (!normalizedTargetIPId) throw new Error("必须明确提供目标IP ID，不能按名称自动绑定校准样本");
   const existing = readSamples();
-  const keep = existing.filter(sample => sample.sourceFile !== SOURCE_FILE || sample.ipName !== "石空");
-  const nextSamples = RAW_SAMPLES.map((sample, index) => toSample(sample, shikong.id, index));
+  const keep = existing.filter(sample => (
+    sample.sourceFile !== SOURCE_FILE || sample.ipId !== normalizedTargetIPId
+  ));
+  const nextSamples = RAW_SAMPLES.map((sample, index) => toSample(sample, normalizedTargetIPId, index));
   writeSamples([...keep, ...nextSamples]);
 
   return {
     ...summarizeCalibrationSamples(nextSamples),
-    ipMatched: true,
-    ipId: shikong.id,
+    isOwnershipConfirmed: true,
+    ipId: normalizedTargetIPId,
   };
 }
 
 export function getTopicCalibrationSamples(ip?: { id?: string | null; name?: string | null } | null) {
-  const samples = readSamples();
-  if (!ip?.id?.trim()) return [];
-  return samples.filter(sample => sample.ipId === ip.id);
+  const normalizedIPId = ip?.id?.trim();
+  if (!normalizedIPId) return [];
+  return readSamples().filter(sample => sample.ipId === normalizedIPId);
 }
 
-export function getTopicCalibrationImportStatus() {
-  const samples = readSamples().filter(sample => sample.sourceFile === SOURCE_FILE && sample.ipName === "石空");
+export function getTopicCalibrationImportStatus(targetIPId: string) {
+  const samples = readSamples().filter(sample => (
+    sample.sourceFile === SOURCE_FILE && sample.ipId === targetIPId
+  ));
   return summarizeCalibrationSamples(samples);
 }
 
-export function hasExpectedShikongTopicCalibrationSamples() {
-  const shikong = getUniqueShikongIP();
-  if (!shikong) return false;
-  const actual = summarizeCalibrationSamples(readSamples().filter(sample => (
-    sample.sourceFile === SOURCE_FILE
-    && sample.ipName === "石空"
-    && sample.ipId === shikong.id
-  )));
+export function hasExpectedShikongTopicCalibrationSamples(targetIPId: string) {
+  const actual = getTopicCalibrationImportStatus(targetIPId);
   const expected = getExpectedTopicCalibrationImportStatus();
   return actual.total === expected.total
     && actual.high === expected.high

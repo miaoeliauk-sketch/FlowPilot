@@ -3,11 +3,12 @@
 import { useEffect } from "react";
 import { hasExpectedShikongTopicCalibrationSamples, upsertShikongTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 
-export function TopicCalibrationSeeder() {
+export function TopicCalibrationSeeder({ targetIPId }: { targetIPId?: string }) {
   useEffect(() => {
-    if (hasExpectedShikongTopicCalibrationSamples()) return;
-    upsertShikongTopicCalibrationSamples();
-  }, []);
+    if (!targetIPId) return;
+    if (hasExpectedShikongTopicCalibrationSamples(targetIPId)) return;
+    upsertShikongTopicCalibrationSamples(targetIPId);
+  }, [targetIPId]);
 
   return null;
 }

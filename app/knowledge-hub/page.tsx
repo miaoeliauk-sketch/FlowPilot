@@ -858,6 +858,7 @@ export default function KnowledgeHubPage() {
   // 视图模式：legacy=旧Tab视图（完整保留），unified=新统一视图（筛选器）
   const [viewMode, setViewMode] = useState<"legacy" | "unified">("legacy");
   const [scopeFilter, setScopeFilter] = useState<KnowledgeHubSection>("global");
+  const [unsupportedScope, setUnsupportedScope] = useState<string | null>(null);
   const [globalCatFilter, setGlobalCatFilter] = useState<GlobalCategoryId>("定位方法库");
   const [ipCatFilter, setIpCatFilter] = useState<IPCategoryId>("IP人设资料");
   const [detailExpanded, setDetailExpanded] = useState(false);
@@ -874,6 +875,8 @@ export default function KnowledgeHubPage() {
     const scope = new URLSearchParams(window.location.search).get("scope");
     if (["global", "ip", "viral", "hook", "voice"].includes(scope ?? "")) {
       setScopeFilter(scope as KnowledgeHubSection);
+    } else if (scope) {
+      setUnsupportedScope(scope);
     }
   }, []);
 
@@ -1062,6 +1065,20 @@ export default function KnowledgeHubPage() {
 
   function openSectionAddFlow() {
     if (addAction !== "smart-intake") setShowAdd(true);
+  }
+
+  if (unsupportedScope) {
+    return (
+      <div className="min-h-screen p-6 md:p-8">
+        <div
+          role="alert"
+          aria-label="该视图暂不支持"
+          className="rounded-[14px] border border-[#FBF3D6] bg-[#FFFBF0] p-5 text-[13px] text-[#7A5C00]"
+        >
+          该视图暂不支持，请返回工作台选择其他入口。
+        </div>
+      </div>
+    );
   }
 
   return (

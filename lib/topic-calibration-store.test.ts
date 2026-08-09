@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  getTopicCalibrationSamples,
-  hasExpectedShikongTopicCalibrationSamples,
-  upsertShikongTopicCalibrationSamples,
-} from "./topic-calibration-store";
+import { getTopicCalibrationSamples } from "./topic-calibration-store";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -64,73 +60,28 @@ test("校准样本只按IP ID匹配并拒绝同名或相似名称的其他IP", (
   );
 });
 
-test("没有明确IP ID时不返回任何校准样本", () => {
+test("没有IP ID时不按名称匹配校准样本", () => {
   storage.setItem("ipwr:topicCalibrationSamples", JSON.stringify([
     { id: "name-only", ipId: "ip-b", ipName: "水木然" },
   ]));
 
   assert.deepEqual(getTopicCalibrationSamples({ name: "水木然" }), []);
+});
+
+test("未选择当前IP时不返回任何IP的校准样本", () => {
+  storage.setItem("ipwr:topicCalibrationSamples", JSON.stringify([
+    { id: "ip-a-sample", ipId: "ip-a", ipName: "水木然" },
+    { id: "ip-b-sample", ipId: "ip-b", ipName: "设计师石空" },
+  ]));
+
   assert.deepEqual(getTopicCalibrationSamples(null), []);
-  assert.deepEqual(getTopicCalibrationSamples(undefined), []);
+});
+
+test("完全不传IP参数时也不返回任何校准样本", () => {
+  storage.setItem("ipwr:topicCalibrationSamples", JSON.stringify([
+    { id: "ip-a-sample", ipId: "ip-a", ipName: "水木然" },
+    { id: "ip-b-sample", ipId: "ip-b", ipName: "设计师石空" },
+  ]));
+
   assert.deepEqual(getTopicCalibrationSamples(), []);
-});
-
-test("找不到石空IP时不写入无归属的校准样本", () => {
-  storage.setItem("ipwr:ips_v2", JSON.stringify([
-    { id: "ip-other", name: "水木然" },
-  ]));
-
-  const result = upsertShikongTopicCalibrationSamples();
-
-  assert.equal(result.ipMatched, false);
-  assert.equal(result.ipId, null);
-  assert.equal(result.total, 0);
-  assert.equal(storage.getItem("ipwr:topicCalibrationSamples"), null);
-});
-
-test("存在多个石空候选IP时不擅自绑定且不改写现有数据", () => {
-  storage.setItem("ipwr:ips_v2", JSON.stringify([
-    { id: "ip-shikong-a", name: "设计师石空" },
-    { id: "ip-shikong-b", name: "石空设计" },
-  ]));
-  const originalSamples = JSON.stringify([
-    { id: "existing", ipId: "ip-existing", ipName: "其他IP" },
-  ]);
-  storage.setItem("ipwr:topicCalibrationSamples", originalSamples);
-
-  const result = upsertShikongTopicCalibrationSamples();
-
-  assert.equal(result.ipMatched, false);
-  assert.equal(result.ipId, null);
-  assert.equal(result.total, 0);
-  assert.equal(storage.getItem("ipwr:topicCalibrationSamples"), originalSamples);
-});
-
-test("唯一石空IP存在时所有导入样本都绑定到该IP", () => {
-  storage.setItem("ipwr:ips_v2", JSON.stringify([
-    { id: "ip-shikong", name: "设计师石空" },
-  ]));
-
-  const result = upsertShikongTopicCalibrationSamples();
-  const imported = getTopicCalibrationSamples({ id: "ip-shikong", name: "设计师石空" });
-
-  assert.equal(result.ipMatched, true);
-  assert.equal(result.ipId, "ip-shikong");
-  assert.ok(result.total > 0);
-  assert.equal(imported.length, result.total);
-  assert.equal(imported.every(sample => sample.ipId === "ip-shikong"), true);
-});
-
-test("预期校准样本必须仍归属于当前唯一石空IP", () => {
-  storage.setItem("ipwr:ips_v2", JSON.stringify([
-    { id: "ip-shikong", name: "设计师石空" },
-  ]));
-  upsertShikongTopicCalibrationSamples();
-  assert.equal(hasExpectedShikongTopicCalibrationSamples(), true);
-
-  storage.setItem("ipwr:ips_v2", JSON.stringify([
-    { id: "ip-replacement", name: "水木然" },
-  ]));
-
-  assert.equal(hasExpectedShikongTopicCalibrationSamples(), false);
 });

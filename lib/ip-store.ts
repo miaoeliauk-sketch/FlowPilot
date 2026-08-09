@@ -20,7 +20,28 @@ const KEY_HOOK_ENTRIES = "ipwr:hookEntries";
 const KEY_HOT_ANALYSES = "ipwr:hotAnalyses";
 const KEY_USER_PROFILE = "ipwr:userProfile";
 const KEY_VIDEO_REVIEWS = "ipwr:videoReviews";
+const KEY_COVER_REFS = "ipwr:coverRefs";
 const DEFAULT_USER_PROFILE: UserProfile = { nickname: "彭彭", name: "" };
+
+export interface CoverRef {
+  id: string;
+  title: string;
+  imageDataUrl: string;
+  platform: string;
+  contentType: string;
+  coverType: string;
+  visualTags: string[];
+  textStyle: string;
+  layout: string;
+  colorStyle: string;
+  referenceReason: string;
+  avoidReason: string;
+  sourceUrl: string;
+  scope: "global" | "ip";
+  ipId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 function readJSON<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -715,4 +736,14 @@ export function getLatestPersonas(ipId: string): UserPersona[] {
   const results = getUserPersonas(ipId);
   if (results.length === 0) return [];
   return results[0].personas; // 最新一次的人格列表
+}
+
+// 只返回明确全局或属于当前IP的封面参考；归属不明确的数据不进入统计。
+export function getCoverRefs(activeIPId: string | null): CoverRef[] {
+  return readJSON<CoverRef[]>(KEY_COVER_REFS, [])
+    .filter((ref) => (
+      (ref.scope === "global" && ref.ipId === null)
+      || (ref.scope === "ip" && activeIPId !== null && ref.ipId === activeIPId)
+    ))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
