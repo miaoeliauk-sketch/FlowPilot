@@ -337,30 +337,36 @@ function toSample(raw: RawSample, ipId: string | null, index: number): TopicCali
   };
 }
 
+function getUniqueShikongIP() {
+  const matches = getAllIPs().filter(ip => ip.name.includes("石空"));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function upsertShikongTopicCalibrationSamples() {
-  const ips = getAllIPs();
-  const shikong = ips.find(ip => ip.name.includes("石空")) ?? null;
+  const shikong = getUniqueShikongIP();
+  if (!shikong) {
+    return {
+      ...summarizeCalibrationSamples([]),
+      ipMatched: false,
+      ipId: null,
+    };
+  }
   const existing = readSamples();
   const keep = existing.filter(sample => sample.sourceFile !== SOURCE_FILE || sample.ipName !== "石空");
-  const nextSamples = RAW_SAMPLES.map((sample, index) => toSample(sample, shikong?.id ?? null, index));
+  const nextSamples = RAW_SAMPLES.map((sample, index) => toSample(sample, shikong.id, index));
   writeSamples([...keep, ...nextSamples]);
 
   return {
     ...summarizeCalibrationSamples(nextSamples),
-    ipMatched: Boolean(shikong),
-    ipId: shikong?.id ?? null,
+    ipMatched: true,
+    ipId: shikong.id,
   };
 }
 
 export function getTopicCalibrationSamples(ip?: { id?: string | null; name?: string | null } | null) {
   const samples = readSamples();
-  if (!ip?.id && !ip?.name) return samples;
-  const ipName = ip.name ?? "";
-  return samples.filter(sample => {
-    if (ip.id && sample.ipId && sample.ipId === ip.id) return true;
-    if (ipName && (sample.ipName === ipName || ipName.includes(sample.ipName) || sample.ipName.includes(ipName))) return true;
-    return false;
-  });
+  if (!ip?.id?.trim()) return [];
+  return samples.filter(sample => sample.ipId === ip.id);
 }
 
 export function getTopicCalibrationImportStatus() {
@@ -369,7 +375,13 @@ export function getTopicCalibrationImportStatus() {
 }
 
 export function hasExpectedShikongTopicCalibrationSamples() {
-  const actual = getTopicCalibrationImportStatus();
+  const shikong = getUniqueShikongIP();
+  if (!shikong) return false;
+  const actual = summarizeCalibrationSamples(readSamples().filter(sample => (
+    sample.sourceFile === SOURCE_FILE
+    && sample.ipName === "石空"
+    && sample.ipId === shikong.id
+  )));
   const expected = getExpectedTopicCalibrationImportStatus();
   return actual.total === expected.total
     && actual.high === expected.high

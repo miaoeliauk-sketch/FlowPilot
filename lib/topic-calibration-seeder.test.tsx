@@ -47,11 +47,18 @@ test("校准样本完整时，Seeder挂载不会重复写入", async () => {
   let restoreSetItem: (() => void) | undefined;
 
   try {
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([
+      { id: "ip-shikong", name: "设计师石空" },
+    ]));
     const {
       getTopicCalibrationImportStatus,
       upsertShikongTopicCalibrationSamples,
     } = await import("./topic-calibration-store");
     const imported = upsertShikongTopicCalibrationSamples();
+
+    assert.equal(imported.ipMatched, true);
+    assert.equal(imported.ipId, "ip-shikong");
+    assert.ok(imported.total > 0);
 
     assert.deepEqual(getTopicCalibrationImportStatus(), {
       total: imported.total,
