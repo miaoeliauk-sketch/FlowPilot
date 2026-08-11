@@ -5,6 +5,7 @@ import {
   type ContentMasterWriteLock,
 } from "./content-master-store";
 import { DECISION_MEMORY_STORAGE_KEY } from "./decision-memory-store";
+import { LIVE_CLIP_STORAGE_KEY } from "./live-clips-types";
 
 export interface FlowPilotBackupStorage {
   getItem(key: string): string | null;
@@ -26,6 +27,7 @@ export const FLOWPILOT_BACKUP_STORAGE_KEYS = [
   "ipwr:videoReviews",
   "ipwr:userProfile",
   "ipwr:weeklyReports",
+  LIVE_CLIP_STORAGE_KEY,
   DECISION_MEMORY_STORAGE_KEY,
   CONTENT_MASTER_STORAGE_KEY,
 ] as const;

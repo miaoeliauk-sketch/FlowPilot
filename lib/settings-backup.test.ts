@@ -11,6 +11,7 @@ import {
   createFlowPilotBackup,
   restoreFlowPilotBackup,
 } from "./settings-backup";
+import { LIVE_CLIP_STORAGE_KEY } from "./live-clips-types";
 
 class MemoryStorage implements ContentMasterStorage {
   private readonly values = new Map<string, string>();
@@ -22,7 +23,35 @@ class MemoryStorage implements ContentMasterStorage {
   setItem(key: string, value: string) {
     this.values.set(key, value);
   }
+
+  removeItem(key: string) {
+    this.values.delete(key);
+  }
 }
+
+test("直播切片工作台数据可以导出、清除并完整恢复", async () => {
+  const storage = new MemoryStorage();
+  const workspace = {
+    version: 1,
+    activeLiveTranscriptId: "live-1",
+    liveTranscripts: [{ id: "live-1", title: "真实直播", rawTranscript: "直播原文" }],
+    transcriptChunks: [{ id: "chunk-1", liveTranscriptId: "live-1", status: "completed" }],
+    topicBlocks: [{ id: "topic-1", liveTranscriptId: "live-1", title: "核心主题" }],
+    clipCandidates: [{ id: "candidate-1", liveTranscriptId: "live-1", topic: "候选切片" }],
+    clipPlans: [{ id: "plan-1", liveTranscriptId: "live-1", topic: "正式切片方案" }],
+  };
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify(workspace));
+
+  const backup = createFlowPilotBackup(storage, new Date("2026-08-11T16:00:00.000Z"));
+  assert.deepEqual(backup[LIVE_CLIP_STORAGE_KEY], workspace);
+
+  storage.removeItem(LIVE_CLIP_STORAGE_KEY);
+  assert.equal(storage.getItem(LIVE_CLIP_STORAGE_KEY), null);
+
+  const restoredCount = await restoreFlowPilotBackup(backup, storage);
+  assert.equal(restoredCount, 1);
+  assert.deepEqual(JSON.parse(storage.getItem(LIVE_CLIP_STORAGE_KEY) ?? "null"), workspace);
+});
 
 test("设置页备份可以完整导出并恢复内容母稿", async () => {
   const sourceStorage = new MemoryStorage();
