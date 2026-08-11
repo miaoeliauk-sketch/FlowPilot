@@ -1,0 +1,124 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { POST as postTopics } from "../app/api/live-clips/topics/route";
+import { POST as postCandidates } from "../app/api/live-clips/candidates/route";
+import { buildTranscriptChunks, parseLiveTranscript } from "./live-clips-transcript";
+import type { TopicBlock } from "./live-clips-types";
+
+function aiResponse(content: string | null, finishReason = "stop") {
+  return new Response(JSON.stringify({
+    id: "request-live-clips",
+    choices: [{ finish_reason: finishReason, message: { content } }],
+    usage: { prompt_tokens: 100, completion_tokens: 80, total_tokens: 180 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+function fixture() {
+  const parsed = parseLiveTranscript([
+    "[00:01:00] 大家能听到吗？",
+    "[00:01:08] 知识付费最大的误区，就是天天证明自己懂得多。",
+    "[00:01:18] 用户真正购买的是解决具体问题的能力。",
+    "[00:01:28] 所以内容建立的不是知识量，而是解决问题的信任。",
+    "[00:01:38] 下一段我们讲产品。",
+  ].join("\n"));
+  return { parsed, chunk: buildTranscriptChunks("live-1", parsed.paragraphs)[0] };
+}
+
+test("主题路由使用统一结构化调用并返回可追溯主题", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed, chunk } = fixture();
+  globalThis.fetch = async () => aiResponse(JSON.stringify({
+    removalSuggestions: [{ paragraphNumber: 1, quote: "大家能听到吗？", reason: "临时互动" }],
+    topics: [{
+      title: "知识付费建立的信任", summary: "讨论用户为什么付费。", startParagraph: 2, endParagraph: 4,
+      keywords: ["知识付费", "信任"], mainPoint: "用户购买解决问题的能力。",
+    }],
+  }));
+  try {
+    const response = await postTopics(new Request("http://localhost/api/live-clips/topics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({ liveTranscriptId: "live-1", chunk, paragraphs: parsed.paragraphs }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.topics.length, 1);
+    assert.equal(body.topics[0].startTime, "00:01:08");
+    assert.equal(body.removalSuggestions[0].quote, "大家能听到吗？");
+    assert.equal(body.apiMeta.finishReason, "stop");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("即使JSON可解析，finish_reason=length也明确返回TRUNCATED", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed, chunk } = fixture();
+  globalThis.fetch = async () => aiResponse(JSON.stringify({ removalSuggestions: [], topics: [] }), "length");
+  try {
+    const response = await postTopics(new Request("http://localhost/api/live-clips/topics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({ liveTranscriptId: "live-1", chunk, paragraphs: parsed.paragraphs }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.stageCode, "TOPIC_ANALYSIS_FAIL");
+    assert.equal(body.causeCode, "TRUNCATED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("候选路由拒绝Markdown代码块并区分CLIP_ANALYSIS_FAIL和JSON_PARSE_FAIL", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed } = fixture();
+  const topic: TopicBlock = {
+    id: "topic-1", liveTranscriptId: "live-1", title: "知识付费建立的信任", summary: "摘要",
+    startTime: "00:01:08", endTime: "00:01:38", startParagraph: 2, endParagraph: 4,
+    keywords: ["信任"], mainPoint: "用户购买解决问题的能力。", sourceChunkIds: ["chunk-1"],
+    candidateStatus: "pending", candidateError: null, createdAt: "2026-08-11T00:00:00.000Z",
+  };
+  globalThis.fetch = async () => aiResponse("```json\n{\"candidates\":[]}\n```");
+  try {
+    const response = await postCandidates(new Request("http://localhost/api/live-clips/candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs,
+        preferredClipTypes: ["opinion"], targetDuration: "1—3分钟",
+        platform: "抖音", ipContext: { name: "彭彭说AI", positioning: "AI内容创作者", audience: "AI新手" },
+      }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.stageCode, "CLIP_ANALYSIS_FAIL");
+    assert.equal(body.causeCode, "JSON_PARSE_FAIL");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("候选路由把空content明确映射为EMPTY_CONTENT", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed } = fixture();
+  const topic: TopicBlock = {
+    id: "topic-1", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
+    startTime: null, endTime: null, startParagraph: 2, endParagraph: 4,
+    keywords: ["信任"], mainPoint: "观点", sourceChunkIds: ["chunk-1"],
+    candidateStatus: "pending", candidateError: null, createdAt: "2026-08-11T00:00:00.000Z",
+  };
+  globalThis.fetch = async () => aiResponse(null);
+  try {
+    const response = await postCandidates(new Request("http://localhost/api/live-clips/candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({ liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.causeCode, "EMPTY_CONTENT");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
