@@ -367,6 +367,38 @@ test("封面存储JSON结构损坏时新增和删除都中止且原始内容不�
   }
 });
 
+test("封面数组夹杂非法项或末尾非法项时逐项拒绝且原始数据不变", () => {
+  const validA = storedCoverRef("valid-a", "ip", "ip-a", "2026-08-08T10:00:00.000Z");
+  const validB = storedCoverRef("valid-b", "ip", "ip-a", "2026-08-08T11:00:00.000Z");
+  const cases = [
+    { entries: [validA, "非法封面", validB], invalidPosition: 2 },
+    { entries: [validA, 42, validB], invalidPosition: 2 },
+    { entries: [validA, validB, null], invalidPosition: 3 },
+  ];
+
+  for (const { entries, invalidPosition } of cases) {
+    storage.clear();
+    const original = JSON.stringify(entries);
+    storage.setItem("ipwr:coverRefs", original);
+    const isExpectedCorruption = (error: unknown) => (
+      error instanceof Error
+      && "code" in error
+      && error.code === "COVER_REF_DATA_CORRUPTED"
+      && error.message.includes(`第${invalidPosition}项`)
+    );
+
+    assert.throws(
+      () => addCoverRef("ip-a", coverInput("不应写入的封面")),
+      isExpectedCorruption,
+    );
+    assert.throws(
+      () => deleteCoverRef("valid-a", "ip-a"),
+      isExpectedCorruption,
+    );
+    assert.equal(storage.getItem("ipwr:coverRefs"), original);
+  }
+});
+
 test("封面数组中的记录缺少必需字段时整体拒绝读取", () => {
   storage.clear();
   storage.setItem("ipwr:coverRefs", JSON.stringify([

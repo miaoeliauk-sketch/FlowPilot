@@ -824,11 +824,19 @@ function readCoverRefsStrict(): CoverRef[] {
   if (raw === null) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || !parsed.every(isCoverRef)) {
+    if (!Array.isArray(parsed)) {
       throw new Error("封面存储内容不是有效记录数组");
     }
+    const invalidIndex = parsed.findIndex(item => !isCoverRef(item));
+    if (invalidIndex !== -1) {
+      throw new CoverRefStoreError(
+        "COVER_REF_DATA_CORRUPTED",
+        `封面参考读取失败：第${invalidIndex + 1}项不是有效封面记录`,
+      );
+    }
     return parsed;
-  } catch {
+  } catch (error) {
+    if (error instanceof CoverRefStoreError) throw error;
     throw new CoverRefStoreError("COVER_REF_DATA_CORRUPTED", "封面参考读取失败：存储数据损坏");
   }
 }
