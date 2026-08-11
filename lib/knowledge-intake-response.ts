@@ -11,6 +11,27 @@ export type IPUnderstandingCategory = typeof IP_UNDERSTANDING_CATEGORIES[number]
 export type IntakeConfidence = "高" | "中" | "低";
 export type IntakeRecommendation = "建议入库" | "待确认" | "不建议入库";
 
+export const IP_UNDERSTANDING_STRUCTURAL_KEYWORDS = [
+  "表达路径",
+  "核心任务",
+  "开头要求",
+  "结尾方式",
+  "真实性要求",
+  "验证标准",
+  "测试验证",
+  "入库建议",
+  "内容规范",
+  "内容创作规则",
+  "创作指南",
+  "规则说明",
+  "方法论",
+  "逻辑框架",
+] as const;
+
+const STRUCTURAL_KEYWORD_LABELS = new Set<string>(
+  IP_UNDERSTANDING_STRUCTURAL_KEYWORDS,
+);
+
 export interface IPUnderstandingItem {
   title: string;
   summary: string;
@@ -60,7 +81,6 @@ function requiredString(
 function requiredStringArray(
   record: Record<string, unknown>,
   field: string,
-  maxItems: number,
 ): string[] {
   if (!Array.isArray(record[field])) {
     throw validationError("FIELD_TYPE_INVALID", `AI理解结果中的${field}格式错误`);
@@ -68,8 +88,7 @@ function requiredStringArray(
   const values = record[field]
     .filter((value): value is string => typeof value === "string")
     .map(value => value.trim())
-    .filter(Boolean)
-    .slice(0, maxItems);
+    .filter(Boolean);
   if (values.length === 0) {
     throw validationError("FIELD_MISSING", `AI理解结果缺少${field}`);
   }
@@ -122,6 +141,17 @@ export function parseIPUnderstandingResponse(content: string): IPUnderstandingRe
   ) {
     throw validationError("INVALID_RECOMMENDATION", "AI返回的入库建议无效");
   }
+  const allKeywords = requiredStringArray(item, "keywords");
+  const structuralKeywords = allKeywords.filter(keyword =>
+    STRUCTURAL_KEYWORD_LABELS.has(keyword)
+  );
+  if (structuralKeywords.length > 0) {
+    throw validationError(
+      "KEYWORD_TOO_GENERIC",
+      `AI理解结果包含结构化关键词：${structuralKeywords.join("、")}`,
+    );
+  }
+  const keywords = allKeywords.slice(0, 8);
 
   return {
     item: {
@@ -129,9 +159,9 @@ export function parseIPUnderstandingResponse(content: string): IPUnderstandingRe
       summary: requiredString(item, "summary", 300),
       category,
       understanding: requiredString(item, "understanding", 2000),
-      keyPoints: requiredStringArray(item, "keyPoints", 8),
+      keyPoints: requiredStringArray(item, "keyPoints").slice(0, 8),
       relationToIP: requiredString(item, "relationToIP", 500),
-      keywords: requiredStringArray(item, "keywords", 8),
+      keywords,
       confidence,
       confidenceReason: requiredString(item, "confidenceReason", 300),
       ingestRecommend,

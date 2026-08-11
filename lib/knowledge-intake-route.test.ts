@@ -25,6 +25,20 @@ const BASE_ITEM = {
   ingestReason: "属于可复用的IP身份约束",
 };
 
+const IP_UNDERSTANDING_ITEM = {
+  title: "离职风险的概率化判断",
+  summary: "这份资料记录了基于行为变化识别离职风险的判断方式。",
+  category: "IP表达语料",
+  understanding: "社交频率和产出质量的变化共同构成风险信号，沟通边界用于防止模型被误用。",
+  keyPoints: ["严禁在未沟通前直接锁定名单"],
+  relationToIP: "用于保留当前IP分析管理问题时的概率化表达。",
+  keywords: ["行为熵", "概率思维"],
+  confidence: "高",
+  confidenceReason: "原文明确给出了判断信号和使用边界。",
+  ingestRecommend: "建议入库",
+  ingestReason: "避免把离职风险简化为主观直觉。",
+};
+
 function deepSeekResponse(content: string) {
   return new Response(JSON.stringify({
     id: "knowledge-intake-request",
@@ -414,6 +428,45 @@ test("Excel序列化内容通过真实路由进入AI提示词", async () => {
     assert.equal(body.items[0].category, "选题方法库");
     assert.match(outboundBody, /Excel/);
     assert.match(outboundBody, /预算焦虑/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("IP内容理解会拒绝结构化关键词并用通用指令重试一次", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  const outboundBodies: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    outboundBodies.push(String(init?.body ?? ""));
+    return deepSeekResponse(JSON.stringify({
+      item: {
+        ...IP_UNDERSTANDING_ITEM,
+        keywords: calls === 1
+          ? ["表达路径", "真实性要求"]
+          : ["行为熵", "概率思维", "灰度预警"],
+      },
+    }));
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: "识别离职风险要观察行为变化，严禁在未沟通前锁定名单。",
+      sourceType: "text",
+      scope: "ip",
+      activeIPId: "ip-liurun",
+      availableIPs: [{ id: "ip-liurun", name: "刘润" }],
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.equal(body.mode, "ip");
+    assert.deepEqual(body.item.keywords, ["行为熵", "概率思维", "灰度预警"]);
+    assert.equal(body.apiMeta.attempts, 2);
+    assert.match(outboundBodies[1], /关键词包含目录标题或结构标签/);
+    assert.doesNotMatch(outboundBodies[1], /人性、算法、即兴感/);
   } finally {
     globalThis.fetch = originalFetch;
   }
