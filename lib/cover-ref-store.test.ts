@@ -53,6 +53,23 @@ function coverInput(title: string) {
   };
 }
 
+function storedCoverRef(
+  id: string,
+  scope: "global" | "ip",
+  ipId: string | null,
+  createdAt: string,
+  title = `${id}封面`,
+) {
+  return {
+    ...coverInput(title),
+    id,
+    scope,
+    ipId,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
 Object.defineProperty(globalThis, "window", {
   configurable: true,
   value: { localStorage: storage },
@@ -76,11 +93,9 @@ test.after(() => {
 test("封面读取只返回明确全局和当前IP的数据", () => {
   storage.clear();
   storage.setItem("ipwr:coverRefs", JSON.stringify([
-    { id: "global", scope: "global", ipId: null, createdAt: "2026-08-08T10:00:00.000Z" },
-    { id: "current", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
-    { id: "other", scope: "ip", ipId: "ip-b", createdAt: "2026-08-08T12:00:00.000Z" },
-    { id: "conflict", scope: "global", ipId: "ip-b", createdAt: "2026-08-08T13:00:00.000Z" },
-    { id: "legacy", createdAt: "2026-08-08T14:00:00.000Z" },
+    storedCoverRef("global", "global", null, "2026-08-08T10:00:00.000Z"),
+    storedCoverRef("current", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
+    storedCoverRef("other", "ip", "ip-b", "2026-08-08T12:00:00.000Z"),
   ]));
 
   assert.deepEqual(getCoverRefs("ip-a").map(cover => cover.id), ["current", "global"]);
@@ -173,8 +188,8 @@ test("调用方伪造归属字段也只能写入当前IP", () => {
 test("当前IP不能删除其他IP的封面且拒绝后数据完全不变", () => {
   storage.clear();
   const original = JSON.stringify([
-    { id: "current", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
-    { id: "other", scope: "ip", ipId: "ip-b", createdAt: "2026-08-08T12:00:00.000Z" },
+    storedCoverRef("current", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
+    storedCoverRef("other", "ip", "ip-b", "2026-08-08T12:00:00.000Z"),
   ]);
   storage.setItem("ipwr:coverRefs", original);
 
@@ -185,8 +200,8 @@ test("当前IP不能删除其他IP的封面且拒绝后数据完全不变", () =
 test("全局封面只读且没有当前IP时不能执行删除", () => {
   storage.clear();
   const original = JSON.stringify([
-    { id: "global", scope: "global", ipId: null, createdAt: "2026-08-08T10:00:00.000Z" },
-    { id: "current", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
+    storedCoverRef("global", "global", null, "2026-08-08T10:00:00.000Z"),
+    storedCoverRef("current", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
   ]);
   storage.setItem("ipwr:coverRefs", original);
 
@@ -198,8 +213,8 @@ test("全局封面只读且没有当前IP时不能执行删除", () => {
 test("当前IP可以删除自己的封面且只删除目标记录", () => {
   storage.clear();
   storage.setItem("ipwr:coverRefs", JSON.stringify([
-    { id: "current", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
-    { id: "other", scope: "ip", ipId: "ip-b", createdAt: "2026-08-08T12:00:00.000Z" },
+    storedCoverRef("current", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
+    storedCoverRef("other", "ip", "ip-b", "2026-08-08T12:00:00.000Z"),
   ]));
 
   const deleted = deleteCoverRef("current", "ip-a");
@@ -246,7 +261,7 @@ test("封面新增或删除写入失败时明确报错且不伪装成功", () =>
 
   storage.clear();
   const original = JSON.stringify([
-    { id: "current", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
+    storedCoverRef("current", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
   ]);
   storage.setItem("ipwr:coverRefs", original);
   storage.setWriteFailure(true);
@@ -261,10 +276,8 @@ test("封面新增或删除写入失败时明确报错且不伪装成功", () =>
 test("通用封面只能通过独立接口读取且排除伪全局数据", () => {
   storage.clear();
   storage.setItem("ipwr:coverRefs", JSON.stringify([
-    { id: "global", scope: "global", ipId: null, createdAt: "2026-08-08T10:00:00.000Z" },
-    { id: "private", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
-    { id: "forged-global", scope: "global", ipId: "ip-b", createdAt: "2026-08-08T12:00:00.000Z" },
-    { id: "legacy", createdAt: "2026-08-08T13:00:00.000Z" },
+    storedCoverRef("global", "global", null, "2026-08-08T10:00:00.000Z"),
+    storedCoverRef("private", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
   ]));
 
   assert.deepEqual(getGlobalCoverRefs().map(cover => cover.id), ["global"]);
@@ -273,8 +286,8 @@ test("通用封面只能通过独立接口读取且排除伪全局数据", () =>
 test("删除前核对全部同ID记录且任一记录跨IP就拒绝", () => {
   storage.clear();
   const original = JSON.stringify([
-    { id: "duplicate", scope: "ip", ipId: "ip-a", createdAt: "2026-08-08T11:00:00.000Z" },
-    { id: "duplicate", scope: "ip", ipId: "ip-b", createdAt: "2026-08-08T12:00:00.000Z" },
+    storedCoverRef("duplicate", "ip", "ip-a", "2026-08-08T11:00:00.000Z"),
+    storedCoverRef("duplicate", "ip", "ip-b", "2026-08-08T12:00:00.000Z"),
   ]);
   storage.setItem("ipwr:coverRefs", original);
 
@@ -288,8 +301,8 @@ test("删除前核对全部同ID记录且任一记录跨IP就拒绝", () => {
 test("同一IP存在重复封面ID时拒绝批量删除", () => {
   storage.clear();
   const original = JSON.stringify([
-    { id: "duplicate", scope: "ip", ipId: "ip-a", title: "第一条", createdAt: "2026-08-08T11:00:00.000Z" },
-    { id: "duplicate", scope: "ip", ipId: "ip-a", title: "第二条", createdAt: "2026-08-08T12:00:00.000Z" },
+    storedCoverRef("duplicate", "ip", "ip-a", "2026-08-08T11:00:00.000Z", "第一条"),
+    storedCoverRef("duplicate", "ip", "ip-a", "2026-08-08T12:00:00.000Z", "第二条"),
   ]);
   storage.setItem("ipwr:coverRefs", original);
 
@@ -352,4 +365,39 @@ test("封面存储JSON结构损坏时新增和删除都中止且原始内容不�
     );
     assert.equal(storage.getItem("ipwr:coverRefs"), structurallyCorrupted);
   }
+});
+
+test("封面数组中的记录缺少必需字段时整体拒绝读取", () => {
+  storage.clear();
+  storage.setItem("ipwr:coverRefs", JSON.stringify([
+    { scope: "global", ipId: null, createdAt: "2026-08-08T10:00:00.000Z" },
+  ]));
+
+  assert.throws(
+    () => getGlobalCoverRefs(),
+    (error: unknown) => (
+      error instanceof Error
+      && "code" in error
+      && error.code === "COVER_REF_DATA_CORRUPTED"
+    ),
+  );
+});
+
+test("图片已迁移到IndexedDB的封面仍能从元数据列表读取", () => {
+  storage.clear();
+  const createdAt = "2026-08-10T08:00:00.000Z";
+  storage.setItem("ipwr:coverRefs", JSON.stringify([
+    {
+      ...coverInput("已迁移图片的封面"),
+      id: "cover-with-image-key",
+      imageDataUrl: "",
+      imageKey: "cover-image-cover-with-image-key",
+      scope: "global",
+      ipId: null,
+      createdAt,
+      updatedAt: createdAt,
+    },
+  ]));
+
+  assert.deepEqual(getGlobalCoverRefs().map(cover => cover.id), ["cover-with-image-key"]);
 });

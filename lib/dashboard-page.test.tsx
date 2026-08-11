@@ -55,10 +55,47 @@ function knowledgeEntry(id: string, title: string, category: string, ipId: strin
   };
 }
 
+function coverRef(id: string, scope: "global" | "ip", ipId: string | null, createdAt: string) {
+  return {
+    id,
+    title: `${id}封面`,
+    imageDataUrl: `data:image/png;base64,${id}`,
+    platform: "抖音",
+    contentType: "知识口播",
+    coverType: "大字标题",
+    visualTags: ["高对比"],
+    textStyle: "短句",
+    layout: "中心大标题",
+    colorStyle: "黑底黄字",
+    referenceReason: "标题清晰",
+    avoidReason: "",
+    sourceUrl: "",
+    scope,
+    ipId,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
 async function renderDashboard() {
   const { render } = await import("@testing-library/react");
   const Home = (await import("../app/page")).default;
   return render(<Home />);
+}
+
+async function getAssetCard(
+  view: { container: HTMLElement },
+  href: string,
+  label: string,
+) {
+  const { within } = await import("@testing-library/react");
+  const matchingLinks = Array.from(
+    view.container.querySelectorAll<HTMLAnchorElement>(`a[href="${href}"]`),
+  );
+  const card = matchingLinks.find((link) => within(link).queryByText(label, { exact: true }));
+
+  assert.ok(card, `没有找到“${label}”分类卡片`);
+  return within(card);
 }
 
 function seedActiveIP() {
@@ -97,9 +134,9 @@ test("当前IP知识只统计并展示当前IP的数据", async () => {
   ]));
 
   const view = await renderDashboard();
-  const label = await view.findByText("当前IP知识库");
+  const card = await getAssetCard(view, "/knowledge-hub?scope=ip", "当前IP知识库");
 
-  assert.match(label.parentElement?.textContent ?? "", /^1当前IP知识库$/);
+  assert.ok(await card.findByText("1", { exact: true }));
   assert.ok(view.getByText("当前IP知识"));
   assert.equal(Boolean(view.queryByText("其他IP私有知识")), false);
 });
@@ -112,9 +149,9 @@ test("通用方法库只统计并展示明确全局的方法知识", async () =>
   ]));
 
   const view = await renderDashboard();
-  const label = await view.findByText("通用方法库");
+  const card = await getAssetCard(view, "/knowledge-hub?scope=global", "通用方法库");
 
-  assert.match(label.parentElement?.textContent ?? "", /^1通用方法库$/);
+  assert.ok(await card.findByText("1", { exact: true }));
   assert.ok(view.getByText("明确全局方法"));
   assert.equal(Boolean(view.queryByText("无归属私有知识")), false);
   assert.equal(Boolean(view.queryByText("其他IP的方法知识")), false);
@@ -122,16 +159,42 @@ test("通用方法库只统计并展示明确全局的方法知识", async () =>
 
 test("封面参考库只统计明确全局和当前IP的封面", async () => {
   localStorage.setItem("ipwr:coverRefs", JSON.stringify([
-    { id: "global", title: "全局封面", scope: "global", ipId: null, createdAt: "2026-08-08T00:00:04.000Z" },
-    { id: "current", title: "当前IP封面", scope: "ip", ipId: currentIP.id, createdAt: "2026-08-08T00:00:03.000Z" },
-    { id: "other", title: "其他IP封面", scope: "ip", ipId: otherIP.id, createdAt: "2026-08-08T00:00:02.000Z" },
-    { id: "conflict", title: "冲突封面", scope: "global", ipId: otherIP.id, createdAt: "2026-08-08T00:00:01.000Z" },
+    coverRef("global", "global", null, "2026-08-08T00:00:04.000Z"),
+    coverRef("current", "ip", currentIP.id, "2026-08-08T00:00:03.000Z"),
+    coverRef("other", "ip", otherIP.id, "2026-08-08T00:00:02.000Z"),
   ]));
 
   const view = await renderDashboard();
-  const label = await view.findByText("封面参考库");
+  const card = await getAssetCard(view, "/knowledge-hub?scope=material", "封面参考库");
 
-  assert.match(label.parentElement?.textContent ?? "", /^2封面参考库$/);
+  assert.ok(await card.findByText("2", { exact: true }));
+});
+
+test("图片已迁移到IndexedDB的封面仍在工作台计数", async () => {
+  localStorage.setItem("ipwr:coverRefs", JSON.stringify([
+    {
+      ...coverRef("migrated", "global", null, "2026-08-08T00:00:04.000Z"),
+      imageDataUrl: "",
+      imageKey: "cover-image-migrated",
+    },
+  ]));
+
+  const view = await renderDashboard();
+  const card = await getAssetCard(view, "/knowledge-hub?scope=material", "封面参考库");
+
+  assert.ok(await card.findByText("1", { exact: true }));
+  assert.equal(Boolean(view.queryByText("暂无法加载封面数据")), false);
+});
+
+test("封面数据损坏时工作台安全降级并提示暂时无法加载", async () => {
+  localStorage.setItem("ipwr:coverRefs", JSON.stringify([null]));
+
+  const view = await renderDashboard();
+  const coverCard = await getAssetCard(view, "/knowledge-hub?scope=material", "封面参考库");
+
+  assert.ok(await view.findByText("暂无法加载封面数据"));
+  assert.ok(await coverCard.findByText("0", { exact: true }));
+  assert.ok(view.getByText("工作台"));
 });
 
 test("历史校准样本只统计当前IP的数据", async () => {
@@ -141,9 +204,9 @@ test("历史校准样本只统计当前IP的数据", async () => {
   ]));
 
   const view = await renderDashboard();
-  const label = await view.findByText("历史校准样本");
+  const card = await getAssetCard(view, "/topic-board", "历史校准样本");
 
-  assert.match(label.parentElement?.textContent ?? "", /^1历史校准样本$/);
+  assert.ok(await card.findByText("1", { exact: true }));
 });
 
 test("完全没有当前IP时只显示通用知识且不暴露任何IP私有数据", async () => {
@@ -155,19 +218,22 @@ test("完全没有当前IP时只显示通用知识且不暴露任何IP私有数�
     knowledgeEntry("unowned-private", "无IP时不可见的无归属私有知识", "IP表达语料", null),
   ]));
   localStorage.setItem("ipwr:coverRefs", JSON.stringify([
-    { id: "global", title: "无IP时可见的全局封面", scope: "global", ipId: null, createdAt: "2026-08-08T00:00:04.000Z" },
-    { id: "private", title: "无IP时不可见的私有封面", scope: "ip", ipId: currentIP.id, createdAt: "2026-08-08T00:00:03.000Z" },
+    coverRef("global", "global", null, "2026-08-08T00:00:04.000Z"),
+    coverRef("private", "ip", currentIP.id, "2026-08-08T00:00:03.000Z"),
   ]));
   localStorage.setItem("ipwr:topicCalibrationSamples", JSON.stringify([
     { id: "private", ipId: currentIP.id, ipName: currentIP.name },
   ]));
 
   const view = await renderDashboard();
+  const ipCard = await getAssetCard(view, "/knowledge-hub?scope=ip", "当前IP知识库");
+  const coverCard = await getAssetCard(view, "/knowledge-hub?scope=material", "封面参考库");
+  const calibrationCard = await getAssetCard(view, "/topic-board", "历史校准样本");
 
   assert.ok(view.getByText("无IP时可见的通用方法"));
   assert.equal(Boolean(view.queryByText("无IP时不可见的私有知识")), false);
   assert.equal(Boolean(view.queryByText("无IP时不可见的无归属私有知识")), false);
-  assert.match(view.getByText("当前IP知识库").parentElement?.textContent ?? "", /^0当前IP知识库$/);
-  assert.match(view.getByText("封面参考库").parentElement?.textContent ?? "", /^1封面参考库$/);
-  assert.match(view.getByText("历史校准样本").parentElement?.textContent ?? "", /^0历史校准样本$/);
+  assert.ok(await ipCard.findByText("0", { exact: true }));
+  assert.ok(await coverCard.findByText("1", { exact: true }));
+  assert.ok(await calibrationCard.findByText("0", { exact: true }));
 });

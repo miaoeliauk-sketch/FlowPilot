@@ -27,6 +27,7 @@ export interface CoverRef {
   id: string;
   title: string;
   imageDataUrl: string;
+  imageKey?: string;
   platform: string;
   contentType: string;
   coverType: string;
@@ -41,6 +42,20 @@ export interface CoverRef {
   ipId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type CoverRefStoreErrorCode =
+  | "COVER_REF_STORAGE_READ_FAILED"
+  | "COVER_REF_DATA_CORRUPTED";
+
+export class CoverRefStoreError extends Error {
+  constructor(
+    public readonly code: CoverRefStoreErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoverRefStoreError";
+  }
 }
 
 function readJSON<T>(key: string, fallback: T): T {
@@ -756,23 +771,65 @@ function writeCoverRefs(refs: CoverRef[]): void {
   }
 }
 
+const COVER_REF_STRING_FIELDS = [
+  "id",
+  "title",
+  "imageDataUrl",
+  "platform",
+  "contentType",
+  "coverType",
+  "textStyle",
+  "layout",
+  "colorStyle",
+  "referenceReason",
+  "avoidReason",
+  "sourceUrl",
+  "createdAt",
+  "updatedAt",
+] as const;
+
+function isCoverRef(value: unknown): value is CoverRef {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (!COVER_REF_STRING_FIELDS.every(field => typeof record[field] === "string")) return false;
+  if (record.id === "" || record.title === "") return false;
+  if (
+    "imageKey" in record
+    && (typeof record.imageKey !== "string" || record.imageKey.trim() === "")
+  ) {
+    return false;
+  }
+  if (record.imageDataUrl === "" && typeof record.imageKey !== "string") return false;
+  if (Number.isNaN(Date.parse(record.createdAt as string)) || Number.isNaN(Date.parse(record.updatedAt as string))) {
+    return false;
+  }
+  if (!Array.isArray(record.visualTags) || !record.visualTags.every(tag => typeof tag === "string")) {
+    return false;
+  }
+  if (record.scope === "global") return record.ipId === null;
+  if (record.scope === "ip") return typeof record.ipId === "string" && record.ipId.trim() !== "";
+  return false;
+}
+
 function readCoverRefsStrict(): CoverRef[] {
   if (typeof window === "undefined") {
-    throw new Error("封面参考读取失败：当前环境无法访问浏览器存储");
+    throw new CoverRefStoreError("COVER_REF_STORAGE_READ_FAILED", "封面参考读取失败：当前环境无法访问浏览器存储");
   }
   let raw: string | null;
   try {
     raw = window.localStorage.getItem(KEY_COVER_REFS);
   } catch {
-    throw new Error("封面参考读取失败，请检查浏览器存储权限");
+    throw new CoverRefStoreError("COVER_REF_STORAGE_READ_FAILED", "封面参考读取失败，请检查浏览器存储权限");
   }
   if (raw === null) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) throw new Error("封面存储根节点不是数组");
-    return parsed as CoverRef[];
+    if (!Array.isArray(parsed) || !parsed.every(isCoverRef)) {
+      throw new Error("封面存储内容不是有效记录数组");
+    }
+    return parsed;
   } catch {
-    throw new Error("封面参考读取失败：存储数据损坏");
+    throw new CoverRefStoreError("COVER_REF_DATA_CORRUPTED", "封面参考读取失败：存储数据损坏");
   }
 }
 

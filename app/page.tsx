@@ -5,7 +5,9 @@ import { Icon, IconName } from "@/components/ui/icon";
 import {
   getKnowledgeEntries, getTopicAssets, getScriptAssets,
   getVideoReviews, getOrInitActiveIP, getCoverRefs, getGlobalCoverRefs,
+  CoverRefStoreError,
 } from "@/lib/ip-store";
+import type { ScriptAsset } from "@/lib/types";
 import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 import {
   getNormalizedCategory,
@@ -25,14 +27,29 @@ const MODULES = [
   { href: "/review", step: "07", title: "发布复盘", desc: "数据复盘 → 原因分析 → 结构拆解 → 经验沉淀 → 下一条建议，完整六层分析。", icon: "calendar" },
 ];
 
-function StatCard({ label, value, href, color = "#639922" }: { label: string; value: number | string; href?: string; color?: string }) {
+function StatCard({ label, value, href, onClick, expanded, color = "#639922" }: {
+  label: string;
+  value: number | string;
+  href?: string;
+  onClick?: () => void;
+  expanded?: boolean;
+  color?: string;
+}) {
   const inner = (
     <div className="flex flex-col gap-1 rounded-[12px] border border-[#E5E4DE] bg-white p-4 transition hover:border-[#639922]">
       <span className="text-[22px] font-bold" style={{ color }}>{value}</span>
       <span className="text-[12px] text-[#8A8A86]">{label}</span>
     </div>
   );
-  return href ? <Link href={href}>{inner}</Link> : <div>{inner}</div>;
+  if (href) return <Link href={href}>{inner}</Link>;
+  if (onClick) {
+    return (
+      <button type="button" onClick={onClick} aria-expanded={expanded} className="w-full text-left">
+        {inner}
+      </button>
+    );
+  }
+  return <div>{inner}</div>;
 }
 
 function RecentItem({ label, time, badge }: { label: string; time: string; badge?: string }) {
@@ -58,13 +75,18 @@ function relTime(iso: string): string {
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
+  const [showPendingScripts, setShowPendingScripts] = useState(false);
+  const [showScriptHistory, setShowScriptHistory] = useState(false);
   const [stats, setStats] = useState({
     globalMethods: 0, ipKnowledge: 0, coverRefs: 0, calibrationSamples: 0,
     topics: 0, scripts: 0, reviews: 0,
     pendingTopics: 0, pendingScripts: 0, pendingReviews: 0,
   });
   const [recentKnowledge, setRecentKnowledge] = useState<{ title: string; category: string; createdAt: string }[]>([]);
+  const [pendingScriptItems, setPendingScriptItems] = useState<ScriptAsset[]>([]);
+  const [scriptHistoryItems, setScriptHistoryItems] = useState<ScriptAsset[]>([]);
   const [activeIPName, setActiveIPName] = useState("未选择");
+  const [coverRefsError, setCoverRefsError] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -80,7 +102,20 @@ export default function Home() {
     const ipKnowledge = ipId === null ? [] : filteredKnowledgeByScope.filter((entry) => (
       entry.ipId === ipId && isIPKnowledgeCategory(getNormalizedCategory(entry))
     ));
-    const coverRefs = ipId === null ? getGlobalCoverRefs() : getCoverRefs(ipId);
+    let coverRefs = [];
+    try {
+      coverRefs = ipId === null ? getGlobalCoverRefs() : getCoverRefs(ipId);
+      setCoverRefsError(null);
+    } catch (error) {
+      if (
+        error instanceof CoverRefStoreError
+        && (error.code === "COVER_REF_STORAGE_READ_FAILED" || error.code === "COVER_REF_DATA_CORRUPTED")
+      ) {
+        setCoverRefsError("暂无法加载封面数据");
+      } else {
+        throw error;
+      }
+    }
     const calibrationSamples = getTopicCalibrationSamples(activeIP);
     const topics = getTopicAssets(ipId ?? "").filter(() => true);
     const scripts = getScriptAssets(ipId ?? "");
@@ -98,6 +133,8 @@ export default function Home() {
       pendingScripts: scripts.filter(s => s.status === "草稿").length,
       pendingReviews: reviews.filter(r => !r.analysis).length,
     });
+    setPendingScriptItems(scripts.filter(script => script.status === "草稿"));
+    setScriptHistoryItems(scripts);
 
     // 最近7天新增的知识资产（所有分类混合）
     const visibleKnowledge = [
@@ -129,15 +166,42 @@ export default function Home() {
               </Link>
             )}
             {stats.pendingScripts > 0 && (
-              <Link href="/script-factory" className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] font-semibold text-[#7A5C00] shadow-sm hover:shadow">
+              <button
+                type="button"
+                aria-expanded={showPendingScripts}
+                onClick={() => setShowPendingScripts(visible => !visible)}
+                className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] font-semibold text-[#7A5C00] shadow-sm hover:shadow"
+              >
                 <span>📝</span> 待完成脚本 {stats.pendingScripts} 条
-              </Link>
+              </button>
             )}
             {stats.pendingReviews > 0 && (
               <Link href="/review" className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] font-semibold text-[#7A5C00] shadow-sm hover:shadow">
                 <span>📊</span> 待复盘记录 {stats.pendingReviews} 条
               </Link>
             )}
+          </div>
+        </div>
+      )}
+
+      {mounted && showPendingScripts && pendingScriptItems.length > 0 && (
+        <div className="mb-5 rounded-[14px] border border-[#E5E4DE] bg-white p-3">
+          <div className="mb-2 px-2 text-[12px] font-bold text-[#1C1C1B]">待完成脚本清单</div>
+          <div className="flex flex-col gap-1.5">
+            {pendingScriptItems.map(script => (
+              <div key={script.id} className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F7F6F2] px-3 py-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[12.5px] font-semibold text-[#333]">{script.title || "未命名脚本"}</div>
+                  <div className="mt-0.5 text-[11px] text-[#999]">创建时间：{relTime(script.createdAt)} · 状态：{script.status}</div>
+                </div>
+                <Link
+                  href={`/script-factory?scriptId=${encodeURIComponent(script.id)}`}
+                  className="shrink-0 rounded-full bg-[#1C1C1B] px-3 py-1 text-[11.5px] font-semibold text-[#C8F04A] hover:opacity-85"
+                >
+                  查看
+                </Link>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -155,6 +219,11 @@ export default function Home() {
           <StatCard label="历史校准样本" value={mounted ? stats.calibrationSamples : "—"} href="/topic-board" color="#5B3FA0" />
           <StatCard label="合计" value={mounted ? totalKnowledge : "—"} color="#1C1C1B" />
         </div>
+        {mounted && coverRefsError && (
+          <div role="alert" className="mt-2 rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12px] text-[#A32D2D]">
+            {coverRefsError}
+          </div>
+        )}
       </div>
 
       {/* 最近新增知识资产 + 生产资产统计 */}
@@ -177,9 +246,43 @@ export default function Home() {
           <div className="mb-2.5 text-[13px] font-bold text-[#1C1C1B]">生产资产统计</div>
           <div className="grid grid-cols-3 gap-2.5">
             <StatCard label="选题记录" value={mounted ? stats.topics : "—"} href="/topic-board" />
-            <StatCard label="脚本记录" value={mounted ? stats.scripts : "—"} href="/script-factory" />
+            <StatCard
+              label="脚本记录"
+              value={mounted ? stats.scripts : "—"}
+              onClick={() => setShowScriptHistory(visible => !visible)}
+              expanded={showScriptHistory}
+            />
             <StatCard label="复盘记录" value={mounted ? stats.reviews : "—"} href="/review" />
           </div>
+          {mounted && showScriptHistory && (
+            <div className="mt-3 rounded-[12px] border border-[#E5E4DE] bg-white p-3">
+              <div className="mb-2 flex items-center justify-between px-1">
+                <span className="text-[12px] font-bold text-[#1C1C1B]">脚本历史</span>
+                <Link href="/script-factory" className="text-[11.5px] font-semibold text-[#639922]">新建脚本 →</Link>
+              </div>
+              {scriptHistoryItems.length === 0 ? (
+                <div className="rounded-[10px] bg-[#F7F6F2] px-3 py-5 text-center text-[12px] text-[#999]">当前IP还没有脚本记录</div>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {scriptHistoryItems.map(script => (
+                    <div key={script.id} className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F7F6F2] px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-[12.5px] font-semibold text-[#333]">{script.title || "未命名脚本"}</div>
+                        <div className="mt-0.5 text-[11px] text-[#999]">创建时间：{relTime(script.createdAt)} · 状态：{script.status}</div>
+                      </div>
+                      <Link
+                        href={`/script-factory?scriptId=${encodeURIComponent(script.id)}`}
+                        aria-label={`查看脚本“${script.title || "未命名脚本"}”`}
+                        className="shrink-0 rounded-full bg-[#1C1C1B] px-3 py-1 text-[11.5px] font-semibold text-[#C8F04A] hover:opacity-85"
+                      >
+                        查看
+                      </Link>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {mounted && totalKnowledge === 0 && (
             <div className="mt-3 rounded-[10px] bg-[#F7F6F2] p-3 text-[12px] text-[#888]">
               💡 开始使用 FlowPilot 后，这里会展示你的内容生产数据和知识积累趋势。
