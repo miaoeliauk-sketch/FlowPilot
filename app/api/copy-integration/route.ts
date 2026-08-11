@@ -23,6 +23,42 @@ const SYSTEM_PROMPT = `你是FlowPilot的文案整合助手。你的唯一任务
 9. 每个结果项的sourceIds只能使用输入中真实存在的素材id。
 10. 严格输出指定JSON对象，不要输出其他文字。`;
 
+class CopyIntegrationParseError extends Error {
+  readonly diagnosticCode: string;
+
+  constructor(diagnosticCode: string, message: string) {
+    super(message);
+    this.name = "CopyIntegrationParseError";
+    this.diagnosticCode = diagnosticCode;
+  }
+}
+
+function failCopyIntegrationParse(diagnosticCode: string, message: string): never {
+  throw new CopyIntegrationParseError(diagnosticCode, message);
+}
+
+function buildParseRetryInstruction(failureCode: string): string {
+  if (failureCode === "INVALID_JSON") {
+    return "上次输出不是有效JSON对象。请严格按指定JSON结构完整输出，检查引号、逗号和括号，不要添加JSON以外的文字。";
+  }
+  if (failureCode === "EVIDENCE_EXCERPT_NOT_IN_DRAFT") {
+    return "上次输出中的依据不足片段未在母稿正文中找到。请重新检查每条evidenceGaps：draftExcerpt必须从母稿正文paragraphs中逐字复制，不得改写，并确保对应观点确实保留在母稿中。";
+  }
+  if (failureCode === "EVIDENCE_NOTICE_MISSING") {
+    return "上次输出中的依据不足片段缺少明确的依据说明或核实提示。请在母稿对应段落和draftExcerpt中完整加入固定提示句：“这部分说法缺乏权威来源支撑，建议使用前核实。”draftExcerpt仍须从母稿正文paragraphs中逐字复制。";
+  }
+  if (failureCode === "UNKNOWN_SOURCE_ID") {
+    return "上次输出引用了不存在的素材编号。请重新检查所有sourceIds：sourceIds只能使用输入素材中提供的id，不要使用“素材1”等显示名称，也不要编造新id。";
+  }
+  if (failureCode === "FIELD_TOO_LONG") {
+    return "上次输出有字段超过长度限制。请将conflicts.topic控制在20字内、alternatives.brief控制在30字内、draftExcerpt控制在160字内，同时保留原意。";
+  }
+  if (failureCode.startsWith("INVALID_CONFLICT")) {
+    return "上次输出的冲突结构不合格。conflicts必须是数组，每条冲突必须恰好包含两个alternatives，并为双方提供brief、text和真实sourceIds。";
+  }
+  return "上次输出未通过固定结构校验。请重新检查JSON字段、素材id和各项格式要求后完整输出，不要添加JSON以外的文字。";
+}
+
 function buildUserPrompt(sources: CopyIntegrationSource[], instruction: string) {
   const materials = sources.map((source, index) => `【素材${index + 1}】
 id：${source.id}
@@ -71,25 +107,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function requireString(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${field}无效`);
+  if (typeof value !== "string" || !value.trim()) {
+    failCopyIntegrationParse("INVALID_REQUIRED_FIELD", `${field}无效`);
+  }
   return value.trim();
 }
 
 function requireShortString(value: unknown, field: string, maxLength: number): string {
   const text = requireString(value, field);
-  if (text.length > maxLength) throw new Error(`${field}过长`);
+  if (text.length > maxLength) {
+    failCopyIntegrationParse("FIELD_TOO_LONG", `${field}过长`);
+  }
   return text;
 }
 
 function requireStringArray(value: unknown, field: string, allowEmpty = false): string[] {
-  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) throw new Error(`${field}无效`);
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    failCopyIntegrationParse("INVALID_ARRAY_FIELD", `${field}无效`);
+  }
   return value.map((item) => requireString(item, field));
 }
 
 function requireSourceIds(value: unknown, field: string, allowedSourceIds: Set<string>): string[] {
   const sourceIds = requireStringArray(value, field);
   if (sourceIds.some((sourceId) => !allowedSourceIds.has(sourceId))) {
-    throw new Error(`${field}包含未知素材id`);
+    throw new CopyIntegrationParseError("UNKNOWN_SOURCE_ID", `${field}包含未知素材id`);
   }
   return Array.from(new Set(sourceIds));
 }
@@ -99,7 +141,7 @@ function parseIntegrationItem(
   field: string,
   allowedSourceIds: Set<string>,
 ): CopyIntegrationNote {
-  if (!isRecord(value)) throw new Error(`${field}无效`);
+  if (!isRecord(value)) failCopyIntegrationParse("INVALID_REVIEW_ITEM", `${field}无效`);
   return {
     summary: requireString(value.summary, `${field}.summary`),
     sourceIds: requireSourceIds(value.sourceIds, `${field}.sourceIds`, allowedSourceIds),
@@ -131,12 +173,18 @@ function parseEvidenceGapItem(
     160,
   );
   if (!draftParagraphs.some((paragraph) => paragraph.includes(draftExcerpt))) {
-    throw new Error(`${field}.draftExcerpt未出现在母稿正文段落中`);
+    throw new CopyIntegrationParseError(
+      "EVIDENCE_EXCERPT_NOT_IN_DRAFT",
+      `${field}.draftExcerpt未出现在母稿正文段落中`,
+    );
   }
-  const statesEvidenceLimit = /(?:缺乏|缺少|没有|尚无|暂无|不足|未有|未经).{0,24}(?:来源|依据|证据|数据|研究|支持|验证|核实)/.test(draftExcerpt);
-  const asksForVerification = /(?:建议|需要|需|应).{0,12}(?:核实|验证|查证|确认)/.test(draftExcerpt);
+  const statesEvidenceLimit = /(?:缺乏|缺少|没有|尚无|暂无|不足|未有|未经|尚未|未被|有待|尚待).{0,32}(?:来源|依据|证据|论据|数据|研究|支持|验证|核实|核验|证实|证明|佐证)/.test(draftExcerpt);
+  const asksForVerification = /(?:建议|需要|需|应).{0,16}(?:核实|验证|查证|确认|核验)/.test(draftExcerpt);
   if (!statesEvidenceLimit || !asksForVerification) {
-    throw new Error(`${field}.draftExcerpt缺少明确的依据不足或核实提示`);
+    throw new CopyIntegrationParseError(
+      "EVIDENCE_NOTICE_MISSING",
+      `${field}.draftExcerpt缺少明确的依据不足或核实提示`,
+    );
   }
   return item;
 }
@@ -166,17 +214,24 @@ function parseCopyIntegrationResult(
   content: string,
   sources: CopyIntegrationSource[],
 ): CopyIntegrationResult {
-  const parsed: unknown = JSON.parse(content);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    failCopyIntegrationParse("INVALID_JSON", "文案整合响应不是有效JSON");
+  }
   if (!isRecord(parsed) || !isRecord(parsed.draft) || !isRecord(parsed.contentReview)) {
-    throw new Error("文案整合响应结构无效");
+    failCopyIntegrationParse("INVALID_RESPONSE_STRUCTURE", "文案整合响应结构无效");
   }
   const allowedSourceIds = new Set(sources.map((source) => source.id));
 
   if (!Array.isArray(parsed.draft.sections) || parsed.draft.sections.length === 0) {
-    throw new Error("draft.sections无效");
+    failCopyIntegrationParse("INVALID_DRAFT_SECTIONS", "draft.sections无效");
   }
   const sections = parsed.draft.sections.map((section, index) => {
-    if (!isRecord(section)) throw new Error(`draft.sections[${index}]无效`);
+    if (!isRecord(section)) {
+      failCopyIntegrationParse("INVALID_DRAFT_SECTION", `draft.sections[${index}]无效`);
+    }
     return {
       heading: requireString(section.heading, `draft.sections[${index}].heading`),
       paragraphs: requireStringArray(section.paragraphs, `draft.sections[${index}].paragraphs`),
@@ -193,19 +248,27 @@ function parseCopyIntegrationResult(
   const draftParagraphs = sections.flatMap((section) => section.paragraphs);
 
   if (!Array.isArray(parsed.conflicts)) {
-    throw new Error("conflicts无效");
+    failCopyIntegrationParse("INVALID_CONFLICTS", "conflicts无效");
   }
   const conflicts = parsed.conflicts.map((item, index) => {
-    if (!isRecord(item)) throw new Error(`conflicts[${index}]无效`);
+    if (!isRecord(item)) {
+      failCopyIntegrationParse("INVALID_CONFLICT_ITEM", `conflicts[${index}]无效`);
+    }
     if (!Array.isArray(item.alternatives) || item.alternatives.length !== 2) {
-      throw new Error(`conflicts[${index}].alternatives必须包含两个说法`);
+      failCopyIntegrationParse(
+        "INVALID_CONFLICT_ALTERNATIVES",
+        `conflicts[${index}].alternatives必须包含两个说法`,
+      );
     }
     return {
       topic: requireShortString(item.topic, `conflicts[${index}].topic`, 20),
       conflictPoint: requireString(item.conflictPoint, `conflicts[${index}].conflictPoint`),
       alternatives: item.alternatives.map((alternative, alternativeIndex) => {
         if (!isRecord(alternative)) {
-          throw new Error(`conflicts[${index}].alternatives[${alternativeIndex}]无效`);
+          failCopyIntegrationParse(
+            "INVALID_CONFLICT_ALTERNATIVE",
+            `conflicts[${index}].alternatives[${alternativeIndex}]无效`,
+          );
         }
         return {
           brief: requireShortString(
@@ -229,7 +292,7 @@ function parseCopyIntegrationResult(
 
   const contentReview = parsed.contentReview;
   if (!Array.isArray(contentReview.exclusions) || !Array.isArray(contentReview.evidenceGaps)) {
-    throw new Error("contentReview无效");
+    failCopyIntegrationParse("INVALID_CONTENT_REVIEW", "contentReview无效");
   }
   const exclusions = contentReview.exclusions.map((item, index) =>
     parseReviewItem(item, `contentReview.exclusions[${index}]`, allowedSourceIds));
@@ -301,6 +364,7 @@ export async function POST(req: NextRequest) {
         typeof body.instruction === "string" ? body.instruction.trim() : "",
       ),
       parse: (content) => parseCopyIntegrationResult(content, sources),
+      buildParseRetryInstruction,
       apiKey: req.headers.get("X-DeepSeek-Key") || "",
       maxTokens: 8_000,
       temperature: 0.2,
@@ -314,9 +378,9 @@ export async function POST(req: NextRequest) {
       attempts: structuredError?.attempts ?? 1,
       attemptDiagnostics: structuredError?.attemptDiagnostics ?? [],
     }));
-    return NextResponse.json({
-      error: "本次文案整合失败，请稍后重试",
-      errorCode: "copy_integration_failed",
-    }, { status: 502 });
+    return NextResponse.json(
+      { error: "文案整合失败，请重试" },
+      { status: 502 },
+    );
   }
 }

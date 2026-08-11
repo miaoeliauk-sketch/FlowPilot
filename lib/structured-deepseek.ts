@@ -8,6 +8,7 @@ export interface StructuredDeepSeekOptions<T> {
   systemPrompt: string;
   userPrompt: string;
   parse: (content: string) => T;
+  buildParseRetryInstruction?: (failureCode: string) => string | null;
   apiKey?: string;
   maxTokens: number;
   temperature?: number;
@@ -145,6 +146,7 @@ export async function callStructuredDeepSeek<T>(
   let lastError: unknown;
   let lastStage: StructuredDeepSeekErrorStage = "request";
   const attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[] = [];
+  let parseRetryInstruction: string | null = null;
 
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
     let responseMeta = EMPTY_RESPONSE_META;
@@ -161,7 +163,9 @@ export async function callStructuredDeepSeek<T>(
       });
       const request = callDeepSeek(
         options.systemPrompt,
-        options.userPrompt,
+        parseRetryInstruction
+          ? `${options.userPrompt}\n\n【上次输出纠错要求】\n${parseRetryInstruction}`
+          : options.userPrompt,
         options.maxTokens,
         options.temperature ?? 0.3,
         options.apiKey,
@@ -237,6 +241,10 @@ export async function callStructuredDeepSeek<T>(
       if (responseMeta.finishReason === "length") {
         parseDiagnostic.failureCode = "OUTPUT_TRUNCATED";
       }
+      const failureCode = parseDiagnostic.failureCode ?? "PARSE_FAILED";
+      parseRetryInstruction = attempt < totalAttempts
+        ? options.buildParseRetryInstruction?.(failureCode) ?? null
+        : null;
       attemptDiagnostics.push({
         attempt,
         stage: "parse",

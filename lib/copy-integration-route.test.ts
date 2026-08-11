@@ -158,8 +158,13 @@ test("代表性素材生成固定四部分，并区分依据不足与未采用�
 test("依据不足条目必须提供确实保留在母稿中的对应片段", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
-  globalThis.fetch = async () => {
+  const userPrompts: string[] = [];
+  globalThis.fetch = async (_input, init) => {
     calls += 1;
+    const requestBody = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
     const retainedParagraph = calls === 1
       ? "两份素材都建议先确定当天最重要的任务。"
       : "两份素材都建议先确定当天最重要的任务。晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实。";
@@ -195,6 +200,10 @@ test("依据不足条目必须提供确实保留在母稿中的对应片段", as
 
     assert.equal(response.status, 200);
     assert.equal(calls, 2);
+    assert.doesNotMatch(userPrompts[0], /上次输出纠错要求/);
+    assert.match(userPrompts[1], /上次输出纠错要求/);
+    assert.match(userPrompts[1], /依据不足片段未在母稿正文中找到/);
+    assert.match(userPrompts[1], /draftExcerpt必须从母稿正文paragraphs中逐字复制/);
     assert.match(body.draft.fullText, /晨间独处可能增强直觉/);
     assert.equal("draftExcerpt" in body.contentReview.evidenceGaps[0], false);
   } finally {
@@ -238,6 +247,105 @@ test("依据不足的母稿片段必须包含清晰的核实提示", async () =>
     assert.equal(response.status, 200);
     assert.equal(calls, 2);
     assert.match(body.draft.fullText, /缺乏权威来源支撑，建议使用前核实/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("依据不足核实提示失败时只记录脱敏错误码并定向纠错", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalError = console.error;
+  const logs: string[] = [];
+  const userPrompts: string[] = [];
+  let calls = 0;
+  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const requestBody = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
+    return deepSeekResponse(JSON.stringify({
+      draft: {
+        sections: [{
+          heading: "晨间安排",
+          paragraphs: ["晨间独处可能增强直觉。"],
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+      conflicts: [],
+      contentReview: {
+        exclusions: [],
+        evidenceGaps: [{
+          summary: "晨间独处可能增强直觉",
+          reason: "缺乏权威来源，建议使用前核实",
+          draftExcerpt: "晨间独处可能增强直觉",
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+    }));
+  };
+
+  try {
+    const response = await POST(representativeRequest());
+    const body = await response.json() as Record<string, unknown>;
+
+    assert.equal(response.status, 502);
+    assert.deepEqual(body, { error: "文案整合失败，请重试" });
+    assert.equal(calls, 2);
+    assert.match(userPrompts[1], /依据不足片段缺少明确的依据说明或核实提示/);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /"failureCode":"EVIDENCE_NOTICE_MISSING"/);
+    assert.doesNotMatch(JSON.stringify(body), /EVIDENCE_NOTICE_MISSING|failureCode|diagnostic/i);
+    assert.doesNotMatch(logs[0], /晨间独处可能增强直觉/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+});
+
+test("明确说明尚未证实并建议核验时视为合格的依据不足提示", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  const evidenceNotice = "追星改变面相的说法尚未得到权威研究证实，建议使用前进一步核验。";
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify({
+      draft: {
+        sections: [{
+          heading: "追星与自我状态",
+          paragraphs: [`过度关注外界可能扰乱个人节奏。${evidenceNotice}`],
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+      conflicts: [],
+      contentReview: {
+        exclusions: [],
+        evidenceGaps: [{
+          summary: "追星可能改变面相",
+          reason: "目前缺少可核验的权威研究",
+          draftExcerpt: evidenceNotice,
+          sourceIds: ["source-1", "source-2"],
+        }],
+      },
+    }));
+  };
+
+  try {
+    const response = await POST(integrationRequest());
+    const body = await response.json() as {
+      draft: { fullText: string };
+      contentReview: { evidenceGaps: Array<{ summary: string }> };
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 1);
+    assert.match(body.draft.fullText, /尚未得到权威研究证实/);
+    assert.deepEqual(body.contentReview.evidenceGaps, [{
+      summary: "追星可能改变面相",
+      reason: "目前缺少可核验的权威研究",
+      sourceIds: ["source-1", "source-2"],
+    }]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -329,10 +437,15 @@ test("结构化调用失败时诊断只写服务器日志，对外返回稳定�
   const originalFetch = globalThis.fetch;
   const originalError = console.error;
   const logs: string[] = [];
+  const userPrompts: string[] = [];
   let calls = 0;
   console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_input, init) => {
     calls += 1;
+    const requestBody = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
     return deepSeekResponse("SENSITIVE_AI_OUTPUT");
   };
 
@@ -341,16 +454,15 @@ test("结构化调用失败时诊断只写服务器日志，对外返回稳定�
     const body = await response.json() as Record<string, unknown>;
 
     assert.equal(response.status, 502);
-    assert.deepEqual(body, {
-      error: "本次文案整合失败，请稍后重试",
-      errorCode: "copy_integration_failed",
-    });
+    assert.deepEqual(body, { error: "文案整合失败，请重试" });
     assert.equal(calls, 2);
     assert.equal(logs.length, 1);
     assert.match(logs[0], /^\[copy-integration\]\s+/);
     assert.match(logs[0], /"stage":"parse"/);
     assert.match(logs[0], /"attempts":2/);
-    assert.doesNotMatch(JSON.stringify(body), /attempt|diagnostic|token|stage/i);
+    assert.match(logs[0], /"failureCode":"INVALID_JSON"/);
+    assert.match(userPrompts[1], /有效JSON对象/);
+    assert.doesNotMatch(JSON.stringify(body), /attempt|diagnostic|token|stage|errorCode/i);
     assert.doesNotMatch(logs[0], /SENSITIVE_AI_OUTPUT|客户不买|成交困难/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -361,10 +473,16 @@ test("结构化调用失败时诊断只写服务器日志，对外返回稳定�
 test("拒绝AI编造的素材来源编号", async () => {
   const originalFetch = globalThis.fetch;
   const originalError = console.error;
+  const logs: string[] = [];
+  const userPrompts: string[] = [];
   let calls = 0;
-  console.error = () => undefined;
-  globalThis.fetch = async () => {
+  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  globalThis.fetch = async (_input, init) => {
     calls += 1;
+    const requestBody = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
     return deepSeekResponse(JSON.stringify({
       draft: {
         sections: [{
@@ -387,11 +505,12 @@ test("拒绝AI编造的素材来源编号", async () => {
     const body = await response.json() as Record<string, unknown>;
 
     assert.equal(response.status, 502);
-    assert.deepEqual(body, {
-      error: "本次文案整合失败，请稍后重试",
-      errorCode: "copy_integration_failed",
-    });
+    assert.deepEqual(body, { error: "文案整合失败，请重试" });
     assert.equal(calls, 2);
+    assert.match(userPrompts[1], /sourceIds只能使用输入素材中提供的id/);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /"failureCode":"UNKNOWN_SOURCE_ID"/);
+    assert.doesNotMatch(JSON.stringify(body), /UNKNOWN_SOURCE_ID|failureCode|diagnostic/i);
   } finally {
     globalThis.fetch = originalFetch;
     console.error = originalError;
