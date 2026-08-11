@@ -5,7 +5,7 @@ import { addKnowledgeEntry } from "@/lib/ip-store";
 import type { KnowledgeCategory } from "@/lib/types";
 import { apiFetch } from "@/lib/api-fetch";
 import { parseXlsxFile } from "@/lib/xlsx-parser";
-import { isIPKnowledgeCategory } from "@/lib/knowledge-categories";
+import { IP_CATEGORIES, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
 import { getIPDisplayLabel } from "@/lib/ip-display";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
@@ -32,6 +32,10 @@ interface IntakeItem {
   confidenceReason: string;
   ingestRecommend: string;
   ingestReason: string;
+  understanding?: string;
+  keyPoints?: string[];
+  relationToIP?: string;
+  keywords?: string[];
   selected: boolean;
   categoryOverride?: string;
 }
@@ -69,8 +73,30 @@ function buildMethodCardContent(item: IntakeItem) {
   ].filter(Boolean).join("\n\n");
 }
 
-export default function KnowledgeIntakePage() {
+function buildIPUnderstandingContent(item: IntakeItem, originalContent: string) {
+  return [
+    `【内容概要】\n${item.summary}`,
+    item.understanding ? `【AI对内容的理解】\n${item.understanding}` : "",
+    listText(item.keyPoints) ? `【原文关键信息】\n${listText(item.keyPoints)}` : "",
+    item.relationToIP ? `【与当前IP的关系】\n${item.relationToIP}` : "",
+    `【原始内容】\n${originalContent.trim()}`,
+  ].filter(Boolean).join("\n\n");
+}
+
+interface KnowledgeIntakePageProps {
+  searchParams?: {
+    scope?: string;
+    category?: string;
+  };
+}
+
+export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePageProps) {
   const { ips, activeIP } = useIP();
+  const isIPMode = searchParams?.scope === "ip";
+  const requestedCategory = searchParams?.category ?? "";
+  const availableCategories = isIPMode
+    ? IP_CATEGORIES.map(category => category.id)
+    : ALL_CATS;
   const [rawContent, setRawContent] = useState("");
   const [dragging, setDragging] = useState(false);
   const [fileName, setFileName] = useState("");
@@ -117,6 +143,7 @@ export default function KnowledgeIntakePage() {
 
   async function handleAnalyze() {
     if (!rawContent.trim()) { setError("请先粘贴原始资料"); return; }
+    if (isIPMode && !activeIP) { setError("请先选择当前IP"); return; }
     setLoading(true); setError(""); setItems([]); setSaved(false);
     try {
       const res = await apiFetch("/api/knowledge-intake", {
@@ -126,6 +153,8 @@ export default function KnowledgeIntakePage() {
           rawContent,
           sourceType,
           sourceName: fileName,
+          scope: isIPMode ? "ip" : "global",
+          requestedCategory: isIPMode ? requestedCategory : undefined,
           activeIPId: activeIP?.id ?? null,
           availableIPs: ips.map(ip => ({
             id: ip.id,
@@ -137,8 +166,12 @@ export default function KnowledgeIntakePage() {
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? "分析失败"); return; }
-      const parsed: IntakeItem[] = (data.items ?? []).map((it: IntakeItem, i: number) => ({
+      const responseItems = data.mode === "ip"
+        ? data.item ? [data.item] : []
+        : Array.isArray(data.items) ? data.items : [];
+      const parsed: IntakeItem[] = responseItems.map((it: IntakeItem, i: number) => ({
         ...it,
+        tags: isIPMode ? it.keywords ?? [] : it.tags ?? [],
         id: "item-" + i + "-" + Date.now(),
         selected: it.ingestRecommend === "建议入库" &&
           (!isIPKnowledgeCategory(it.category) || Boolean(it.ipId)),
@@ -164,6 +197,43 @@ export default function KnowledgeIntakePage() {
     let count = 0;
     for (const it of toSave) {
       const cat = (it.categoryOverride || it.category) as KnowledgeCategory;
+      if (isIPMode) {
+        const keywords = (it.keywords ?? []).map(keyword => keyword.trim()).filter(Boolean);
+        const evidence = JSON.stringify({
+          intakeMode: "ip_understanding",
+          originalCategory: it.category,
+          normalizedCategory: cat,
+          methodCard: false,
+          understanding: it.understanding ?? "",
+          keyPoints: it.keyPoints ?? [],
+          relationToIP: it.relationToIP ?? "",
+          confidence: it.confidence,
+          reason: it.confidenceReason,
+          needsReview: it.ingestRecommend === "待确认",
+        });
+        addKnowledgeEntry({
+          category: cat,
+          title: it.title,
+          rawContent: buildIPUnderstandingContent(it, rawContent),
+          tags: keywords,
+          keywords,
+          ipId: it.ipId ?? activeIP?.id ?? null,
+          sourceTier: (["高","中","低"].includes(it.confidence) ? it.confidence as "高"|"中"|"低" : "低"),
+          sourceTierReason: it.confidenceReason,
+          contentDirection: [],
+          sourcePlatform: "IP内容理解入库",
+          sourceUrl: "",
+          note: evidence,
+          extractedAt: new Date().toISOString(),
+          metrics: null,
+          viralEvaluation: null,
+          usageRecords: [],
+          status: "未使用",
+          dna: null,
+        });
+        count++;
+        continue;
+      }
       const triggerKeywords = [...(it.triggerKeywords ?? []), ...(it.similarPhrases ?? [])].map(t => t.trim()).filter(Boolean);
       const ev = JSON.stringify({
         originalCategory: it.category,
@@ -194,10 +264,14 @@ export default function KnowledgeIntakePage() {
     <div className="min-h-screen p-6 md:p-8">
       <header className="mb-6">
         <div className="mb-1.5 text-[13px] text-[#8A8A86]">
-          <a href="/" className="font-semibold text-[#639922]">工作台</a> / <a href="/knowledge-hub" className="text-[#639922]">知识库中心</a> / 智能入库助手
+          <a href="/" className="font-semibold text-[#639922]">工作台</a> / <a href="/knowledge-hub" className="text-[#639922]">知识库中心</a> / {isIPMode ? "IP内容理解入库" : "智能入库助手"}
         </div>
-        <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">智能入库助手</h1>
-        <p className="mt-1 text-[13px] text-[#888]">粘贴原始资料，AI 自动拆解成可复用的短视频方法知识，确认后写入知识库。</p>
+        <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">{isIPMode ? "IP内容理解入库" : "智能入库助手"}</h1>
+        <p className="mt-1 text-[13px] text-[#888]">
+          {isIPMode
+            ? `忠实理解你输入的完整内容，保留原文和思维脉络，确认后写入「${activeIP?.name ?? "当前IP"}」知识库。`
+            : "粘贴原始资料，AI自动提炼成可复用的短视频方法知识，确认后写入通用知识库。"}
+        </p>
       </header>
 
       {items.length === 0 && !loading && (
@@ -228,15 +302,19 @@ export default function KnowledgeIntakePage() {
           </div>
           <label className="mb-2 block text-[13px] font-semibold text-[#555]">或粘贴原始资料</label>
           <textarea value={rawContent} onChange={e => { setRawContent(e.target.value); setFileName(""); setSourceType("text"); setError(""); }}
-            placeholder="粘贴逐字稿、文案、方法论笔记、评论洞察…AI 会自动拆解成可复用的短视频方法知识。"
+            placeholder={isIPMode
+              ? "粘贴当前IP的逐字稿、文章、观点、经历或受众反馈…AI会理解完整内容，不会拆成方法卡。"
+              : "粘贴逐字稿、文案、方法论笔记、评论洞察…AI会提炼成可复用的短视频方法知识。"}
             rows={8}
             className="w-full resize-none rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
           <div className="mt-3 flex items-center justify-between">
             <span className="text-[12px] text-[#BBB]">{rawContent.length} 字{fileName ? " · " + fileName : ""}</span>
-            <button onClick={handleAnalyze} disabled={!rawContent.trim() || fileProcessing || loading}
+            <button
+              onClick={handleAnalyze}
+              disabled={!rawContent.trim() || fileProcessing || loading || (isIPMode && !activeIP)}
               className="rounded-[12px] px-6 py-2.5 text-[13px] font-bold disabled:opacity-40"
               style={{ background: "#C8F04A", color: "#1A1A1A" }}>
-              {fileProcessing ? "正在读取Excel…" : "AI智能拆解"}
+              {fileProcessing ? "正在读取Excel…" : isIPMode ? "AI理解内容" : "AI提炼方法"}
             </button>
           </div>
           {error && <div className="mt-3 flex items-center justify-between rounded-[8px] bg-[#FCEBEB] px-3 py-2"><p className="text-[12.5px] text-[#A32D2D]">{error}</p><button onClick={() => setError("")} className="ml-2 text-[12px] text-[#A32D2D] font-bold">✕</button></div>}
@@ -246,7 +324,7 @@ export default function KnowledgeIntakePage() {
       {loading && (
         <div className="flex flex-col items-center gap-3 py-20">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#E5E4DE] border-t-[#639922]" />
-          <p className="text-[13px] text-[#888]">AI正在拆解资料，生成中请稍候，请勿重复提交，最坏约2分钟。</p>
+          <p className="text-[13px] text-[#888]">{isIPMode ? "AI正在理解完整内容" : "AI正在提炼资料"}，生成中请稍候，请勿重复提交，最坏约2分钟。</p>
         </div>
       )}
 
@@ -254,7 +332,7 @@ export default function KnowledgeIntakePage() {
         <>
           <div className="mb-4 flex items-center justify-between">
             <div>
-              <span className="text-[15px] font-bold text-[#1C1C1B]">拆解结果</span>
+              <span className="text-[15px] font-bold text-[#1C1C1B]">{isIPMode ? "理解结果" : "提炼结果"}</span>
               <span className="ml-2 text-[13px] text-[#888]">共 {items.length} 条，已选 {selectedCount} 条</span>
             </div>
             <div className="flex gap-2">
@@ -263,7 +341,7 @@ export default function KnowledgeIntakePage() {
               <button onClick={handleSave} disabled={selectedCount === 0}
                 className="rounded-[10px] px-4 py-2 text-[12.5px] font-bold disabled:opacity-40"
                 style={{ background: "#1C1C1B", color: "#fff" }}>
-                写入知识库（{selectedCount} 条）
+                {isIPMode ? "写入当前IP知识库" : "写入通用知识库"}（{selectedCount} 条）
               </button>
             </div>
           </div>
@@ -297,7 +375,7 @@ export default function KnowledgeIntakePage() {
                           selected: isIPKnowledgeCategory(e.target.value) ? false : it.selected,
                         } : it))}
                         className="rounded-[6px] border border-[#E5E4DE] px-2 py-0.5 text-[11.5px] outline-none">
-                        {ALL_CATS.map(c => <option key={c}>{c}</option>)}
+                        {availableCategories.map(c => <option key={c}>{c}</option>)}
                       </select>
                     </div>
                     {isIPKnowledgeCategory(effectiveCategory) && (
@@ -326,11 +404,14 @@ export default function KnowledgeIntakePage() {
                 </div>
                 <div className="mb-2 rounded-[10px] bg-[#FAFAF8] px-3 py-2.5 text-[12.5px] leading-5 text-[#444]">
                   <p>{item.summary}</p>
-                  {item.coreMethod && <p className="mt-1.5"><span className="font-semibold text-[#555]">核心方法：</span>{item.coreMethod}</p>}
+                  {isIPMode && item.understanding && <p className="mt-1.5"><span className="font-semibold text-[#555]">内容理解：</span>{item.understanding}</p>}
+                  {!isIPMode && item.coreMethod && <p className="mt-1.5"><span className="font-semibold text-[#555]">核心方法：</span>{item.coreMethod}</p>}
                 </div>
-                {listText(item.applicableScenarios) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">适用场景：</span>{listText(item.applicableScenarios)}</p>}
-                {listText(item.triggerKeywords) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">触发关键词：</span>{listText(item.triggerKeywords)}</p>}
-                {item.aiUsage && <p className="mb-1.5 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">AI调用方式：</span>{item.aiUsage}</p>}
+                {isIPMode && listText(item.keyPoints) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">原文关键信息：</span>{listText(item.keyPoints)}</p>}
+                {isIPMode && item.relationToIP && <p className="mb-1.5 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">与当前IP的关系：</span>{item.relationToIP}</p>}
+                {!isIPMode && listText(item.applicableScenarios) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">适用场景：</span>{listText(item.applicableScenarios)}</p>}
+                {!isIPMode && listText(item.triggerKeywords) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">触发关键词：</span>{listText(item.triggerKeywords)}</p>}
+                {!isIPMode && item.aiUsage && <p className="mb-1.5 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">AI调用方式：</span>{item.aiUsage}</p>}
                 <p className="text-[11.5px] text-[#AAA]"><span className="font-semibold text-[#888]">入库依据：</span>{item.ingestReason} · {item.confidenceReason}</p>
               </div>
               );
@@ -342,7 +423,7 @@ export default function KnowledgeIntakePage() {
             <button onClick={handleSave} disabled={selectedCount === 0}
               className="rounded-[10px] px-5 py-2.5 text-[13px] font-bold disabled:opacity-40"
               style={{ background: "#1C1C1B", color: "#fff" }}>
-              写入知识库（{selectedCount} 条）
+              {isIPMode ? "写入当前IP知识库" : "写入通用知识库"}（{selectedCount} 条）
             </button>
           </div>
           {error && <div className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</div>}

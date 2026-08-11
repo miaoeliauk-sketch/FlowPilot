@@ -1062,6 +1062,9 @@ export default function KnowledgeHubPage() {
   const filteredHooks = hookEntries.filter(h => !q || h.hookText.toLowerCase().includes(q) || h.title.toLowerCase().includes(q));
   const unanalyzedCount = hookEntries.filter(h => !h.analyzed).length;
   const addAction = getKnowledgeHubAddAction(scopeFilter);
+  const smartIntakeHref = scopeFilter === "ip"
+    ? `/knowledge-intake?scope=ip&category=${encodeURIComponent(ipCatFilter)}`
+    : `/knowledge-intake?scope=global&category=${encodeURIComponent(globalCatFilter)}`;
 
   function openSectionAddFlow() {
     if (addAction !== "smart-intake") setShowAdd(true);
@@ -1312,7 +1315,7 @@ export default function KnowledgeHubPage() {
           )}
           {addAction === "smart-intake" ? (
             <a
-              href="/knowledge-intake"
+              href={smartIntakeHref}
               className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#1C1C1B] px-4 text-[12.5px] font-semibold text-white"
             >
               <Icon name="plus" size="sm" /> 新增知识
@@ -1447,7 +1450,7 @@ export default function KnowledgeHubPage() {
                     <button onClick={openSectionAddFlow} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 添加爆款案例</button>
                   ) : (
                     <div className="flex gap-2">
-                      <a href="/knowledge-intake" className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 智能入库</a>
+                      <a href={smartIntakeHref} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 智能入库</a>
                       <button onClick={() => setShowXlsx(true)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#555]">从Excel导入</button>
                     </div>
                   )}
