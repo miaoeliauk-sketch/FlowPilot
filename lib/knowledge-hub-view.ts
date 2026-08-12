@@ -1,12 +1,19 @@
 import { GLOBAL_CATEGORIES, IP_CATEGORIES } from "./knowledge-categories";
 
-export type KnowledgeHubSection = "global" | "ip" | "viral" | "hook" | "voice";
+export type KnowledgeHubSection =
+  | "global"
+  | "ip"
+  | "viral"
+  | "hook"
+  | "voice"
+  | "material";
 
 export type KnowledgeHubAddAction =
   | "smart-intake"
   | "viral-form"
   | "hook-form"
-  | "voice-form";
+  | "voice-form"
+  | "cover-form";
 
 export const KNOWLEDGE_HUB_LEGACY_SECTIONS: ReadonlyArray<{
   section: Extract<KnowledgeHubSection, "viral" | "hook" | "voice">;
@@ -36,6 +43,7 @@ export function getKnowledgeHubAddAction(
   if (section === "viral") return "viral-form";
   if (section === "hook") return "hook-form";
   if (section === "voice") return "voice-form";
+  if (section === "material") return "cover-form";
   return "smart-intake";
 }
 

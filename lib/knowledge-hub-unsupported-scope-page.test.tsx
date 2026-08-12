@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
@@ -66,7 +67,7 @@ after(() => {
   restoreBrowser?.();
 });
 
-test("知识库收到未支持的封面视图参数时明确提示而不是静默显示全局库", async () => {
+test("知识库收到material视图参数时安全展示封面参考库", async () => {
   const { render } = await import("@testing-library/react");
   const { IPProvider } = await import("./ip-context");
   const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
@@ -77,5 +78,9 @@ test("知识库收到未支持的封面视图参数时明确提示而不是静�
     </IPProvider>,
   );
 
-  await view.findByRole("alert", { name: "该视图暂不支持" });
+  await view.findByText("封面参考库暂无内容");
+  assert.equal(view.queryByRole("alert"), null);
+  for (const button of view.getAllByRole("button", { name: /添加封面参考/ })) {
+    assert.equal((button as HTMLButtonElement).disabled, true);
+  }
 });

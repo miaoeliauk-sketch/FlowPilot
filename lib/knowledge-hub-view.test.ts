@@ -19,7 +19,7 @@ test("人工修正分类时不提供跨范围选项", () => {
   assert.deepEqual(getKnowledgeHubCorrectionCategories(""), []);
 });
 
-test("保存人工修正前再次拒绝跨范围分类", () => {
+test("公共分类校验规则拒绝跨范围修正", () => {
   assert.equal(isKnowledgeHubCorrectionAllowed(null, "标题方法库"), true);
   assert.equal(isKnowledgeHubCorrectionAllowed(null, "IP表达语料"), false);
   assert.equal(isKnowledgeHubCorrectionAllowed("ip-a", "IP表达语料"), true);
@@ -34,6 +34,7 @@ test("各知识区的新建入口分派到正确流程", () => {
   assert.equal(getKnowledgeHubAddAction("viral"), "viral-form");
   assert.equal(getKnowledgeHubAddAction("hook"), "hook-form");
   assert.equal(getKnowledgeHubAddAction("voice"), "voice-form");
+  assert.equal(getKnowledgeHubAddAction("material"), "cover-form");
 });
 
 test("原有三个专项知识库入口保持可见", () => {
@@ -71,10 +72,7 @@ test("分类视图按范围、当前IP和新分类筛选", () => {
     selectedCategory: null,
     activeIPId: "ip-active",
   }), true);
-  assert.equal(matchesKnowledgeHubSection({
-    ...globalEntry,
-    ipId: "",
-  }, {
+  assert.equal(matchesKnowledgeHubSection({ ...globalEntry, ipId: "" }, {
     section: "global",
     selectedCategory: null,
     activeIPId: "ip-active",

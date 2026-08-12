@@ -1,6 +1,6 @@
 "use client";
 import { apiFetch } from "@/lib/api-fetch";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
 import { getIPDisplayLabel } from "@/lib/ip-display";
 import { KnowledgeEntry, KnowledgeCategory, VoiceSample, HookEntry, KnowledgeItem, KnowledgeItemType, KnowledgeItemScene, KNOWLEDGE_ITEM_TYPE_LABEL, KNOWLEDGE_ITEM_SCENE_LABEL } from "@/lib/types";
@@ -8,6 +8,8 @@ import {
   getKnowledgeEntries, addKnowledgeEntry, deleteKnowledgeEntry, updateKnowledgeEntry,
   getAllVoiceSamples, addVoiceSample, deleteVoiceSample,
   getHookEntries, getUnanalyzedHookEntries, addHookEntry, addHookEntriesBatch, deleteHookEntry, applyHookAnalysisResults,
+  getCoverRefs, getGlobalCoverRefs, addCoverRef, deleteCoverRef,
+  type CoverRef,
 } from "@/lib/ip-store";
 import { Icon } from "@/components/ui/icon";
 import { Select, SelectOption } from "@/components/ui/select";
@@ -15,21 +17,33 @@ import { XlsxUploadPanel } from "@/components/ui/xlsx-upload-panel";
 import { getAllKnowledgeItems, filterKnowledgeItems, countByType, countByScene, deleteKnowledgeItem } from "@/lib/knowledge-adapter";
 import type { ImportedData } from "@/components/ui/xlsx-upload-panel";
 import { searchKnowledgeEntries } from "@/lib/knowledge-search-utils";
-import { GLOBAL_CATEGORIES, IP_CATEGORIES, getNormalizedCategory, type GlobalCategoryId, type IPCategoryId } from "@/lib/knowledge-categories";
+import { ALL_NEW_CATS, GLOBAL_CATEGORIES, IP_CATEGORIES, getNormalizedCategory, type GlobalCategoryId, type IPCategoryId } from "@/lib/knowledge-categories";
 import {
   getKnowledgeHubCorrectionCategories,
   getKnowledgeHubAddAction,
+  isKnowledgeHubCorrectionAllowed,
   KNOWLEDGE_HUB_LEGACY_SECTIONS,
   matchesKnowledgeHubSection,
   type KnowledgeHubSection,
 } from "@/lib/knowledge-hub-view";
 
+type TabId = "爆款案例" | "方法论" | "评论需求" | "选题案例" | "IP语料库" | "复盘经验库" | "IP口播" | "Hook";
+// MVP：5个核心分类，其余数据保留但入口隐藏
+const TABS: { id: TabId; label: string; desc: string }[] = [
+  { id: "爆款案例", label: "案例",     desc: "真实爆款内容的逐字稿/文案，供AI选题和脚本参考" },
+  { id: "方法论",   label: "方法论",   desc: "选题方法论、内容架构、增长经验等通用知识" },
+  { id: "Hook",     label: "钩子",     desc: "前3秒钩子参考" },
+  { id: "评论需求", label: "评论洞察", desc: "从评论区收集的真实用户需求和反馈" },
+  { id: "IP语料库", label: "IP语料",   desc: "口播样本，供脚本工厂学习IP风格" },
+];
+
+
 function cleanRawContent(raw: string): string {
   return raw.split("\n").filter(line => {
-    const text = line.trim();
-    if (!text) return false;
-    if (text.startsWith("分类JSON:")) return false;
-    if (text.startsWith("{") && text.includes('"category"')) return false;
+    const t = line.trim();
+    if (!t) return false;
+    if (t.startsWith("分类JSON:")) return false;
+    if (t.startsWith("{") && t.includes('"category"')) return false;
     return true;
   }).join("\n").trim();
 }
@@ -47,6 +61,100 @@ function parseMethodMeta(note: string): {
     return parsed?.methodCard ? parsed : null;
   } catch {
     return null;
+  }
+}
+
+// ── 封面参考 ──
+const COVER_IMAGE_DB = "flowpilot-cover-images";
+const COVER_IMAGE_STORE = "images";
+
+function openCoverImageDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(COVER_IMAGE_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(COVER_IMAGE_STORE)) db.createObjectStore(COVER_IMAGE_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function putCoverImage(key: string, dataUrl: string): Promise<void> {
+  const db = await openCoverImageDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(COVER_IMAGE_STORE, "readwrite");
+      tx.objectStore(COVER_IMAGE_STORE).put(dataUrl, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+async function getCoverImage(key: string): Promise<string> {
+  const db = await openCoverImageDb();
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const tx = db.transaction(COVER_IMAGE_STORE, "readonly");
+      const req = tx.objectStore(COVER_IMAGE_STORE).get(key);
+      req.onsuccess = () => {
+        if (typeof req.result !== "string" || !req.result) {
+          reject(new Error("封面图片数据缺失"));
+          return;
+        }
+        resolve(req.result);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+async function deleteCoverImage(key: string): Promise<void> {
+  const db = await openCoverImageDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(COVER_IMAGE_STORE, "readwrite");
+      tx.objectStore(COVER_IMAGE_STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+async function hydrateCoverImages(refs: CoverRef[]): Promise<CoverRef[]> {
+  const hydrated = await Promise.all(refs.map(async ref => {
+    if (ref.imageKey && !ref.imageDataUrl) {
+      return { ...ref, imageDataUrl: await getCoverImage(ref.imageKey) };
+    }
+    return ref;
+  }));
+  return hydrated.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+async function loadCoverRefs(activeIPId: string | null): Promise<CoverRef[]> {
+  const refs = activeIPId ? getCoverRefs(activeIPId) : getGlobalCoverRefs();
+  return hydrateCoverImages(refs);
+}
+async function addCoverRefWithImage(
+  activeIPId: string,
+  input: Omit<CoverRef, "id" | "imageKey" | "scope" | "ipId" | "createdAt" | "updatedAt">,
+): Promise<CoverRef> {
+  const imageKey = `cover-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await putCoverImage(imageKey, input.imageDataUrl);
+  try {
+    const entry = addCoverRef(activeIPId, { ...input, imageKey, imageDataUrl: "" });
+    return { ...entry, imageDataUrl: input.imageDataUrl };
+  } catch (error) {
+    try { await deleteCoverImage(imageKey); } catch { /* 清理失败不覆盖原始保存错误 */ }
+    throw error;
+  }
+}
+async function deleteCoverRefWithImage(id: string, activeIPId: string): Promise<void> {
+  const target = deleteCoverRef(id, activeIPId);
+  if (target.imageKey) {
+    try { await deleteCoverImage(target.imageKey); } catch { /* 元数据已安全删除，残留图片稍后清理 */ }
   }
 }
 
@@ -334,7 +442,7 @@ function AddEntryModal({
               <div className="mt-5 grid grid-cols-1 gap-3 border-t border-[#F0EFE9] pt-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">来源平台</label>
-                  <Select value={sourcePlatform} onChange={setSourcePlatform} options={["抖音", "小红书", "B站", "视频号", "线下课程", "书籍", "其他"]} />
+                  <Select value={sourcePlatform} onChange={setSourcePlatform} options={["抖音", "小红书", "B站", "视频号", "线下课程", "书籍", "其他"].map(v => ({ value: v, label: v }))} />
                 </div>
                 <div>
                   <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">来源链接（可选）</label>
@@ -585,7 +693,7 @@ function AddViralCaseModal({
               </div>
 
               <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Select value={state.sourcePlatform} onChange={(v) => patch({ sourcePlatform: v })} options={["抖音", "小红书", "B站", "视频号", "其他"]} />
+                <Select value={state.sourcePlatform} onChange={(v) => patch({ sourcePlatform: v })} options={["抖音","小红书","B站","视频号","其他"].map(v=>({value:v,label:v}))} />
                 <input value={state.sourceUrl} onChange={e => patch({ sourceUrl: e.target.value })} placeholder="来源链接（可选）" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
               </div>
 
@@ -714,7 +822,7 @@ function AddVoiceSampleModal({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <input value={title} onChange={e => setTitle(e.target.value)} placeholder="样本标题" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[12.5px]" />
-            <Select value={type} onChange={(v) => setType(v as VoiceSample["type"])} options={["口播逐字稿", "文案", "视频字幕", "其他"]} />
+            <Select value={type} onChange={(v) => setType(v as VoiceSample["type"])} options={["口播逐字稿","文案","视频字幕","其他"].map(v=>({value:v,label:v}))} />
           </div>
           <textarea value={rawText} onChange={e => setRawText(e.target.value)} placeholder="粘贴逐字稿原文…" rows={8} className="w-full resize-y rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px] leading-5" />
         </div>
@@ -853,30 +961,235 @@ function AddHookModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   );
 }
 
+function getCoverTitleClass(charCount: number) {
+  if (charCount <= 0) {
+    return { charCount, coverType: "待填写字数", textStyle: "", layout: "", tags: [] as string[], referenceReason: "" };
+  }
+  if (charCount <= 6) {
+    return {
+      charCount,
+      coverType: "短标题封面",
+      textStyle: `${charCount}字标题`,
+      layout: "中心大标题",
+      tags: ["字少", "强识别", "适合大字"],
+      referenceReason: "适合作为少字大标题封面参考，重点学习标题怎么一眼说清主题。",
+    };
+  }
+  if (charCount <= 12) {
+    return {
+      charCount,
+      coverType: "标准标题封面",
+      textStyle: `${charCount}字标题`,
+      layout: "主标题突出",
+      tags: ["标准字数", "信息清晰", "适合口播"],
+      referenceReason: "适合作为常规知识类封面参考，标题信息完整，后续可按这个标题方向生成封面。",
+    };
+  }
+  return {
+    charCount,
+    coverType: "长标题封面",
+    textStyle: `${charCount}字标题`,
+    layout: "标题分行",
+    tags: ["字多", "信息型", "需要分行"],
+    referenceReason: "适合作为信息量较高的封面参考，后续生成封面时应控制分行，避免画面拥挤。",
+  };
+}
+
+function AddCoverModal({ activeIPId, onClose, onSaved }: {
+  activeIPId: string;
+  onClose: () => void;
+  onSaved: () => void | Promise<void>;
+}) {
+  const coverImageAccept = ".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp";
+  const coverImageMaxMb = 10;
+  const [form, setForm] = useState({ mainTitleCount: "", platform: "抖音", sourceUrl: "" });
+  const [imageDataUrl, setImageDataUrl] = useState("");
+  const [error, setError] = useState("");
+  const mainTitleCount = Number(form.mainTitleCount);
+  const titleClass = getCoverTitleClass(Number.isFinite(mainTitleCount) ? mainTitleCount : 0);
+
+  async function readCoverImage(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = ev => resolve(ev.target?.result as string);
+      reader.onerror = () => reject(new Error("read-failed"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function compressCoverImage(dataUrl: string) {
+    return new Promise<string>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSide = 1200;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const width = Math.max(1, Math.round(img.width * scale));
+        const height = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { resolve(dataUrl); return; }
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", 0.82));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  function handleImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError("");
+    const name = file.name.toLowerCase();
+    const supported = /\.(jpe?g|png|webp)$/i.test(name) || ["image/jpeg", "image/png", "image/webp"].includes(file.type);
+    if (!supported) {
+      setError("暂时只支持jpg、png、webp格式");
+      e.target.value = "";
+      return;
+    }
+    if (file.size > coverImageMaxMb*1024*1024) {
+      setError(`图片不能超过 ${coverImageMaxMb}MB`);
+      e.target.value = "";
+      return;
+    }
+    readCoverImage(file).then(async dataUrl => {
+      const optimizedDataUrl = await compressCoverImage(dataUrl);
+      setImageDataUrl(optimizedDataUrl);
+    }).catch(() => {
+      setError("图片读取失败，请换一张jpg、png或webp图片");
+    });
+  }
+  async function handleSave() {
+    if (!imageDataUrl) { setError("请上传封面图片"); return; }
+    const saveTitleCount = Number(String(form.mainTitleCount).replace(/[^\d]/g, ""));
+    if (!Number.isFinite(saveTitleCount) || saveTitleCount <= 0) { setError("请填写大标题字数"); return; }
+    const nextClass = getCoverTitleClass(saveTitleCount);
+    try {
+      await addCoverRefWithImage(activeIPId, {
+        title: `${saveTitleCount}字大标题封面`,
+        imageDataUrl,
+        platform: form.platform,
+        contentType: "封面标题参考",
+        coverType: nextClass.coverType,
+        visualTags: nextClass.tags,
+        textStyle: nextClass.textStyle,
+        layout: nextClass.layout,
+        colorStyle: "",
+        referenceReason: nextClass.referenceReason,
+        avoidReason: "",
+        sourceUrl: form.sourceUrl,
+      });
+      await onSaved();
+    } catch {
+      setError("保存失败，请刷新页面后再试。如果还失败，把旧的大图封面删除几张。");
+    }
+  }
+  const set = (k: string, v: string) => {
+    if (error) setError("");
+    setForm(prev => ({ ...prev, [k]: v }));
+  };
+  const handleTitleCountChange = (value: string) => {
+    const nextValue = value.replace(/[^\d]/g, "");
+    set("mainTitleCount", nextValue);
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="flex max-h-[90vh] w-full max-w-[520px] flex-col overflow-hidden rounded-[18px] bg-white shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-[#F0EFE9] px-6 py-4">
+          <span className="text-[15px] font-bold text-[#1C1C1B]">添加封面参考</span>
+          <button onClick={onClose} className="text-[12px] text-[#999]">取消</button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-5 flex flex-col gap-4">
+          <div>
+	            <label className="mb-1.5 block text-[11.5px] font-semibold text-[#666]">封面图片 *</label>
+	            {imageDataUrl ? (
+	              <div className="relative">
+	                <img src={imageDataUrl} alt="预览" className="w-full max-h-[180px] object-contain rounded-[10px] bg-[#F7F6F2]" />
+	                <button
+                  onClick={() => setImageDataUrl("")}
+	                  className="absolute top-2 right-2 rounded-full bg-white px-2 py-0.5 text-[11px] text-[#A32D2D] shadow"
+	                >
+	                  移除
+	                </button>
+	              </div>
+	            ) : (
+              <label className="flex cursor-pointer flex-col items-center gap-2 rounded-[10px] border-2 border-dashed border-[#E5E4DE] py-8 hover:border-[#639922]">
+                <span className="text-[24px]">🖼</span>
+                <span className="text-[12.5px] text-[#888]">点击上传封面图片（jpg/png/webp，≤{coverImageMaxMb}MB）</span>
+                <input type="file" accept={coverImageAccept} onChange={handleImage} className="hidden" />
+              </label>
+	            )}
+	          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-[11.5px] font-semibold text-[#666]">平台</label><select value={form.platform} onChange={e => set("platform", e.target.value)} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]">{["抖音","小红书","视频号","B站"].map(p => <option key={p}>{p}</option>)}</select></div>
+            <div>
+	              <label className="mb-1 block text-[11.5px] font-semibold text-[#666]">大标题字数 *</label>
+	              <input
+                value={form.mainTitleCount}
+                onChange={e => handleTitleCountChange(e.target.value)}
+                inputMode="numeric"
+                placeholder="例如 4"
+                className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px] outline-none focus:border-[#639922]"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-[11.5px] font-semibold text-[#666]">自动分类</label>
+            <div className="rounded-[10px] border border-[#E5E4DE] bg-[#F7F6F2] px-3 py-2 text-[13px] text-[#555]">
+              {titleClass.charCount > 0 ? `${titleClass.coverType} · ${titleClass.charCount}字` : "填写大标题字数后自动判断"}
+            </div>
+          </div>
+          {titleClass.charCount > 0 && (
+            <div className="rounded-[10px] bg-[#F7FCF0] px-3 py-2.5 text-[12.5px] leading-5 text-[#3B6D11]">
+              {titleClass.referenceReason}
+            </div>
+          )}
+          <div><label className="mb-1 block text-[11.5px] font-semibold text-[#666]">来源链接（可选）</label><input value={form.sourceUrl} onChange={e => set("sourceUrl", e.target.value)} placeholder="https://…" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px] outline-none focus:border-[#639922]" /></div>
+          {error && <div className="rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</div>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-[#F0EFE9] px-6 py-4">
+          <button onClick={onClose} className="rounded-[10px] bg-[#F2F1ED] px-5 py-2 text-[13px] font-semibold text-[#666]">取消</button>
+          <button onClick={handleSave} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2 text-[13px] font-bold text-white">保存封面参考</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function KnowledgeHubPage() {
   const { ips, loading: ipLoading, activeIP } = useIP();
   // 视图模式：legacy=旧Tab视图（完整保留），unified=新统一视图（筛选器）
   const [viewMode, setViewMode] = useState<"legacy" | "unified">("legacy");
   const [scopeFilter, setScopeFilter] = useState<KnowledgeHubSection>("global");
-  const [unsupportedScope, setUnsupportedScope] = useState<string | null>(null);
   const [globalCatFilter, setGlobalCatFilter] = useState<GlobalCategoryId>("定位方法库");
   const [ipCatFilter, setIpCatFilter] = useState<IPCategoryId>("IP人设资料");
+  const [coverRefs, setCoverRefs] = useState<CoverRef[]>([]);
+  const [coverSearch, setCoverSearch] = useState("");
+  const [coverPlatformFilter, setCoverPlatformFilter] = useState("全部");
+  const [coverLoadError, setCoverLoadError] = useState<string | null>(null);
+  const coverRequestIdRef = useRef(0);
+  const activeCoverIPIdRef = useRef<string | null>(activeIP?.id ?? null);
+  activeCoverIPIdRef.current = activeIP?.id ?? null;
+  const [showAddCover, setShowAddCover] = useState(false);
+  const [coverDetail, setCoverDetail] = useState<CoverRef | null>(null);
   const [detailExpanded, setDetailExpanded] = useState(false);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [voiceSamples, setVoiceSamples] = useState<VoiceSample[]>([]);
   const [hookEntries, setHookEntries] = useState<HookEntry[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showXlsx, setShowXlsx] = useState(false);
-  const [xlsxImportResult, setXlsxImportResult] = useState<{ count: number; skipped: number } | null>(null);
+  const [xlsxImportResult, setXlsxImportResult] = useState<{ count: number; skipped: number; catDist?: Record<string, number> } | null>(null);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState<KnowledgeEntry | null>(null);
 
   useEffect(() => {
     const scope = new URLSearchParams(window.location.search).get("scope");
-    if (["global", "ip", "viral", "hook", "voice"].includes(scope ?? "")) {
+    if (["global", "ip", "viral", "hook", "voice", "material"].includes(scope ?? "")) {
       setScopeFilter(scope as KnowledgeHubSection);
-    } else if (scope) {
-      setUnsupportedScope(scope);
     }
   }, []);
 
@@ -943,27 +1256,143 @@ export default function KnowledgeHubPage() {
   function handleXlsxImport(data: ImportedData) {
     if (data.mode !== "knowledge" || !data.knowledgeRows) return;
     let count = 0; let skipped = 0;
+    const catDist: Record<string, number> = {};
+    const targetIPId = importScope === "ip" ? (activeIP?.id?.trim() ?? "") : null;
+    const allowedCategories = getKnowledgeHubCorrectionCategories(targetIPId);
+    if (allowedCategories.length === 0) {
+      setXlsxImportResult({ count: 0, skipped: data.knowledgeRows.length, catDist });
+      setShowXlsx(false);
+      return;
+    }
+    // 旧分类到新分类的映射表（用于兼容）
+    const LEGACY_MAP: Record<string, string> = {
+      "案例": "选题方法库", "方法论": "文案框架方法库", "钩子": "开头方法库",
+      "评论洞察": "选题方法库", "IP语料": "IP表达语料", "Hook": "开头方法库",
+    };
+    // 标题关键词规则
+    const TITLE_RULES: [string[], string][] = [
+      [["定位拆解","账号定位","人设定位","受众定位","差异化定位"], "定位方法库"],
+      [["选题拆解","选题","爆款选题","内容角度"], "选题方法库"],
+      [["标题拆解","标题公式","爆款标题"], "标题方法库"],
+      [["开头拆解","开头","3秒钩子","钩子","开场","hook"], "开头方法库"],
+      [["文案框架","脚本框架","口播框架","故事框架","起承转合"], "文案框架方法库"],
+    ];
+
     for (const row of data.knowledgeRows) {
       if (!row.title && !row.content) { skipped++; continue; }
+      const title_r = (row.title || "").toLowerCase();
+      const content_r = (row.content || "").toLowerCase();
+      const rawTagsStr = row.tags || "";
+      const tags_r = rawTagsStr.split(/[,，、；;]/).map((t: string) => t.trim()).filter(Boolean);
+
+      let autoCategory: KnowledgeCategory = "方法论";
+      let confidence: "高" | "中" | "低" = "低";
+      let reason = "";
+      let matchedRules: string[] = [];
+      let originalCategory = "";
+      let needsReview = true;
+
+      // 1. 直接命中新分类（最高优先级）
+      const directMatch = ALL_NEW_CATS.find(cat => rawTagsStr.includes(cat));
+      if (directMatch) {
+        autoCategory = directMatch as KnowledgeCategory;
+        confidence = "高";
+        reason = `标签字段直接包含新分类名「${directMatch}」`;
+        matchedRules = [directMatch];
+        needsReview = false;
+      } else {
+        // 2. 标题关键词匹配
+        let titleHit = false;
+        for (const [keywords, cat] of TITLE_RULES) {
+          const hit = keywords.filter(k => title_r.includes(k));
+          if (hit.length > 0) {
+            autoCategory = cat as KnowledgeCategory;
+            confidence = "高";
+            reason = `标题命中关键词：${hit.join("、")}`;
+            matchedRules = hit;
+            needsReview = false;
+            titleHit = true;
+            break;
+          }
+        }
+        if (!titleHit) {
+          // 3. 内容关键词匹配
+          let contentHit = false;
+          for (const [keywords, cat] of TITLE_RULES) {
+            const hit = keywords.filter(k => content_r.includes(k));
+            if (hit.length >= 2) {
+              autoCategory = cat as KnowledgeCategory;
+              confidence = "中";
+              reason = `正文多次出现关键词：${hit.join("、")}`;
+              matchedRules = hit;
+              needsReview = false;
+              contentHit = true;
+              break;
+            }
+          }
+          if (!contentHit) {
+            // 4. 旧分类兼容映射（最低优先级）
+            const legacyCat = tags_r.find(t => LEGACY_MAP[t]);
+            if (legacyCat) {
+              originalCategory = legacyCat;
+              autoCategory = LEGACY_MAP[legacyCat] as KnowledgeCategory;
+              confidence = "低";
+              reason = `旧分类「${legacyCat}」映射为「${LEGACY_MAP[legacyCat]}」，建议人工确认`;
+              matchedRules = [legacyCat];
+              needsReview = true;
+            } else {
+              // 5. 完全无法识别 → 待确认
+              autoCategory = "方法论"; // 存储用旧分类兜底
+              confidence = "低";
+              reason = "无法识别分类，建议人工确认";
+              needsReview = true;
+            }
+          }
+        }
+      }
+
+      if (!isKnowledgeHubCorrectionAllowed(targetIPId, autoCategory)) {
+        const rejectedCategory = autoCategory;
+        autoCategory = allowedCategories[0] as KnowledgeCategory;
+        confidence = "低";
+        reason = `识别结果「${rejectedCategory}」不属于当前知识范围，已改为「${autoCategory}」并等待人工确认`;
+        matchedRules = [];
+        needsReview = true;
+      }
+
+      // 构建分类证据链存入note
+      const categoryEvidence = JSON.stringify({
+        originalCategory: originalCategory || autoCategory,
+        normalizedCategory: autoCategory,
+        confidence,
+        reason,
+        matchedRules,
+        needsReview,
+      });
+
       addKnowledgeEntry({
-        category: (scopeFilter === "global" ? globalCatFilter : ipCatFilter) as KnowledgeCategory,
+        category: autoCategory,
         title: row.title || row.content.slice(0, 30),
         rawContent: row.content || row.title,
-        tags: row.tags ? row.tags.split(/[,，、]/).map(t => t.trim()).filter(Boolean) : [],
-        keywords: [],
-        ipId: importScope === "ip" ? (activeIP?.id ?? null) : null,
-        sourceTier: "低",
-        sourceTierReason: "从Excel批量导入，字段自动识别，分类待人工确认",
+        tags: tags_r,
+        keywords: matchedRules,
+        ipId: targetIPId,
+        sourceTier: confidence === "高" ? "高" : confidence === "中" ? "中" : "低",
+        sourceTierReason: reason,
         contentDirection: [],
         sourcePlatform: "Excel导入",
         sourceUrl: "",
-        note: "",
+        note: categoryEvidence,
         extractedAt: new Date().toISOString(),
         metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
       });
+
+      // 导入报告用归一化分类统计
+      const displayCat = getNormalizedCategory({ category: autoCategory, tags: tags_r, ipId: targetIPId, title: row.title || "" });
+      catDist[displayCat] = (catDist[displayCat] ?? 0) + 1;
       count++;
     }
-    setXlsxImportResult({ count, skipped });
+    setXlsxImportResult({ count, skipped, catDist });
     setShowXlsx(false);
     refresh();
   }
@@ -979,6 +1408,34 @@ export default function KnowledgeHubPage() {
     setHookEntries(getHookEntries());
   }
   useEffect(refresh, []);
+  async function refreshCovers() {
+    const requestId = ++coverRequestIdRef.current;
+    const requestedIPId = activeIP?.id ?? null;
+    try {
+      const refs = await loadCoverRefs(requestedIPId);
+      if (
+        requestId !== coverRequestIdRef.current
+        || requestedIPId !== activeCoverIPIdRef.current
+      ) return;
+      setCoverRefs(refs);
+      setCoverLoadError(null);
+    } catch (error) {
+      if (
+        requestId !== coverRequestIdRef.current
+        || requestedIPId !== activeCoverIPIdRef.current
+      ) return;
+      setCoverRefs([]);
+      setCoverLoadError(error instanceof Error ? error.message : "封面参考读取失败");
+    }
+  }
+  useEffect(() => {
+    setCoverDetail(null);
+    setShowAddCover(false);
+    void refreshCovers();
+    return () => { coverRequestIdRef.current += 1; };
+    // 当前IP改变时必须重新按归属读取封面。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIP?.id]);
 
   async function handleBatchAnalyze() {
     const pending = getUnanalyzedHookEntries();
@@ -1067,21 +1524,11 @@ export default function KnowledgeHubPage() {
     : `/knowledge-intake?scope=global&category=${encodeURIComponent(globalCatFilter)}`;
 
   function openSectionAddFlow() {
-    if (addAction !== "smart-intake") setShowAdd(true);
-  }
-
-  if (unsupportedScope) {
-    return (
-      <div className="min-h-screen p-6 md:p-8">
-        <div
-          role="alert"
-          aria-label="该视图暂不支持"
-          className="rounded-[14px] border border-[#FBF3D6] bg-[#FFFBF0] p-5 text-[13px] text-[#7A5C00]"
-        >
-          该视图暂不支持，请返回工作台选择其他入口。
-        </div>
-      </div>
-    );
+    if (addAction === "cover-form") {
+      if (!activeIP || coverLoadError) return;
+      setShowAddCover(true);
+    }
+    else if (addAction !== "smart-intake") setShowAdd(true);
   }
 
   return (
@@ -1249,6 +1696,11 @@ export default function KnowledgeHubPage() {
             style={scopeFilter === "ip" ? { background: "#1C1C1B", color: "#fff" } : { background: "transparent", color: "#888" }}>
             当前IP知识库
           </button>
+          <button onClick={() => setScopeFilter("material")}
+            className="flex-1 rounded-[8px] py-2 text-[13px] font-semibold transition-all"
+            style={scopeFilter === "material" ? { background: "#1C1C1B", color: "#fff" } : { background: "transparent", color: "#888" }}>
+            封面参考库
+          </button>
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="text-[11.5px] text-[#999]">历史专项库：</span>
@@ -1270,7 +1722,8 @@ export default function KnowledgeHubPage() {
           : scopeFilter === "ip" ? "沉淀当前账号的人设、语气、历史表达和受众反馈，用于让 AI 生成内容更符合当前 IP。"
           : scopeFilter === "viral" ? "保留真实爆款案例、表现数据、钩子评分和结构拆解。"
           : scopeFilter === "hook" ? "保留可复用的前3秒Hook素材及其分析结果。"
-          : "保留按IP绑定的历史口播样本和表达素材。"}
+          : scopeFilter === "voice" ? "保留按IP绑定的历史口播样本和表达素材。"
+          : "沉淀短视频封面参考，包括封面标题、构图、视觉风格和可借鉴案例。"}
         </p>
         <div className="flex flex-wrap gap-2">
           {scopeFilter === "global" && GLOBAL_CATEGORIES.map(c => {
@@ -1289,6 +1742,12 @@ export default function KnowledgeHubPage() {
               {c.id} <span className="ml-1 text-[10.5px] opacity-60">{cnt}</span>
             </button>);
           })}
+          {scopeFilter === "material" && (
+            <span className="rounded-full border px-3.5 py-1.5 text-[12px] font-semibold"
+              style={{ background: "#FFF7ED", color: "#C2410C", borderColor: "#FED7AA" }}>
+              封面参考库 <span className="ml-1 text-[10.5px] opacity-60">{coverRefs.length}</span>
+            </span>
+          )}
         </div>
         {scopeFilter === "global" && (() => { const cat = GLOBAL_CATEGORIES.find(c => c.id === globalCatFilter); return cat ? (<div className="mt-3 flex items-start gap-2 rounded-[10px] bg-[#F7FCF0] px-3 py-2.5"><span className="mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#639922]" /><div><span className="text-[12px] font-bold text-[#3B6D11]">{cat.id}</span><p className="mt-0.5 text-[11.5px] leading-4 text-[#555]">{cat.desc}</p></div></div>) : null; })()}
         {scopeFilter === "ip" && (() => { const cat = IP_CATEGORIES.find(c => c.id === ipCatFilter); return cat ? (<div className="mt-3 flex items-start gap-2 rounded-[10px] bg-[#EFF6FF] px-3 py-2.5"><span className="mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#1D4ED8]" /><div><span className="text-[12px] font-bold text-[#1D4ED8]">{cat.id}</span><p className="mt-0.5 text-[11.5px] leading-4 text-[#555]">{cat.desc}</p></div></div>) : null; })()}
@@ -1323,10 +1782,10 @@ export default function KnowledgeHubPage() {
           ) : (
             <button
               onClick={openSectionAddFlow}
-              disabled={ipLoading}
+              disabled={ipLoading || (addAction === "cover-form" && (!activeIP || Boolean(coverLoadError)))}
               className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#1C1C1B] px-4 text-[12.5px] font-semibold text-white disabled:opacity-50"
             >
-              <Icon name="plus" size="sm" /> {addAction === "voice-form" ? "添加口播样本" : addAction === "hook-form" ? "添加钩子" : "添加爆款案例"}
+              <Icon name="plus" size="sm" /> {addAction === "cover-form" ? "添加封面参考" : addAction === "voice-form" ? "添加口播样本" : addAction === "hook-form" ? "添加钩子" : "添加爆款案例"}
             </button>
           )}
           {(scopeFilter === "global" || scopeFilter === "ip") && (
@@ -1339,8 +1798,15 @@ export default function KnowledgeHubPage() {
       </div>
       {analyzeError && <div className="mb-4 rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{analyzeError}</div>}
       {xlsxImportResult && (
-        <div className="mb-4 rounded-[10px] bg-[#EAF3DE] px-3 py-2 text-[12.5px] text-[#3B6D11]">
-          ✓ 成功导入 {xlsxImportResult.count} 条{xlsxImportResult.skipped > 0 ? `，跳过 ${xlsxImportResult.skipped} 条空行` : ""}
+        <div className="mb-4 rounded-[12px] bg-[#EAF3DE] px-4 py-3">
+          <div className="mb-1 text-[12.5px] font-bold text-[#3B6D11]">✓ 成功导入 {xlsxImportResult.count} 条{xlsxImportResult.skipped > 0 ? `，跳过 ${xlsxImportResult.skipped} 条空行` : ""}</div>
+          {xlsxImportResult.catDist && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {Object.entries(xlsxImportResult.catDist).map(([cat, cnt]) => (
+                <span key={cat} className="text-[11.5px] text-[#3B6D11]">{cat}：{cnt as number} 条</span>
+              ))}
+            </div>
+          )}
         </div>
       )}
         {showXlsx && (
@@ -1364,7 +1830,92 @@ export default function KnowledgeHubPage() {
         </div>
       )}
 
-      {scopeFilter === "voice" ? (
+      {/* 封面参考库 */}
+      {scopeFilter === "material" ? (
+        <>
+          {coverLoadError && (
+            <div
+              role="alert"
+              aria-label="封面参考库加载失败"
+              className="mb-4 rounded-[12px] border border-[#F2B8B5] bg-[#FCEBEB] px-4 py-3 text-[12.5px] text-[#A32D2D]"
+            >
+              封面参考库读取失败，已停止新增和删除，原数据不会被覆盖。{coverLoadError}
+            </div>
+          )}
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <input value={coverSearch} onChange={e => setCoverSearch(e.target.value)}
+              placeholder="搜索标题、标签…"
+              className="h-[36px] w-full max-w-[240px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[12.5px] outline-none focus:border-[#639922]" />
+            {["全部","抖音","小红书","视频号","B站"].map(p => (
+              <button key={p} onClick={() => setCoverPlatformFilter(p)}
+                className="rounded-full px-3 py-1 text-[11.5px] font-semibold transition-all"
+                style={coverPlatformFilter === p ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {(() => {
+              const filtered = coverRefs.filter(c => {
+                if (coverPlatformFilter !== "全部" && c.platform !== coverPlatformFilter) return false;
+                if (coverSearch.trim()) { const q = coverSearch.toLowerCase(); return c.title.toLowerCase().includes(q) || c.visualTags.some(t => t.includes(q)); }
+                return true;
+              });
+              if (!coverLoadError && filtered.length === 0) return (
+                <div className="col-span-full flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-[#E5E4DE] py-12 text-center">
+                  <p className="text-[13px] font-semibold text-[#555]">封面参考库暂无内容</p>
+                  <p className="text-[12.5px] text-[#999]">点击右上角「添加封面参考」上传第一张封面。</p>
+                  <button
+                    onClick={() => setShowAddCover(true)}
+                    disabled={!activeIP}
+                    className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white disabled:opacity-50"
+                  >
+                    + 添加封面参考
+                  </button>
+                </div>
+              );
+              return filtered.map(c => (
+                <div key={c.id} className="flex cursor-pointer flex-col overflow-hidden rounded-[14px] border border-[#E5E4DE] bg-white hover:border-[#639922] transition-all" onClick={() => setCoverDetail(c)}>
+                  {c.imageDataUrl && (
+                    <div className="flex aspect-[3/4] w-full items-center justify-center overflow-hidden bg-[#F7F6F2]">
+                      <img src={c.imageDataUrl} alt={c.title} className="h-full w-full object-contain" />
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-1.5 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-[13px] font-semibold text-[#1C1C1B] line-clamp-1">{c.title}</span>
+                      {c.scope === "ip" && c.ipId === activeIP?.id && (
+                        <button
+                          aria-label={`删除封面「${c.title}」`}
+                          onClick={async e => {
+                            e.stopPropagation();
+                            if (!activeIP || !confirm("确认删除？")) return;
+                            try {
+                              await deleteCoverRefWithImage(c.id, activeIP.id);
+                              await refreshCovers();
+                            } catch (error) {
+                              setCoverLoadError(error instanceof Error ? error.message : "封面删除失败");
+                            }
+                          }}
+                          className="flex-shrink-0 text-[#CCC] hover:text-[#A32D2D]"
+                        >
+                          <Icon name="trash" size="sm" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[10.5px] text-[#666]">{c.platform}</span>
+                      {c.coverType && <span className="rounded-full bg-[#FFF7ED] px-2 py-0.5 text-[10.5px] text-[#C2410C]">{c.coverType}</span>}
+                    </div>
+                    {c.visualTags.length > 0 && <div className="flex flex-wrap gap-1">{c.visualTags.slice(0,3).map(t => <span key={t} className="rounded-full bg-[#F2F1ED] px-1.5 py-0.5 text-[10px] text-[#888]">#{t}</span>)}</div>}
+                    {c.referenceReason && <p className="text-[11px] text-[#BBB] line-clamp-1">{c.referenceReason}</p>}
+                  </div>
+                </div>
+              ));
+            })()}
+          </div>
+        </>
+      ) : scopeFilter === "voice" ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
           {filteredSamples.length === 0 && (
             <div className="col-span-full rounded-[14px] border border-dashed border-[#E5E4DE] py-12 text-center text-[13px] text-[#999]">还没有口播样本，点击右上角添加。</div>
@@ -1507,6 +2058,42 @@ export default function KnowledgeHubPage() {
       {showAdd && scopeFilter === "viral" && (
         <AddViralCaseModal ips={ips} onClose={() => setShowAdd(false)} onSaved={refresh} />
       )}
+      {showAddCover && activeIP && !coverLoadError && (
+        <AddCoverModal
+          activeIPId={activeIP.id}
+          onClose={() => setShowAddCover(false)}
+          onSaved={async () => { await refreshCovers(); setShowAddCover(false); }}
+        />
+      )}
+
+      {coverDetail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setCoverDetail(null)}>
+          <div className="card max-h-[90vh] w-full max-w-[680px] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <div className="mb-4 flex items-start justify-between gap-2">
+              <span className="text-[16px] font-bold text-[#1C1C1B]">{coverDetail.title}</span>
+              <button onClick={() => setCoverDetail(null)} className="text-[12px] text-[#999]">关闭</button>
+            </div>
+            {coverDetail.imageDataUrl && (
+              <div className="mb-4 flex max-h-[520px] items-center justify-center overflow-hidden rounded-[12px] bg-[#F7F6F2]">
+                <img src={coverDetail.imageDataUrl} alt={coverDetail.title} className="max-h-[520px] w-full object-contain" />
+              </div>
+            )}
+            <div className="mb-4 grid grid-cols-2 gap-3 text-[12.5px]">
+              {([["平台", coverDetail.platform],["封面类型", coverDetail.coverType],["文字风格", coverDetail.textStyle],["构图方式", coverDetail.layout],["颜色风格", coverDetail.colorStyle]] as [string,string][]).filter(([,v]) => v).map(([label, val]) => (
+                <div key={label}><span className="text-[#999]">{label}：</span><span className="text-[#333]">{val}</span></div>
+              ))}
+            </div>
+            {coverDetail.visualTags.length > 0 && <div className="mb-3 flex flex-wrap gap-1.5">{coverDetail.visualTags.map(t => <span key={t} className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[11px] text-[#555]">#{t}</span>)}</div>}
+            {coverDetail.referenceReason && <div className="mb-2 rounded-[10px] bg-[#F7FCF0] px-3 py-2.5 text-[12.5px]"><span className="font-semibold text-[#3B6D11]">参考点：</span>{coverDetail.referenceReason}</div>}
+            {coverDetail.avoidReason && <div className="mb-2 rounded-[10px] bg-[#FEF3C7] px-3 py-2.5 text-[12.5px]"><span className="font-semibold text-[#92400E]">不建议模仿：</span>{coverDetail.avoidReason}</div>}
+            <div className="mt-3 flex items-center justify-between text-[11px] text-[#BBB]">
+              <span>录入时间：{new Date(coverDetail.createdAt).toLocaleDateString()}</span>
+              {coverDetail.sourceUrl && <a href={coverDetail.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-[#639922] underline">来源链接</a>}
+            </div>
+          </div>
+        </div>
+      )}
+
       {detail && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-5" onClick={() => setDetail(null)}>
           <div className="card max-h-[85vh] w-full max-w-[640px] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
@@ -1577,6 +2164,7 @@ export default function KnowledgeHubPage() {
                           {getKnowledgeHubCorrectionCategories(detail.ipId).map(cat => (
                             <button key={cat}
                               onClick={() => {
+                                if (!isKnowledgeHubCorrectionAllowed(detail.ipId, cat)) return;
                                 const newNote = JSON.stringify({ ...ev, normalizedCategory: cat, confidence: "高", needsReview: false, reason: `人工确认分类为「${cat}」` });
                                 updateKnowledgeEntry(detail.id, { category: cat as KnowledgeCategory, note: newNote, sourceTier: "高", sourceTierReason: `人工确认分类为「${cat}」` });
                                 setDetail(prev => prev ? { ...prev, category: cat as KnowledgeCategory, note: newNote } : null);
