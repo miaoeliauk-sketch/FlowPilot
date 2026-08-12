@@ -5,6 +5,7 @@ import {
   type ClipCandidate,
   type ClipRating,
 } from "@/lib/live-clips-types";
+import { formatLiveClipPosition } from "@/lib/live-clips-display";
 
 function ratingStyle(rating: ClipRating) {
   if (rating === "强") return "bg-[#EAF3DE] text-[#3B6D11]";
@@ -24,12 +25,6 @@ function formatDuration(candidate: ClipCandidate) {
   const remainder = seconds % 60;
   const value = minutes > 0 ? `${minutes}分${remainder > 0 ? `${remainder}秒` : ""}` : `${remainder}秒`;
   return candidate.durationBasis === "actual" ? `约${value}` : `文字量估算约${value}`;
-}
-
-function positionLabel(candidate: ClipCandidate) {
-  if (candidate.startTime && candidate.endTime) return `${candidate.startTime} → ${candidate.endTime}`;
-  if (candidate.startTime) return `${candidate.startTime}起 · 第${candidate.startParagraph}段 → 第${candidate.endParagraph}段`;
-  return `第${candidate.startParagraph}段 → 第${candidate.endParagraph}段`;
 }
 
 const DIMENSION_LABELS: Array<[keyof ClipCandidate["dimensions"], string]> = [
@@ -57,7 +52,7 @@ export function formatClipCardForCopy(candidate: ClipCandidate) {
     `【内容目的】\n${purpose}`,
     `【目的证据】\n${purposeEvidence}${secondaryPurposeEvidence}`,
     `【推荐程度】\n${candidate.recommendation}`,
-    `【原始位置】\n${positionLabel(candidate)}`,
+    `【原始位置】\n${formatLiveClipPosition(candidate)}`,
     `【预计成片长度】\n${formatDuration(candidate)}`,
     `【核心观点】\n${candidate.corePoint}`,
     `【建议从这里开始】\n${candidate.startQuote}`,
@@ -104,7 +99,7 @@ export default function ClipCandidateCard({
           </div>
           <h2 className="mt-3 text-[18px] font-bold leading-7 text-[#1C1C1B]">{candidate.topic}</h2>
           <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-[12px] text-[#888]">
-            <span>原始位置：<b className="text-[#555]">{positionLabel(candidate)}</b></span>
+            <span>原始位置：<b className="text-[#555]">{formatLiveClipPosition(candidate)}</b></span>
             <span>预计长度：<b className="text-[#555]">{formatDuration(candidate)}</b></span>
           </div>
           {!candidate.startTime && (

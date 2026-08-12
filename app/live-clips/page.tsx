@@ -25,7 +25,6 @@ import {
   type ClipRecommendation,
   type ClipType,
   type LiveClipApiError,
-  type ClipPlan,
   type LiveClipFailureCause,
   type LiveClipFailureReason,
   type LiveClipWorkspaceState,
@@ -38,6 +37,7 @@ import {
   type TranscriptSourceType,
 } from "@/lib/live-clips-types";
 import ClipCandidateCard from "@/components/live-clips/ClipCandidateCard";
+import { formatLiveClipPosition } from "@/lib/live-clips-display";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Step = 1 | 2 | 3;
@@ -477,12 +477,6 @@ export default function LiveClipsPage() {
     }
   }
 
-  function planPositionLabel(plan: ClipPlan) {
-    if (plan.startTime && plan.endTime) return `${plan.startTime} → ${plan.endTime}`;
-    if (plan.startTime) return `${plan.startTime}起 · 第${plan.startParagraph}段 → 第${plan.endParagraph}段`;
-    return `第${plan.startParagraph}段 → 第${plan.endParagraph}段`;
-  }
-
   const visibleCandidates = useMemo(() => currentCandidates.filter(candidate => (
     (recommendationFilter === "全部" || candidate.recommendation === recommendationFilter)
     && (typeFilter === "全部" || candidate.clipType === typeFilter || candidate.secondaryTags.includes(typeFilter))
@@ -657,7 +651,7 @@ export default function LiveClipsPage() {
                   <div key={plan.id} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
                     <div>
                       <div className="text-[13px] font-semibold text-[#333]">{plan.topic}</div>
-                      <div className="mt-1 text-[11.5px] text-[#888]">{planPositionLabel(plan)}</div>
+                      <div className="mt-1 text-[11.5px] text-[#888]">{formatLiveClipPosition(plan)}</div>
                     </div>
                     <div className="flex items-center gap-2">
                       <button type="button" aria-label="复制方案原始稿" onClick={() => void copyText(plan.rawClipText, "方案原始稿")} className="rounded-[9px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">复制原始稿</button>
