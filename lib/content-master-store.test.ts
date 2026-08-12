@@ -241,3 +241,67 @@ test("拆分片段时保留旧编号和原文并为两个新片段继续递增�
   assert.equal(getContentMaster(draft.id, storage)?.fullText,
     "## 信任是购买前提\n\n客户愿意购买，首先取决于信任是否建立。\n\n## 信任来自持续兑现\n\n稳定兑现承诺，才能逐步形成信任。");
 });
+
+test("保存和拆分母稿时按段落保留真实来源而不复制全部来源", async () => {
+  const storage = new MemoryStorage();
+  const draft = await createContentMaster({
+    title: "段落来源母稿",
+    sections: [{
+      heading: "现象与原因",
+      paragraphs: [
+        { text: "素材1描述现象。", sourceIds: ["source-1"] },
+        { text: "素材2解释原因。", sourceIds: ["source-2"] },
+      ],
+      sourceIds: ["source-1", "source-2"],
+    }],
+    sources: SOURCE_REFS,
+  }, storage, new Date(2026, 7, 8, 9, 0, 0));
+  const original = draft.segments[0];
+  const splitAt = original.content.indexOf("素材2");
+
+  const [first, second] = await splitContentMasterSegment(
+    draft.id,
+    original.id,
+    splitAt,
+    ["现象", "原因"],
+    storage,
+  );
+
+  assert.deepEqual(original.paragraphSourceIds, [["source-1"], ["source-2"]]);
+  assert.deepEqual(first.sourceIds, ["source-1"]);
+  assert.deepEqual(first.paragraphSourceIds, [["source-1"]]);
+  assert.deepEqual(second.sourceIds, ["source-2"]);
+  assert.deepEqual(second.paragraphSourceIds, [["source-2"]]);
+});
+
+test("段落正文含额外空行时保存和拆分仍保持来源对应", async () => {
+  const storage = new MemoryStorage();
+  const draft = await createContentMaster({
+    title: "空行来源母稿",
+    sections: [{
+      heading: "现象与原因",
+      paragraphs: [
+        { text: "现象第一层。\n\n现象第二层。", sourceIds: ["source-1"] },
+        { text: "原因说明。", sourceIds: ["source-2"] },
+      ],
+      sourceIds: ["source-1", "source-2"],
+    }],
+    sources: SOURCE_REFS,
+  }, storage, new Date(2026, 7, 8, 9, 0, 0));
+  const original = draft.segments[0];
+
+  assert.deepEqual(original.paragraphSourceIds, [["source-1"], ["source-1"], ["source-2"]]);
+  const splitAt = original.content.indexOf("原因说明");
+  const [first, second] = await splitContentMasterSegment(
+    draft.id,
+    original.id,
+    splitAt,
+    ["现象", "原因"],
+    storage,
+  );
+
+  assert.deepEqual(first.paragraphSourceIds, [["source-1"], ["source-1"]]);
+  assert.deepEqual(first.sourceIds, ["source-1"]);
+  assert.deepEqual(second.paragraphSourceIds, [["source-2"]]);
+  assert.deepEqual(second.sourceIds, ["source-2"]);
+});

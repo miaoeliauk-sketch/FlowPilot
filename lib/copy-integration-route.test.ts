@@ -3,703 +3,1304 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/copy-integration/route";
 
+const SOURCES = [
+  { id: "source-1", name: "素材1", content: "客户不买，往往是因为缺乏信任。" },
+  { id: "source-2", name: "素材2", content: "客户不买，往往是因为缺乏信任。" },
+];
+
+const EXTRACTION = {
+  facts: [
+    { id: "F01", statement: SOURCES[0].content, originalQuote: SOURCES[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+    { id: "F02", statement: SOURCES[1].content, originalQuote: SOURCES[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+  ],
+  relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "两份素材都认为信任影响成交" }],
+};
+
+const SYNTHESIS = {
+  draft: {
+    sections: [{
+      paragraphPlans: [{ factIds: ["F01", "F02"] }],
+    }],
+  },
+};
+
+const REVIEW = {
+  decisions: EXTRACTION.facts.map(fact => ({
+    factId: fact.id,
+    decision: "passed",
+    classification: "usable",
+    atomicity: "atomic",
+    reason: "原文支持",
+  })),
+  relationDecisions: EXTRACTION.relations.map(relation => ({
+    relationId: relation.id,
+    decision: "passed",
+    reason: "关系成立",
+  })),
+  suggestedRelations: [],
+};
+
 function deepSeekResponse(content: string) {
   return new Response(JSON.stringify({
-    id: "copy-integration-test",
-    choices: [{
-      finish_reason: "stop",
-      message: { content },
-    }],
-    usage: {
-      prompt_tokens: 120,
-      completion_tokens: 240,
-      total_tokens: 360,
-    },
-  }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+    id: "copy-integration-route-test",
+    choices: [{ finish_reason: "stop", message: { content } }],
+    usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
-function integrationRequest() {
+function request(sources = SOURCES, instruction?: unknown) {
   return new NextRequest("http://localhost/api/copy-integration", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-DeepSeek-Key": "test-key",
-    },
-    body: JSON.stringify({
-      sources: [
-        { id: "source-1", name: "逐字稿", content: "客户不买，往往是因为缺乏信任。" },
-        { id: "source-2", name: "笔记", content: "成交困难的根本原因，是客户还不信任你。" },
-      ],
-    }),
+    headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+    body: JSON.stringify({ sources, ...(instruction === undefined ? {} : { instruction }) }),
   });
 }
 
-/**
- * 新构造的代表性测试用例，非原始试用素材。
- * 同时覆盖观点冲突、依据不足但保留，以及无依据的具体时间预测未采用。
- */
-const REPRESENTATIVE_SOURCES = [
-  {
-    id: "source-1",
-    name: "素材1",
-    content: "灵魂总量始终恒定，人口增长只是灵魂重新分配。动物经过修行可能转世为人，这种说法缺乏可核实的权威来源。有人断言2026年10月所有神灵都会归位。",
-  },
-  {
-    id: "source-2",
-    name: "素材2",
-    content: "人口增长说明灵魂总量会变化，新增灵魂可能来自动物转世。动物转世的具体机制目前没有可靠来源支持，但这个观点仍有整理价值。另有说法称2026年10月会完成神灵归位。",
-  },
-] satisfies Array<{ id: string; name: string; content: string }>;
-
-function representativeRequest() {
-  return new NextRequest("http://localhost/api/copy-integration", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-DeepSeek-Key": "test-key",
-    },
-    body: JSON.stringify({ sources: REPRESENTATIVE_SOURCES }),
-  });
-}
-
-test("代表性素材生成固定四部分，并区分依据不足与未采用内容", async () => {
-  const originalFetch = globalThis.fetch;
-  const originalError = console.error;
-  console.error = () => undefined;
-  globalThis.fetch = async () => deepSeekResponse(JSON.stringify({
-    draft: {
-      sections: [
-        {
-          heading: "人口增长与灵魂来源",
-          paragraphs: [
-            "两份素材都尝试从灵魂来源解释人口增长，但对灵魂总量是否恒定存在不同判断。",
-            "在这一分歧之外，两份素材都提到动物可能转世为人，不过该说法缺乏权威来源支撑，使用前仍需核实。",
-          ],
-          sourceIds: ["source-1", "source-2"],
-        },
-      ],
-    },
-    conflicts: [{
-      topic: "灵魂总量",
-      conflictPoint: "灵魂总量是否会随人口增长而变化",
-      alternatives: [
-        {
-          brief: "灵魂总量恒定",
-          text: "素材1认为灵魂总量始终恒定，人口增长只是重新分配。",
-          sourceIds: ["source-1"],
-        },
-        {
-          brief: "灵魂总量会变化",
-          text: "素材2认为人口增长说明灵魂总量会变化。",
-          sourceIds: ["source-2"],
-        },
-      ],
-    }],
-    contentReview: {
-      exclusions: [{
-        summary: "2026年10月神灵归位的具体时间预测",
-        reason: "属于缺乏依据的具体时间断言",
-        sourceIds: ["source-1", "source-2"],
-      }],
-      evidenceGaps: [{
-        summary: "动物可能转世为人的说法",
-        reason: "缺乏可核实的权威来源，但仍有整理价值",
-        draftExcerpt: "动物可能转世为人，不过该说法缺乏权威来源支撑，使用前仍需核实",
-        sourceIds: ["source-1", "source-2"],
-      }],
-    },
-  }));
-
-  try {
-    const response = await POST(representativeRequest());
-    const body = await response.json() as {
-      draft: { sections: Array<{ paragraphs: string[] }> };
-      decisionSummary: { items: string[] };
-      conflicts: unknown[];
-      contentReview: {
-        exclusions: Array<{ summary: string; reason: string; sourceIds: string[] }>;
-        evidenceGaps: Array<{ summary: string; reason: string; sourceIds: string[] }>;
-      };
-      integrationNotes?: unknown;
-    };
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(Object.keys(body), ["draft", "decisionSummary", "conflicts", "contentReview"]);
-    assert.deepEqual(body.decisionSummary, {
-      items: [
-        "关于灵魂总量，素材1和素材2存在冲突：灵魂总量恒定 vs 灵魂总量会变化。正式使用前需确定统一立场。",
-        "另有1处内容标记为依据不足，详见下文“未采用及依据不足内容”部分。",
-      ],
-    });
-    const draftText = body.draft.sections.flatMap((section) => section.paragraphs).join("\n");
-    assert.match(draftText, /动物可能转世为人/);
-    assert.doesNotMatch(draftText, /2026年10月|神灵.*归位/);
-    assert.deepEqual(body.contentReview.exclusions, [{
-      summary: "2026年10月神灵归位的具体时间预测",
-      reason: "属于缺乏依据的具体时间断言",
-      sourceIds: ["source-1", "source-2"],
-    }]);
-    assert.deepEqual(body.contentReview.evidenceGaps, [{
-      summary: "动物可能转世为人的说法",
-      reason: "缺乏可核实的权威来源，但仍有整理价值",
-      sourceIds: ["source-1", "source-2"],
-    }]);
-    assert.doesNotMatch(body.decisionSummary.items.join("\n"), /2026年10月|神灵.*归位/);
-    assert.equal("integrationNotes" in body, false);
-  } finally {
-    globalThis.fetch = originalFetch;
-    console.error = originalError;
-  }
-});
-
-test("依据不足条目必须提供确实保留在母稿中的对应片段", async () => {
+function installModelSequence(values: unknown[], prompts: string[] = []) {
   const originalFetch = globalThis.fetch;
   let calls = 0;
-  const userPrompts: string[] = [];
   globalThis.fetch = async (_input, init) => {
+    const payload = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    prompts.push(payload.messages.find(message => message.role === "user")?.content ?? "");
+    const value = values[Math.min(calls, values.length - 1)];
     calls += 1;
-    const requestBody = JSON.parse(String(init?.body)) as {
-      messages: Array<{ role: string; content: string }>;
-    };
-    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
-    const retainedParagraph = calls === 1
-      ? "两份素材都建议先确定当天最重要的任务。"
-      : "两份素材都建议先确定当天最重要的任务。晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实。";
-    return deepSeekResponse(JSON.stringify({
-      draft: {
-        sections: [{
-          heading: calls === 1
-            ? "晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实"
-            : "晨间安排",
-          paragraphs: [retainedParagraph],
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-      conflicts: [],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [{
-          summary: "晨间独处可能增强直觉",
-          reason: "缺乏权威来源，建议使用前核实",
-          draftExcerpt: "晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实",
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-    }));
+    return deepSeekResponse(typeof value === "string" ? value : JSON.stringify(value));
   };
+  return { restore: () => { globalThis.fetch = originalFetch; }, calls: () => calls };
+}
 
+test("普通素材通过提取、独立复核和生成三次调用返回段落级来源", async () => {
+  const model = installModelSequence([EXTRACTION, REVIEW, SYNTHESIS]);
   try {
-    const response = await POST(representativeRequest());
-    const body = await response.json() as {
-      draft: { fullText: string };
-      contentReview: { evidenceGaps: Array<Record<string, unknown>> };
-    };
-
+    const response = await POST(request());
+    const body = await response.json() as Record<string, any>;
     assert.equal(response.status, 200);
-    assert.equal(calls, 2);
-    assert.doesNotMatch(userPrompts[0], /上次输出纠错要求/);
-    assert.match(userPrompts[1], /上次输出纠错要求/);
-    assert.match(userPrompts[1], /依据不足片段未在母稿正文中找到/);
-    assert.match(userPrompts[1], /draftExcerpt必须从母稿正文paragraphs中逐字复制/);
-    assert.match(body.draft.fullText, /晨间独处可能增强直觉/);
-    assert.equal("draftExcerpt" in body.contentReview.evidenceGaps[0], false);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    assert.equal(model.calls(), 3);
+    assert.deepEqual(Object.keys(body), ["draft", "decisionSummary", "conflicts", "contentReview"]);
+    assert.deepEqual(body.draft.sections[0].paragraphs[0], {
+      text: "多份素材表达了相近观点。客户不买，往往是因为缺乏信任。",
+      sourceIds: ["source-1", "source-2"],
+    });
+  } finally { model.restore(); }
 });
 
-test("依据不足的母稿片段必须包含清晰的核实提示", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    const draftExcerpt = calls === 1
-      ? "晨间独处可能增强直觉"
-      : "晨间独处可能增强直觉，但该说法缺乏权威来源支撑，建议使用前核实";
-    return deepSeekResponse(JSON.stringify({
-      draft: {
-        sections: [{
-          heading: "晨间安排",
-          paragraphs: [`两份素材都建议先确定当天最重要的任务。${draftExcerpt}。`],
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-      conflicts: [],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [{
-          summary: "晨间独处可能增强直觉",
-          reason: "缺乏权威来源，建议使用前核实",
-          draftExcerpt,
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-    }));
-  };
-
+test("公开响应由新对象构造且不包含内部证据或调用诊断", async () => {
+  const model = installModelSequence([EXTRACTION, REVIEW, SYNTHESIS]);
   try {
-    const response = await POST(representativeRequest());
-    const body = await response.json() as { draft: { fullText: string } };
-
-    assert.equal(response.status, 200);
-    assert.equal(calls, 2);
-    assert.match(body.draft.fullText, /缺乏权威来源支撑，建议使用前核实/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    const body = await (await POST(request())).json() as Record<string, unknown>;
+    const serialized = JSON.stringify(body);
+    assert.doesNotMatch(serialized, /evidenceTable|originalQuote|quoteStart|sourceHash|paragraphRefs|validationReport|callCount|apiMeta|diagnostic/i);
+  } finally { model.restore(); }
 });
 
-test("依据不足核实提示失败时只记录脱敏错误码并定向纠错", async () => {
-  const originalFetch = globalThis.fetch;
+test("可复制全文只由已校验段落生成", async () => {
+  const model = installModelSequence([EXTRACTION, REVIEW, SYNTHESIS]);
+  try {
+    const body = await (await POST(request())).json() as { draft: { fullText: string } };
+    assert.equal(body.draft.fullText, "## 客户不买，往往是因为缺乏信任\n\n多份素材表达了相近观点。客户不买，往往是因为缺乏信任。");
+  } finally { model.restore(); }
+});
+
+test("引文只存在换行和空格差异时仍能定位原文", async () => {
+  const extraction = structuredClone(EXTRACTION);
+  extraction.facts[0].originalQuote = "客户不买， 往往是因为\n缺乏信任。";
+  const model = installModelSequence([extraction, REVIEW, SYNTHESIS]);
+  try {
+    assert.equal((await POST(request())).status, 200);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("引文发生实质改写时定向重试一次后失败关闭", async () => {
+  const invalid = structuredClone(EXTRACTION);
+  invalid.facts[0].originalQuote = "客户不买，肯定是因为完全不信任你。";
+  const prompts: string[] = [];
+  const model = installModelSequence([invalid, invalid], prompts);
+  try {
+    const response = await POST(request());
+    assert.equal(response.status, 502);
+    assert.equal(model.calls(), 2);
+    assert.match(prompts[1], /逐字复制原文/);
+  } finally { model.restore(); }
+});
+
+test("冲突内容先独立复核再生成母稿", async () => {
+  const conflictExtraction = {
+    facts: [
+      { id: "F01", statement: "建立信任需要7天", originalQuote: "建立信任需要7天。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "建立信任需要30天", originalQuote: "建立信任需要30天。", sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "conflict", factIds: ["F01", "F02"], summary: "建立信任需要7天还是30天" }],
+  };
+  const riskSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任需要30天。" },
+  ];
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [
+    { relationId: "R01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "两者确实冲突" },
+  ] };
+  const synthesis = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01", "F02"] }],
+  }] } };
+  const prompts: string[] = [];
+  const model = installModelSequence([conflictExtraction, review, synthesis], prompts);
+  try {
+    const body = await (await POST(request(riskSources))).json() as Record<string, any>;
+    assert.equal(model.calls(), 3);
+    assert.match(prompts[1], /复核以下证据/);
+    assert.match(prompts[2], /已校验证据/);
+    assert.equal(body.conflicts.length, 1);
+    assert.equal(body.conflicts[0].alternatives.length, 2);
+  } finally { model.restore(); }
+});
+
+test("整条流水线只共享一次纠错额度且总调用不超过4次", async () => {
+  const invalid = { facts: [], relations: [] };
+  const riskExtraction = structuredClone(EXTRACTION);
+  riskExtraction.facts[0].confidence = "low";
+  const invalidReview = { decisions: "wrong" };
+  const model = installModelSequence([invalid, riskExtraction, invalidReview]);
+  try {
+    const response = await POST(request());
+    assert.equal(response.status, 502);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("模型连续返回非法JSON时只记录安全错误码", async () => {
   const originalError = console.error;
   const logs: string[] = [];
-  const userPrompts: string[] = [];
-  let calls = 0;
   console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
-  globalThis.fetch = async (_input, init) => {
-    calls += 1;
-    const requestBody = JSON.parse(String(init?.body)) as {
-      messages: Array<{ role: string; content: string }>;
-    };
-    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
-    return deepSeekResponse(JSON.stringify({
-      draft: {
-        sections: [{
-          heading: "晨间安排",
-          paragraphs: ["晨间独处可能增强直觉。"],
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-      conflicts: [],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [{
-          summary: "晨间独处可能增强直觉",
-          reason: "缺乏权威来源，建议使用前核实",
-          draftExcerpt: "晨间独处可能增强直觉",
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-    }));
-  };
-
+  const model = installModelSequence(["SENSITIVE_AI_OUTPUT", "SENSITIVE_AI_OUTPUT"]);
   try {
-    const response = await POST(representativeRequest());
+    const response = await POST(request());
     const body = await response.json() as Record<string, unknown>;
+    assert.deepEqual(body, { error: "文案整合失败，请重试" });
+    assert.match(logs[0], /"stage":"extract"/);
+    assert.match(logs[0], /"failureCode":"INVALID_JSON"/);
+    assert.doesNotMatch(logs[0], /SENSITIVE_AI_OUTPUT|客户不买|test-key/);
+  } finally { model.restore(); console.error = originalError; }
+});
 
+test("证据引用未知素材编号时拒绝且不向客户端泄露错误码", async () => {
+  const invalid = structuredClone(EXTRACTION);
+  invalid.facts[0].sourceId = "source-not-exist";
+  const model = installModelSequence([invalid, invalid]);
+  try {
+    const response = await POST(request());
+    const body = await response.json() as Record<string, unknown>;
     assert.equal(response.status, 502);
     assert.deepEqual(body, { error: "文案整合失败，请重试" });
-    assert.equal(calls, 2);
-    assert.match(userPrompts[1], /依据不足片段缺少明确的依据说明或核实提示/);
-    assert.equal(logs.length, 1);
-    assert.match(logs[0], /"failureCode":"EVIDENCE_NOTICE_MISSING"/);
-    assert.doesNotMatch(JSON.stringify(body), /EVIDENCE_NOTICE_MISSING|failureCode|diagnostic/i);
-    assert.doesNotMatch(logs[0], /晨间独处可能增强直觉/);
-  } finally {
-    globalThis.fetch = originalFetch;
-    console.error = originalError;
-  }
-});
-
-test("明确说明尚未证实并建议核验时视为合格的依据不足提示", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  const evidenceNotice = "追星改变面相的说法尚未得到权威研究证实，建议使用前进一步核验。";
-  globalThis.fetch = async () => {
-    calls += 1;
-    return deepSeekResponse(JSON.stringify({
-      draft: {
-        sections: [{
-          heading: "追星与自我状态",
-          paragraphs: [`过度关注外界可能扰乱个人节奏。${evidenceNotice}`],
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-      conflicts: [],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [{
-          summary: "追星可能改变面相",
-          reason: "目前缺少可核验的权威研究",
-          draftExcerpt: evidenceNotice,
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-    }));
-  };
-
-  try {
-    const response = await POST(integrationRequest());
-    const body = await response.json() as {
-      draft: { fullText: string };
-      contentReview: { evidenceGaps: Array<{ summary: string }> };
-    };
-
-    assert.equal(response.status, 200);
-    assert.equal(calls, 1);
-    assert.match(body.draft.fullText, /尚未得到权威研究证实/);
-    assert.deepEqual(body.contentReview.evidenceGaps, [{
-      summary: "追星可能改变面相",
-      reason: "目前缺少可核验的权威研究",
-      sourceIds: ["source-1", "source-2"],
-    }]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("返回固定四部分结果，但不向用户端暴露内部诊断", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => deepSeekResponse(JSON.stringify({
-    draft: {
-      sections: [
-        {
-          heading: "信任是成交的前提",
-          paragraphs: ["客户是否愿意购买，往往取决于信任是否已经建立。"],
-          sourceIds: ["source-1", "source-2"],
-        },
-      ],
-      fullText: "## 信任是成交的前提\n\n客户是否愿意购买，往往取决于信任是否已经建立。",
-    },
-    conflicts: [],
-    contentReview: {
-      exclusions: [],
-      evidenceGaps: [],
-    },
-  }));
-
-  try {
-    const response = await POST(integrationRequest());
-    const body = await response.json() as Record<string, unknown>;
-
-    assert.equal(response.status, 200);
-    assert.deepEqual(body, {
-      draft: {
-        sections: [
-          {
-            heading: "信任是成交的前提",
-            paragraphs: ["客户是否愿意购买，往往取决于信任是否已经建立。"],
-            sourceIds: ["source-1", "source-2"],
-          },
-        ],
-        fullText: "## 信任是成交的前提\n\n客户是否愿意购买，往往取决于信任是否已经建立。",
-      },
-      decisionSummary: {
-        items: ["当前没有需要老师决策或核实的事项。"],
-      },
-      conflicts: [],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [],
-      },
-    });
-    assert.equal("attempts" in body, false);
-    assert.equal("attemptDiagnostics" in body, false);
-    assert.doesNotMatch(JSON.stringify(body), /promptTokens|completionTokens|failureCode/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    assert.doesNotMatch(JSON.stringify(body), /UNKNOWN_SOURCE_ID|failureCode/);
+  } finally { model.restore(); }
 });
 
 test("少于两份有效素材时在调用模型前拒绝请求", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return deepSeekResponse("{}");
-  };
-
+  const model = installModelSequence([EXTRACTION]);
   try {
-    const response = await POST(new NextRequest("http://localhost/api/copy-integration", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
-      body: JSON.stringify({
-        sources: [
-          { id: "source-1", name: "唯一素材", content: "只有一份有效内容。" },
-          { id: "source-2", name: "空素材", content: "   " },
-        ],
-      }),
-    }));
-    const body = await response.json() as { error?: string };
-
-    assert.equal(response.status, 400);
-    assert.match(body.error ?? "", /至少提供2份/);
-    assert.equal(calls, 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("结构化调用失败时诊断只写服务器日志，对外返回稳定错误结构", async () => {
-  const originalFetch = globalThis.fetch;
-  const originalError = console.error;
-  const logs: string[] = [];
-  const userPrompts: string[] = [];
-  let calls = 0;
-  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
-  globalThis.fetch = async (_input, init) => {
-    calls += 1;
-    const requestBody = JSON.parse(String(init?.body)) as {
-      messages: Array<{ role: string; content: string }>;
-    };
-    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
-    return deepSeekResponse("SENSITIVE_AI_OUTPUT");
-  };
-
-  try {
-    const response = await POST(integrationRequest());
-    const body = await response.json() as Record<string, unknown>;
-
-    assert.equal(response.status, 502);
-    assert.deepEqual(body, { error: "文案整合失败，请重试" });
-    assert.equal(calls, 2);
-    assert.equal(logs.length, 1);
-    assert.match(logs[0], /^\[copy-integration\]\s+/);
-    assert.match(logs[0], /"stage":"parse"/);
-    assert.match(logs[0], /"attempts":2/);
-    assert.match(logs[0], /"failureCode":"INVALID_JSON"/);
-    assert.match(userPrompts[1], /有效JSON对象/);
-    assert.doesNotMatch(JSON.stringify(body), /attempt|diagnostic|token|stage|errorCode/i);
-    assert.doesNotMatch(logs[0], /SENSITIVE_AI_OUTPUT|客户不买|成交困难/);
-  } finally {
-    globalThis.fetch = originalFetch;
-    console.error = originalError;
-  }
-});
-
-test("拒绝AI编造的素材来源编号", async () => {
-  const originalFetch = globalThis.fetch;
-  const originalError = console.error;
-  const logs: string[] = [];
-  const userPrompts: string[] = [];
-  let calls = 0;
-  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
-  globalThis.fetch = async (_input, init) => {
-    calls += 1;
-    const requestBody = JSON.parse(String(init?.body)) as {
-      messages: Array<{ role: string; content: string }>;
-    };
-    userPrompts.push(requestBody.messages.find((message) => message.role === "user")?.content ?? "");
-    return deepSeekResponse(JSON.stringify({
-      draft: {
-        sections: [{
-          heading: "信任",
-          paragraphs: ["信任影响成交。"],
-          sourceIds: ["source-not-exist"],
-        }],
-        fullText: "信任影响成交。",
-      },
-      conflicts: [],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [],
-      },
-    }));
-  };
-
-  try {
-    const response = await POST(integrationRequest());
-    const body = await response.json() as Record<string, unknown>;
-
-    assert.equal(response.status, 502);
-    assert.deepEqual(body, { error: "文案整合失败，请重试" });
-    assert.equal(calls, 2);
-    assert.match(userPrompts[1], /sourceIds只能使用输入素材中提供的id/);
-    assert.equal(logs.length, 1);
-    assert.match(logs[0], /"failureCode":"UNKNOWN_SOURCE_ID"/);
-    assert.doesNotMatch(JSON.stringify(body), /UNKNOWN_SOURCE_ID|failureCode|diagnostic/i);
-  } finally {
-    globalThis.fetch = originalFetch;
-    console.error = originalError;
-  }
+    assert.equal((await POST(request(SOURCES.slice(0, 1)))).status, 400);
+    assert.equal(model.calls(), 0);
+  } finally { model.restore(); }
 });
 
 test("素材编号重复时在调用模型前拒绝请求", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return deepSeekResponse("{}");
-  };
-
+  const model = installModelSequence([EXTRACTION]);
   try {
-    const response = await POST(new NextRequest("http://localhost/api/copy-integration", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
-      body: JSON.stringify({
-        sources: [
-          { id: "same-id", name: "逐字稿", content: "第一份内容。" },
-          { id: "same-id", name: "笔记", content: "第二份内容。" },
-        ],
-      }),
-    }));
-    const body = await response.json() as { error?: string };
-
-    assert.equal(response.status, 400);
-    assert.match(body.error ?? "", /素材编号不能重复/);
-    assert.equal(calls, 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    const duplicate = [SOURCES[0], { ...SOURCES[1], id: "source-1" }];
+    assert.equal((await POST(request(duplicate))).status, 400);
+    assert.equal(model.calls(), 0);
+  } finally { model.restore(); }
 });
 
 test("请求体不是合法JSON时返回400", async () => {
   const response = await POST(new NextRequest("http://localhost/api/copy-integration", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{",
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{" ,
   }));
-  const body = await response.json() as { error?: string };
-
   assert.equal(response.status, 400);
-  assert.equal(body.error, "请求格式错误");
 });
 
 test("超过10份素材时在调用模型前拒绝请求", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return deepSeekResponse("{}");
-  };
-
+  const model = installModelSequence([EXTRACTION]);
   try {
-    const response = await POST(new NextRequest("http://localhost/api/copy-integration", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
-      body: JSON.stringify({
-        sources: Array.from({ length: 11 }, (_, index) => ({
-          id: `source-${index + 1}`,
-          name: `素材${index + 1}`,
-          content: `第${index + 1}份内容。`,
-        })),
-      }),
-    }));
-    const body = await response.json() as { error?: string };
-
-    assert.equal(response.status, 400);
-    assert.match(body.error ?? "", /最多支持10份/);
-    assert.equal(calls, 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    const many = Array.from({ length: 11 }, (_, index) => ({ id: `source-${index}`, name: "素材", content: "有效正文" }));
+    assert.equal((await POST(request(many))).status, 400);
+    assert.equal(model.calls(), 0);
+  } finally { model.restore(); }
 });
 
-test("请求根节点或补充要求类型错误时返回400且不调用模型", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return deepSeekResponse("{}");
-  };
-
+test("补充要求类型错误时返回400且不调用模型", async () => {
+  const model = installModelSequence([EXTRACTION]);
   try {
-    const nullResponse = await POST(new NextRequest("http://localhost/api/copy-integration", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "null",
-    }));
-    assert.equal(nullResponse.status, 400);
-
-    const instructionResponse = await POST(new NextRequest("http://localhost/api/copy-integration", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sources: [
-          { id: "source-1", name: "素材1", content: "第一份内容。" },
-          { id: "source-2", name: "素材2", content: "第二份内容。" },
-        ],
-        instruction: 123,
-      }),
-    }));
-    const body = await instructionResponse.json() as { error?: string };
-    assert.equal(instructionResponse.status, 400);
-    assert.match(body.error ?? "", /补充要求格式错误/);
-    assert.equal(calls, 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    assert.equal((await POST(request(SOURCES, false))).status, 400);
+    assert.equal(model.calls(), 0);
+  } finally { model.restore(); }
 });
 
-test("可复制全文由已校验段落生成，不采用模型另写的fullText", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => deepSeekResponse(JSON.stringify({
-    draft: {
-      sections: [{
-        heading: "信任与成交",
-        paragraphs: ["信任是影响成交的重要因素。"],
-        sourceIds: ["source-1", "source-2"],
-      }],
-      fullText: "关注我并发送关键词领取资料。",
-    },
-    conflicts: [],
-    contentReview: {
-      exclusions: [],
-      evidenceGaps: [],
-    },
-  }));
-
+test("关联观点未在同一段落融合时定向重试后失败", async () => {
+  const separated = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01"] }, { factIds: ["F02"] }],
+  }] } };
+  const prompts: string[] = [];
+  const model = installModelSequence([EXTRACTION, REVIEW, separated, separated], prompts);
   try {
-    const response = await POST(integrationRequest());
-    const body = await response.json() as { draft: { fullText: string } };
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 4);
+    assert.match(prompts[3], /同一逻辑段落/);
+  } finally { model.restore(); }
+});
 
+test("依据不足观点由服务器固定追加核实提示", async () => {
+  const evidenceSources = [
+    { id: "source-1", name: "素材1", content: "晨间独处可能增强直觉。" },
+    { id: "source-2", name: "素材2", content: "每天先确定最重要的任务。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "晨间独处可能增强直觉", originalQuote: evidenceSources[0].content, sourceId: "source-1", classification: "evidence_gap", confidence: "low" },
+      { id: "F02", statement: "每天先确定最重要的任务", originalQuote: evidenceSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "needs_review", classification: "evidence_gap", atomicity: "atomic", reason: "缺乏权威依据" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [] };
+  const synthesis = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01"] }, { factIds: ["F02"] }],
+  }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const response = await POST(request(evidenceSources));
+    const body = await response.json() as Record<string, any>;
     assert.equal(response.status, 200);
-    assert.equal(body.draft.fullText, "## 信任与成交\n\n信任是影响成交的重要因素。");
-    assert.doesNotMatch(body.draft.fullText, /关注我|关键词|领取资料/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    assert.match(body.draft.fullText, /缺乏权威来源支撑，建议使用前核实/);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
 });
 
-test("冲突必须恰好包含两个说法，且每个说法分别绑定真实来源", async () => {
+test("依据不足观点不能只出现在说明区而从母稿中消失", async () => {
+  const evidenceSources = [
+    { id: "source-1", name: "素材1", content: "晨间独处可能增强直觉。" },
+    { id: "source-2", name: "素材2", content: "每天先确定最重要的任务。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "晨间独处可能增强直觉", originalQuote: evidenceSources[0].content, sourceId: "source-1", classification: "evidence_gap", confidence: "low" },
+      { id: "F02", statement: "每天先确定最重要的任务", originalQuote: evidenceSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "needs_review", classification: "evidence_gap", atomicity: "atomic", reason: "缺乏权威依据" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [] };
+  const omitted = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F02"] }],
+  }] } };
+  const model = installModelSequence([extraction, review, omitted, omitted]);
+  try {
+    assert.equal((await POST(request(evidenceSources))).status, 502);
+    assert.equal(model.calls(), 4);
+  } finally { model.restore(); }
+});
+
+test("普通文字型无证据结论也会被拒绝", async () => {
+  const hallucinated = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01", "F02"], text: "客户是否信任你会影响成交。诚信决定企业寿命。" }],
+  }] } };
+  const model = installModelSequence([EXTRACTION, hallucinated, hallucinated]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("所有可用观点都必须真正进入母稿", async () => {
+  const independentSources = [
+    SOURCES[0],
+    { id: "source-2", name: "素材2", content: "每天复盘可以帮助团队发现问题。" },
+  ];
+  const independentExtraction = {
+    facts: [
+      { id: "F01", statement: independentSources[0].content, originalQuote: independentSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: independentSources[1].content, originalQuote: independentSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const omitted = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01"] }],
+  }] } };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [], suggestedRelations: [] };
+  const model = installModelSequence([independentExtraction, review, omitted, omitted]);
+  try {
+    assert.equal((await POST(request(independentSources))).status, 502);
+    assert.equal(model.calls(), 4);
+  } finally { model.restore(); }
+});
+
+test("冲突观点必须并列呈现且不能自动选边", async () => {
+  const riskSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任需要30天。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "建立信任需要7天", originalQuote: riskSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "建立信任需要30天", originalQuote: riskSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "conflict", factIds: ["F01", "F02"], summary: "建立信任所需时间不同" }],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "冲突成立" }],
+  };
+  const selectedOneSide = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01", "F02"], text: "双方存在分歧，但7天更可信。" }],
+  }] } };
+  const model = installModelSequence([extraction, review, selectedOneSide, selectedOneSide]);
+  try {
+    assert.equal((await POST(request(riskSources))).status, 502);
+    assert.equal(model.calls(), 4);
+  } finally { model.restore(); }
+});
+
+test("把两份重复原文并排不算完成观点融合", async () => {
+  const pastedTogether = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01", "F02"], text: `${SOURCES[0].content}${SOURCES[1].content}` }],
+  }] } };
+  const model = installModelSequence([EXTRACTION, pastedTogether, pastedTogether]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("同一事实不能重复冒充双方关系", async () => {
+  const invalid = structuredClone(EXTRACTION);
+  invalid.relations[0].factIds = ["F01", "F01"];
+  const model = installModelSequence([invalid, invalid]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("每份素材都必须至少提取一条原子观点", async () => {
+  const missingSource = structuredClone(EXTRACTION);
+  missingSource.facts = [missingSource.facts[0]];
+  missingSource.relations = [];
+  const model = installModelSequence([missingSource, missingSource]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("提取模型误标的确定性年份预测仍归入未采用", async () => {
+  const timeSources = [
+    { id: "source-1", name: "素材1", content: "2026年10月一定完成转变。" },
+    { id: "source-2", name: "素材2", content: "面对变化时需要保持观察。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "2026年10月一定完成转变", originalQuote: timeSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "面对变化时需要保持观察", originalQuote: timeSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "属于无依据时间预测" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [],
+  };
+  const synthesis = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F02"] }],
+  }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(timeSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 1);
+    assert.equal(body.contentReview.exclusions[0].sourceIds[0], "source-1");
+    assert.doesNotMatch(body.draft.fullText, /2026年10月/);
+  } finally { model.restore(); }
+});
+
+test("复核拒绝的事实不会出现在冲突或决策摘要中", async () => {
+  const riskSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任需要30天。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "建立信任需要7天", originalQuote: riskSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "建立信任需要30天", originalQuote: riskSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "conflict", factIds: ["F01", "F02"], summary: "建立信任所需时间不同" }],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F02", decision: "rejected", classification: "usable", atomicity: "atomic", reason: "观点超出证据" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原始说法存在分歧" }],
+  };
+  const synthesis = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01"] }],
+  }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(riskSources))).json() as Record<string, any>;
+    assert.equal(body.conflicts.length, 0);
+    assert.doesNotMatch(JSON.stringify(body), /30天/);
+  } finally { model.restore(); }
+});
+
+test("使用相同关键词编造更严重后果也不能进入母稿", async () => {
+  const fabricatedConsequence = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F01", "F02"], text: "客户不信任就会让公司倒闭。" }],
+  }] } };
+  const model = installModelSequence([EXTRACTION, fabricatedConsequence, fabricatedConsequence]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+  } finally { model.restore(); }
+});
+
+test("原文中的可能不能被提取和母稿强化为一定", async () => {
+  const modalSources = [
+    { id: "source-1", name: "素材1", content: "过度关注外界可能消耗注意力。" },
+    { id: "source-2", name: "素材2", content: "情绪起伏可能扰乱生活节奏。" },
+  ];
+  const escalated = {
+    facts: [
+      { id: "F01", statement: "过度关注外界一定消耗注意力", originalQuote: modalSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "情绪起伏一定扰乱生活节奏", originalQuote: modalSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "rejected", classification: "usable", atomicity: "atomic", reason: "把可能强化为一定" },
+    { factId: "F02", decision: "rejected", classification: "usable", atomicity: "atomic", reason: "把可能强化为一定" },
+  ], relationDecisions: [] };
+  const model = installModelSequence([escalated, review]);
+  try {
+    const response = await POST(request(modalSources));
+    assert.equal(response.status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("互不相关的观点被误标为补充关系时必须进入独立复核", async () => {
+  const unrelatedSources = [
+    { id: "source-1", name: "素材1", content: "苹果是红色的。" },
+    { id: "source-2", name: "素材2", content: "天空中有云。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: unrelatedSources[0].content, originalQuote: unrelatedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: unrelatedSources[1].content, originalQuote: unrelatedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "两者互相补充" }],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "rejected", classification: "usable", atomicity: "atomic", reason: "两者无逻辑关系" }],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    assert.equal((await POST(request(unrelatedSources))).status, 200);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("带年份的历史事实不会被误判为未来预测", async () => {
+  const historicalSources = [
+    { id: "source-1", name: "素材1", content: "2026年公司完成了办公室搬迁。" },
+    { id: "source-2", name: "素材2", content: "团队随后恢复了正常办公。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: historicalSources[0].content, originalQuote: historicalSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: historicalSources[1].content, originalQuote: historicalSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "历史事实" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [] };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(historicalSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 0);
+    assert.match(body.draft.fullText, /2026年公司完成了办公室搬迁/);
+  } finally { model.restore(); }
+});
+
+test("带具体年份的未来断言即使没有一定也归入未采用", async () => {
+  const futureSources = [
+    { id: "source-1", name: "素材1", content: "2026年将开启新的阶段。" },
+    { id: "source-2", name: "素材2", content: "面对变化时需要保持观察。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: futureSources[0].content, originalQuote: futureSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: futureSources[1].content, originalQuote: futureSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "needs_review", classification: "exclude_time_prediction", atomicity: "atomic", reason: "属于无依据时间预测" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [] };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(futureSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 1);
+    assert.doesNotMatch(body.draft.fullText, /2026年将开启/);
+  } finally { model.restore(); }
+});
+
+test("同一份素材中的第二个独立观点不能被提取阶段遗漏", async () => {
+  const multiPointSources = [
+    { id: "source-1", name: "素材1", content: "信任影响成交。现金流决定企业能否持续经营。" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const incomplete = {
+    facts: [
+      { id: "F01", statement: "信任影响成交。", originalQuote: "信任影响成交。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: multiPointSources[1].content, originalQuote: multiPointSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([incomplete, incomplete]);
+  try {
+    assert.equal((await POST(request(multiPointSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("同一句逗号后的独立观点也不能被提取阶段遗漏", async () => {
+  const clauseSources = [
+    { id: "source-1", name: "素材1", content: "客户是否购买主要取决于信任，但现金流决定企业能否持续经营。" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const incomplete = {
+    facts: [
+      { id: "F01", statement: "信任影响购买", originalQuote: "客户是否购买主要取决于信任，", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: clauseSources[1].content, originalQuote: clauseSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([incomplete, incomplete]);
+  try {
+    assert.equal((await POST(request(clauseSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("没有写具体年份的确定性时间预测也归入未采用", async () => {
+  const relativeTimeSources = [
+    { id: "source-1", name: "素材1", content: "明年一定会发生巨大转变。" },
+    { id: "source-2", name: "素材2", content: "面对变化时需要保持观察。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: relativeTimeSources[0].content, originalQuote: relativeTimeSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: relativeTimeSources[1].content, originalQuote: relativeTimeSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "属于无依据时间预测" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [], suggestedRelations: [] };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(relativeTimeSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 1);
+    assert.doesNotMatch(body.draft.fullText, /明年一定/);
+  } finally { model.restore(); }
+});
+
+test("相同素材中的普通会字时间断言仍会被系统排除", async () => {
+  const predictionSources = [
+    { id: "source-1", name: "素材1", content: "明年公司会倒闭。面对变化时需要保持观察。" },
+    { id: "source-2", name: "素材2", content: "明年公司会倒闭。面对变化时需要保持观察。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "明年公司会倒闭。", originalQuote: "明年公司会倒闭。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "面对变化时需要保持观察。", originalQuote: "面对变化时需要保持观察。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F03", statement: "明年公司会倒闭。", originalQuote: "明年公司会倒闭。", sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F04", statement: "面对变化时需要保持观察。", originalQuote: "面对变化时需要保持观察。", sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [
+      { id: "R01", type: "overlap", factIds: ["F01", "F03"], summary: "相同预测" },
+      { id: "R02", type: "overlap", factIds: ["F02", "F04"], summary: "相同建议" },
+    ],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据时间预测" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F03", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据时间预测" },
+      { factId: "F04", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [
+      { relationId: "R01", decision: "passed", reason: "相同预测" },
+      { relationId: "R02", decision: "passed", reason: "相同建议" },
+    ],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F02", "F04"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(predictionSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 2);
+    assert.doesNotMatch(body.draft.fullText, /明年公司会倒闭/);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("相同素材中的明确计划不会被时间预测规则误删", async () => {
+  const scheduleSources = [
+    { id: "source-1", name: "素材1", content: "明年公司一定会按计划搬迁。" },
+    { id: "source-2", name: "素材2", content: "明年公司一定会按计划搬迁。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: scheduleSources[0].content, originalQuote: scheduleSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: scheduleSources[1].content, originalQuote: scheduleSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "相同计划" }],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "明确计划" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "明确计划" },
+  ], relationDecisions: [
+    { relationId: "R01", decision: "passed", reason: "相同计划" },
+  ], suggestedRelations: [] };
+  const model = installModelSequence([extraction, review, SYNTHESIS]);
+  try {
+    const body = await (await POST(request(scheduleSources))).json() as Record<string, any>;
+    assert.match(body.draft.fullText, /按计划搬迁/);
+    assert.equal(body.contentReview.exclusions.length, 0);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("带官方字样的无依据预言仍归入未采用", async () => {
+  const prophecySources = [
+    { id: "source-1", name: "素材1", content: "官方预言，明年灵魂将归位。保持观察。" },
+    { id: "source-2", name: "素材2", content: "官方预言，明年灵魂将归位。保持观察。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "官方预言明年灵魂将归位", originalQuote: "官方预言，明年灵魂将归位。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "保持观察", originalQuote: "保持观察。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F03", statement: "官方预言明年灵魂将归位", originalQuote: "官方预言，明年灵魂将归位。", sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F04", statement: "保持观察", originalQuote: "保持观察。", sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [
+      { id: "R01", type: "overlap", factIds: ["F01", "F03"], summary: "相同预言" },
+      { id: "R02", type: "overlap", factIds: ["F02", "F04"], summary: "相同建议" },
+    ],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据预言" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F03", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据预言" },
+      { factId: "F04", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [
+      { relationId: "R01", decision: "passed", reason: "相同预言" },
+      { relationId: "R02", decision: "passed", reason: "相同建议" },
+    ],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F02", "F04"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(prophecySources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 2);
+    assert.doesNotMatch(body.draft.fullText, /灵魂将归位/);
+  } finally { model.restore(); }
+});
+
+test("同段出现计划字样也必须复核真正的未来断言", async () => {
+  const mixedSources = [
+    { id: "source-1", name: "素材1", content: "公司已发布年度计划，但明年公司会倒闭。保持观察。" },
+    { id: "source-2", name: "素材2", content: "公司已发布年度计划，但明年公司会倒闭。保持观察。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "明年公司会倒闭", originalQuote: "公司已发布年度计划，但明年公司会倒闭。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "保持观察", originalQuote: "保持观察。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F03", statement: "明年公司会倒闭", originalQuote: "公司已发布年度计划，但明年公司会倒闭。", sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F04", statement: "保持观察", originalQuote: "保持观察。", sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [
+      { id: "R01", type: "overlap", factIds: ["F01", "F03"], summary: "相同预测" },
+      { id: "R02", type: "overlap", factIds: ["F02", "F04"], summary: "相同建议" },
+    ],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "计划不能支持倒闭预测" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F03", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "计划不能支持倒闭预测" },
+      { factId: "F04", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [
+      { relationId: "R01", decision: "passed", reason: "相同预测" },
+      { relationId: "R02", decision: "passed", reason: "相同建议" },
+    ],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F02", "F04"] }] }] } };
+  const prompts: string[] = [];
+  const model = installModelSequence([extraction, review, synthesis], prompts);
+  try {
+    const body = await (await POST(request(mixedSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 2);
+    assert.equal(model.calls(), 3);
+    assert.match(prompts[1], /明年公司会倒闭/);
+  } finally { model.restore(); }
+});
+
+test("已确认的未来安排即使命中宽泛词面也可由复核恢复", async () => {
+  const confirmedSources = [
+    { id: "source-1", name: "素材1", content: "公司负责人已确认，2026年将搬入新办公室。" },
+    { id: "source-2", name: "素材2", content: "官方公告，明年将启动时代广场重启工程。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: confirmedSources[0].content, originalQuote: confirmedSources[0].content, sourceId: "source-1", classification: "exclude_time_prediction", confidence: "medium" },
+      { id: "F02", statement: confirmedSources[1].content, originalQuote: confirmedSources[1].content, sourceId: "source-2", classification: "exclude_time_prediction", confidence: "medium" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "负责人已确认" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "官方公告中的工程安排" },
+  ], relationDecisions: [], suggestedRelations: [] };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(confirmedSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 0);
+    assert.match(body.draft.fullText, /2026年将搬入新办公室/);
+    assert.match(body.draft.fullText, /时代广场重启工程/);
+  } finally { model.restore(); }
+});
+
+test("今年年底和下季度等时间表达都会进入独立复核", async () => {
+  const formatSources = [
+    { id: "source-1", name: "素材1", content: "今年年底公司会倒闭。" },
+    { id: "source-2", name: "素材2", content: "下季度市场迎来巨变。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: formatSources[0].content, originalQuote: formatSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: formatSources[1].content, originalQuote: formatSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据时间断言" },
+    { factId: "F02", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据时间断言" },
+  ], relationDecisions: [], suggestedRelations: [] };
+  const model = installModelSequence([extraction, review]);
+  try {
+    assert.equal((await POST(request(formatSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("明晚和下星期等常见时间表达也会进入独立复核", async () => {
+  const formatSources = [
+    { id: "source-1", name: "素材1", content: "明晚公司会倒闭。" },
+    { id: "source-2", name: "素材2", content: "下星期市场会迎来巨变。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: formatSources[0].content, originalQuote: formatSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: formatSources[1].content, originalQuote: formatSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据时间断言" },
+    { factId: "F02", decision: "passed", classification: "exclude_time_prediction", atomicity: "atomic", reason: "无依据时间断言" },
+  ], relationDecisions: [], suggestedRelations: [] };
+  const model = installModelSequence([extraction, review]);
+  try {
+    assert.equal((await POST(request(formatSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("没有标点的转折短尾观点也不能被提取遗漏", async () => {
+  const tailSources = [
+    { id: "source-1", name: "素材1", content: "客户信任会持续影响成交表现与长期合作关系并决定沟通效率但现金流断裂。" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const incomplete = {
+    facts: [
+      { id: "F01", statement: "信任影响成交和合作", originalQuote: "客户信任会持续影响成交表现与长期合作关系并决定沟通效率", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: tailSources[1].content, originalQuote: tailSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([incomplete, incomplete]);
+  try {
+    assert.equal((await POST(request(tailSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("只有两个字的独立结论也不能被提取遗漏", async () => {
+  const shortSources = [
+    { id: "source-1", name: "素材1", content: "信任影响成交。亏损。" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const incomplete = {
+    facts: [
+      { id: "F01", statement: "信任影响成交", originalQuote: "信任影响成交。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: shortSources[1].content, originalQuote: shortSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([incomplete, incomplete]);
+  try {
+    assert.equal((await POST(request(shortSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("一个字的独立结论也不能被提取遗漏", async () => {
+  const shortSources = [
+    { id: "source-1", name: "素材1", content: "信任影响成交。涨。" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const incomplete = {
+    facts: [
+      { id: "F01", statement: "信任影响成交", originalQuote: "信任影响成交。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: shortSources[1].content, originalQuote: shortSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([incomplete, incomplete]);
+  try {
+    assert.equal((await POST(request(shortSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("复核能用新关系纠正提取阶段标错的关系类型", async () => {
+  const relationSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任至少需要30天。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: relationSources[0].content, originalQuote: relationSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: relationSources[1].content, originalQuote: relationSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "错误标成重复" }],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "rejected", classification: "usable", atomicity: "atomic", reason: "实际是冲突" }],
+    suggestedRelations: [{ id: "RR01", type: "conflict", factIds: ["F01", "F02"], summary: "所需时间冲突" }],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(relationSources))).json() as Record<string, any>;
+    assert.equal(body.conflicts.length, 1);
+    assert.match(body.draft.fullText, /存在分歧/);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("同一对事实不能同时保留重叠和冲突两种关系", async () => {
+  const relationSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任至少需要30天。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: relationSources[0].content, originalQuote: relationSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: relationSources[1].content, originalQuote: relationSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "错误标成重复" }],
+  };
+  const invalidReview = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "passed", reason: "错误保留旧关系" }],
+    suggestedRelations: [{ id: "RR01", type: "conflict", factIds: ["F01", "F02"], summary: "所需时间冲突" }],
+  };
+  const model = installModelSequence([extraction, invalidReview, invalidReview]);
+  try {
+    assert.equal((await POST(request(relationSources))).status, 502);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("同一事实或关系出现互相矛盾的重复复核决定时整份拒绝", async () => {
+  const riskSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任需要30天。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: riskSources[0].content, originalQuote: riskSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: riskSources[1].content, originalQuote: riskSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "conflict", factIds: ["F01", "F02"], summary: "时间冲突" }],
+  };
+  const duplicateReview = {
+    decisions: [
+      { factId: "F01", decision: "rejected", classification: "usable", atomicity: "atomic", reason: "先拒绝" },
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "后覆盖" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [
+      { relationId: "R01", decision: "rejected", reason: "先拒绝" },
+      { relationId: "R01", decision: "passed", reason: "后覆盖" },
+    ],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([extraction, duplicateReview, duplicateReview]);
+  try {
+    assert.equal((await POST(request(riskSources))).status, 502);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("把整份多观点素材冒充一个原子事实时拒绝生成母稿", async () => {
+  const groupedSources = [
+    { id: "source-1", name: "素材1", content: "有些人长期模仿偶像的表情。过度关注还会影响自己的生活节奏。" },
+    { id: "source-2", name: "素材2", content: "注意力长期放在外界可能消耗心神。静坐观察呼吸可以帮助收回注意力。" },
+  ];
+  const groupedExtraction = {
+    facts: [
+      { id: "F01", statement: "模仿偶像会影响生活", originalQuote: groupedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "关注外界会消耗心神并可用静坐调整", originalQuote: groupedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "现象、原因和方法" }],
+  };
+  const overGroupedReview = {
+    decisions: [
+      { factId: "F01", decision: "rejected", classification: "usable", atomicity: "over_grouped", reason: "混合了现象和影响" },
+      { factId: "F02", decision: "rejected", classification: "usable", atomicity: "over_grouped", reason: "混合了原因和方法" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "rejected", reason: "需先拆分事实" }],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([groupedExtraction, overGroupedReview]);
+  try {
+    assert.equal((await POST(request(groupedSources, "按现象、原因、方法组织"))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("单句用并且连接多个观点时也必须经过原子性复核", async () => {
+  const groupedSources = [
+    { id: "source-1", name: "素材1", content: "过度关注外界会消耗心神，并且静坐可以帮助收回注意力。" },
+    { id: "source-2", name: "素材2", content: "过度关注外界会消耗心神，并且静坐可以帮助收回注意力。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: groupedSources[0].content, originalQuote: groupedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: groupedSources[1].content, originalQuote: groupedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "相同内容" }],
+  };
+  const review = { decisions: [
+    { factId: "F01", decision: "rejected", classification: "usable", atomicity: "over_grouped", reason: "混合了原因和方法" },
+    { factId: "F02", decision: "rejected", classification: "usable", atomicity: "over_grouped", reason: "混合了原因和方法" },
+  ], relationDecisions: [{ relationId: "R01", decision: "rejected", reason: "需先拆分" }], suggestedRelations: [] };
+  const model = installModelSequence([extraction, review]);
+  try {
+    assert.equal((await POST(request(groupedSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("同一素材的相同原文不能换Fact_ID重复登记", async () => {
+  const duplicateFact = {
+    facts: [
+      ...EXTRACTION.facts,
+      { ...EXTRACTION.facts[0], id: "F03" },
+    ],
+    relations: EXTRACTION.relations,
+  };
+  const model = installModelSequence([duplicateFact, duplicateFact]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("相同原文不能只改句末标点后换Fact_ID重复登记", async () => {
+  const punctuatedSources = [
+    { id: "source-1", name: "素材1", content: "信任影响成交。" },
+    { id: "source-2", name: "素材2", content: "复盘帮助发现问题。" },
+  ];
+  const duplicateFact = {
+    facts: [
+      { id: "F01", statement: "信任影响成交", originalQuote: "信任影响成交", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "信任影响成交", originalQuote: "信任影响成交。", sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F03", statement: punctuatedSources[1].content, originalQuote: punctuatedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([duplicateFact, duplicateFact]);
+  try {
+    assert.equal((await POST(request(punctuatedSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("相同Fact组合不能换Relation_ID重复登记同一种关系", async () => {
+  const duplicateRelation = {
+    ...EXTRACTION,
+    relations: [
+      EXTRACTION.relations[0],
+      { ...EXTRACTION.relations[0], id: "R02" },
+    ],
+  };
+  const model = installModelSequence([duplicateRelation, duplicateRelation]);
+  try {
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("复核不能在保留旧关系时再新增一条同内容关系", async () => {
+  const conflictSources = [
+    { id: "source-1", name: "素材1", content: "建立信任需要7天。" },
+    { id: "source-2", name: "素材2", content: "建立信任需要30天。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: conflictSources[0].content, originalQuote: conflictSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: conflictSources[1].content, originalQuote: conflictSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "conflict", factIds: ["F01", "F02"], summary: "所需时间不同" }],
+  };
+  const duplicateReview = { decisions: [
+    { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+  ], relationDecisions: [{ relationId: "R01", decision: "passed", reason: "冲突成立" }], suggestedRelations: [
+    { id: "RR01", type: "conflict", factIds: ["F01", "F02"], summary: "重复冲突" },
+  ] };
+  const model = installModelSequence([extraction, duplicateReview, duplicateReview]);
+  try {
+    assert.equal((await POST(request(conflictSources))).status, 502);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("明显重复的跨素材观点缺少关系时拒绝进入母稿规划", async () => {
+  const duplicateSources = [
+    { id: "source-1", name: "素材1", content: "客户信任会影响成交。" },
+    { id: "source-2", name: "素材2", content: "客户信任会影响成交。" },
+  ];
+  const missingRelation = {
+    facts: [
+      { id: "F01", statement: duplicateSources[0].content, originalQuote: duplicateSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: duplicateSources[1].content, originalQuote: duplicateSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const model = installModelSequence([missingRelation, missingRelation]);
+  try {
+    assert.equal((await POST(request(duplicateSources))).status, 502);
+    assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("模型请求失败不消耗面向校验失败的纠错额度", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
-    const alternatives = calls === 1
-      ? [{ brief: "需要7天", text: "需要7天", sourceIds: ["source-1"] }]
-      : [
-          { brief: "需要7天", text: "需要7天", sourceIds: ["source-1"] },
-          { brief: "需要30天", text: "需要30天", sourceIds: ["source-2"] },
-        ];
-    return deepSeekResponse(JSON.stringify({
-      draft: {
-        sections: [{
-          heading: "信任",
-          paragraphs: ["建立信任所需时间需要确认。"],
-          sourceIds: ["source-1", "source-2"],
-        }],
-      },
-      conflicts: [{
-        topic: "建立信任所需时间",
-        conflictPoint: "建立信任需要7天还是30天",
-        alternatives,
-      }],
-      contentReview: {
-        exclusions: [],
-        evidenceGaps: [],
-      },
-    }));
+    return new Response(JSON.stringify({ error: "temporary" }), { status: 500 });
   };
-
   try {
-    const response = await POST(integrationRequest());
-    const body = await response.json() as {
-      conflicts: Array<{
-        alternatives: Array<{ brief: string; text: string; sourceIds: string[] }>;
-      }>;
-    };
+    assert.equal((await POST(request())).status, 502);
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
 
+test("复核可以补回提取阶段漏掉的跨素材关系", async () => {
+  const relatedSources = [
+    { id: "source-1", name: "素材1", content: "客户迟迟不下单，是因为还没有建立信任。" },
+    { id: "source-2", name: "素材2", content: "持续兑现承诺，可以逐步建立信赖。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: relatedSources[0].content, originalQuote: relatedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: relatedSources[1].content, originalQuote: relatedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [],
+    suggestedRelations: [{ id: "RR01", type: "complement", factIds: ["F01", "F02"], summary: "信任问题与建立信任的方法互相补充" }],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const response = await POST(request(relatedSources));
+    const body = await response.json() as Record<string, any>;
     assert.equal(response.status, 200);
-    assert.equal(calls, 2);
-    assert.deepEqual(body.conflicts[0].alternatives, [
-      { brief: "需要7天", text: "需要7天", sourceIds: ["source-1"] },
-      { brief: "需要30天", text: "需要30天", sourceIds: ["source-2"] },
-    ]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    assert.equal(model.calls(), 3);
+    assert.match(body.draft.fullText, /在此基础上，另一份素材补充/);
+    assert.match(body.draft.fullText, /持续兑现承诺/);
+  } finally { model.restore(); }
+});
+
+test("同一事实可以同时参与重叠和补充关系且新增证据不丢失", async () => {
+  const graphSources = [
+    { id: "source-1", name: "素材1", content: "信任会影响成交。" },
+    { id: "source-2", name: "素材2", content: "客户信任品牌后更愿意购买。" },
+    { id: "source-3", name: "素材3", content: "持续兑现承诺可以逐步建立客户信任。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: graphSources[0].content, originalQuote: graphSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: graphSources[1].content, originalQuote: graphSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F03", statement: graphSources[2].content, originalQuote: graphSources[2].content, sourceId: "source-3", classification: "usable", confidence: "high" },
+    ],
+    relations: [
+      { id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "信任影响购买" },
+      { id: "R02", type: "complement", factIds: ["F02", "F03"], summary: "补充建立信任的方法" },
+    ],
+  };
+  const review = {
+    decisions: graphSources.map((_, index) => ({ factId: `F0${index + 1}`, decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" })),
+    relationDecisions: [
+      { relationId: "R01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "重叠关系成立" },
+      { relationId: "R02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "补充关系成立" },
+    ],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02", "F03"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(graphSources))).json() as Record<string, any>;
+    assert.match(body.draft.fullText, /信任会影响成交/);
+    assert.match(body.draft.fullText, /客户信任品牌后更愿意购买/);
+    assert.match(body.draft.fullText, /持续兑现承诺可以逐步建立客户信任/);
+  } finally { model.restore(); }
+});
+
+test("公开四部分不使用提取模型自由改写的statement和关系摘要", async () => {
+  const safeSources = [
+    { id: "source-1", name: "素材1", content: "过度关注外界可能消耗注意力。" },
+    { id: "source-2", name: "素材2", content: "静坐可以帮助收回注意力。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "过度关注外界一定导致人生失败", originalQuote: safeSources[0].content, sourceId: "source-1", classification: "usable", confidence: "low" },
+      { id: "F02", statement: "静坐三天就能彻底改变命运", originalQuote: safeSources[1].content, sourceId: "source-2", classification: "usable", confidence: "low" },
+    ],
+    relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "静坐三天就能彻底改变命运" }],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "模拟复核放行" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "模拟复核放行" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "模拟复核放行" }],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const serialized = JSON.stringify(await (await POST(request(safeSources))).json());
+    assert.doesNotMatch(serialized, /人生失败|三天|改变命运/);
+    assert.match(serialized, /过度关注外界可能消耗注意力/);
+    assert.match(serialized, /静坐可以帮助收回注意力/);
+  } finally { model.restore(); }
+});
+
+test("官方日程中的未来年份可由复核纠正为可用事实", async () => {
+  const scheduleSources = [
+    { id: "source-1", name: "素材1", content: "公司已经发布公告，2026年将搬入新办公室。" },
+    { id: "source-2", name: "素材2", content: "搬迁期间团队将采用远程办公。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: scheduleSources[0].content, originalQuote: scheduleSources[0].content, sourceId: "source-1", classification: "exclude_time_prediction", confidence: "medium" },
+      { id: "F02", statement: scheduleSources[1].content, originalQuote: scheduleSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "搬迁安排与过渡方式" }],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "这是已发布公告，不是无依据预测" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [{ relationId: "R01", decision: "passed", classification: "usable", atomicity: "atomic", reason: "补充关系成立" }],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(scheduleSources))).json() as Record<string, any>;
+    assert.equal(body.contentReview.exclusions.length, 0);
+    assert.match(body.draft.fullText, /2026年将搬入新办公室/);
+  } finally { model.restore(); }
+});
+
+test("用户补充的组织顺序要求会传入母稿规划阶段", async () => {
+  const prompts: string[] = [];
+  const model = installModelSequence([EXTRACTION, REVIEW, SYNTHESIS], prompts);
+  try {
+    assert.equal((await POST(request(SOURCES, "按问题、原因、方法排序"))).status, 200);
+    assert.match(prompts[2], /按问题、原因、方法排序/);
+  } finally { model.restore(); }
 });

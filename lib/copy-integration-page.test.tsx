@@ -79,8 +79,7 @@ test("用户提交两份素材后按固定顺序看到四部分整合结果", as
       draft: {
         sections: [{
           heading: "信任与成交",
-          paragraphs: ["信任是影响成交的重要因素。"],
-          sourceIds: ["source-1", "source-2"],
+          paragraphs: [{ text: "信任是影响成交的重要因素。", sourceIds: ["source-1", "source-2"] }],
         }],
         fullText: "## 信任与成交\n\n信任是影响成交的重要因素。",
       },
@@ -183,13 +182,11 @@ test("未保存的整合结果不分配编号，点击保存后生成母稿和�
       sections: [
         {
           heading: "信任是成交的前提",
-          paragraphs: ["客户愿意购买，首先取决于信任是否建立。"],
-          sourceIds: ["source-1", "source-2"],
+          paragraphs: [{ text: "客户愿意购买，首先取决于信任是否建立。", sourceIds: ["source-1", "source-2"] }],
         },
         {
           heading: "信任需要长期积累",
-          paragraphs: ["稳定兑现承诺，才能逐步形成信任。"],
-          sourceIds: ["source-2"],
+          paragraphs: [{ text: "稳定兑现承诺，才能逐步形成信任。", sourceIds: ["source-2"] }],
         },
       ],
       fullText: "## 信任是成交的前提\n\n客户愿意购买，首先取决于信任是否建立。\n\n## 信任需要长期积累\n\n稳定兑现承诺，才能逐步形成信任。",
@@ -239,13 +236,11 @@ test("保存后的片段可以修改标题、合并相邻片段并在光标处�
     sections={[
       {
         heading: "信任是成交的前提",
-        paragraphs: ["客户愿意购买，首先取决于信任是否建立。"],
-        sourceIds: ["source-1", "source-2"],
+        paragraphs: [{ text: "客户愿意购买，首先取决于信任是否建立。", sourceIds: ["source-1", "source-2"] }],
       },
       {
         heading: "信任需要长期积累",
-        paragraphs: ["稳定兑现承诺，才能逐步形成信任。"],
-        sourceIds: ["source-2"],
+        paragraphs: [{ text: "稳定兑现承诺，才能逐步形成信任。", sourceIds: ["source-2"] }],
       },
     ]}
     sources={[

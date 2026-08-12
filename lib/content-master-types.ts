@@ -11,6 +11,7 @@ export interface ContentMasterSegment {
   content: string;
   order: number;
   sourceIds: string[];
+  paragraphSourceIds?: string[][];
   status: ContentMasterSegmentStatus;
 }
 
@@ -27,7 +28,7 @@ export interface ContentMaster {
 
 export interface ContentMasterSectionInput {
   heading: string;
-  paragraphs: string[];
+  paragraphs: Array<string | { text: string; sourceIds: string[] }>;
   sourceIds: string[];
 }
 

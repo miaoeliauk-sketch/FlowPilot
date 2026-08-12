@@ -70,6 +70,10 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === "string");
 }
 
+function isStringMatrix(value: unknown): value is string[][] {
+  return Array.isArray(value) && value.every(isStringArray);
+}
+
 function isContentMasterSource(value: unknown): boolean {
   return isRecord(value)
     && typeof value.id === "string"
@@ -89,6 +93,7 @@ function isContentMasterSegment(value: unknown, draftId: string): value is Conte
     && Number.isFinite(value.order)
     && value.order > 0
     && isStringArray(value.sourceIds)
+    && (value.paragraphSourceIds === undefined || isStringMatrix(value.paragraphSourceIds))
     && typeof value.status === "string"
     && SEGMENT_STATUS_VALUES.has(value.status);
 }
@@ -234,6 +239,46 @@ function buildFullText(segments: ContentMasterSegment[]): string {
     .join("\n\n");
 }
 
+interface ParagraphRange {
+  start: number;
+  end: number;
+}
+
+function contentParagraphRanges(content: string): ParagraphRange[] {
+  const ranges: ParagraphRange[] = [];
+  const separator = /\n{2,}/g;
+  let start = 0;
+  for (const match of content.matchAll(separator)) {
+    const end = match.index ?? start;
+    if (content.slice(start, end).trim()) ranges.push({ start, end });
+    start = end + match[0].length;
+  }
+  if (content.slice(start).trim()) ranges.push({ start, end: content.length });
+  return ranges;
+}
+
+function splitParagraphText(text: string): string[] {
+  return text.split(/\n{2,}/).map(paragraph => paragraph.trim()).filter(Boolean);
+}
+
+function segmentParagraphSources(segment: ContentMasterSegment): string[][] {
+  return contentParagraphRanges(segment.content)
+    .map((_, index) => segment.paragraphSourceIds?.[index] ?? segment.sourceIds);
+}
+
+function paragraphSourcesForSlice(
+  segment: ContentMasterSegment,
+  sliceStart: number,
+  sliceEnd: number,
+): string[][] {
+  const sources = segmentParagraphSources(segment);
+  const result: string[][] = [];
+  contentParagraphRanges(segment.content).forEach(({ start, end }, index) => {
+    if (end > sliceStart && start < sliceEnd) result.push([...sources[index]]);
+  });
+  return result.length > 0 ? result : [[...segment.sourceIds]];
+}
+
 function updateContentMaster(
   id: string,
   storage: ContentMasterStorage,
@@ -277,14 +322,25 @@ function createContentMasterUnlocked(
   if (state.drafts.some(draft => draft.id === id)) {
     throw new Error("母稿编号发生冲突，请刷新页面后重试");
   }
-  const segments = input.sections.map((section, index): ContentMasterSegment => ({
-    id: formatSegmentId(id, index + 1),
-    heading: section.heading.trim(),
-    content: section.paragraphs.map(paragraph => paragraph.trim()).filter(Boolean).join("\n\n"),
-    order: index + 1,
-    sourceIds: Array.from(new Set(section.sourceIds)),
-    status: "正常",
-  }));
+  const segments = input.sections.map((section, index): ContentMasterSegment => {
+    const paragraphs = section.paragraphs
+      .flatMap(paragraph => {
+        const text = typeof paragraph === "string" ? paragraph : paragraph.text;
+        const sourceIds = typeof paragraph === "string" ? section.sourceIds : paragraph.sourceIds;
+        return splitParagraphText(text).map(item => ({ text: item, sourceIds }));
+      })
+      .filter(paragraph => Boolean(paragraph.text));
+    const paragraphSourceIds = paragraphs.map(paragraph => Array.from(new Set(paragraph.sourceIds)));
+    return {
+      id: formatSegmentId(id, index + 1),
+      heading: section.heading.trim(),
+      content: paragraphs.map(paragraph => paragraph.text).join("\n\n"),
+      order: index + 1,
+      sourceIds: Array.from(new Set(paragraphSourceIds.flat())),
+      paragraphSourceIds,
+      status: "正常",
+    };
+  });
   const timestamp = now.toISOString();
   const draft: ContentMaster = {
     id,
@@ -416,6 +472,10 @@ function mergeAdjacentContentMasterSegmentsUnlocked(
       content: `${first.content}\n\n${second.content}`,
       order: first.order,
       sourceIds: Array.from(new Set([...first.sourceIds, ...second.sourceIds])),
+      paragraphSourceIds: [
+        ...segmentParagraphSources(first),
+        ...segmentParagraphSources(second),
+      ],
       status: "正常",
     };
     const segments = normalizeActiveOrders([
@@ -480,12 +540,15 @@ function splitContentMasterSegmentUnlocked(
 
     const createdSequences = nextAvailableSegmentSequences(draft, 2);
     createdIds = createdSequences.map(sequence => formatSegmentId(draft.id, sequence)) as [string, string];
+    const firstParagraphSourceIds = paragraphSourcesForSlice(current, 0, splitAt);
+    const secondParagraphSourceIds = paragraphSourcesForSlice(current, splitAt, current.content.length);
     const first: ContentMasterSegment = {
       id: createdIds[0],
       heading: cleanHeadings[0],
       content: firstContent,
       order: current.order,
-      sourceIds: [...current.sourceIds],
+      sourceIds: Array.from(new Set(firstParagraphSourceIds.flat())),
+      paragraphSourceIds: firstParagraphSourceIds,
       status: "正常",
     };
     const second: ContentMasterSegment = {
@@ -493,7 +556,8 @@ function splitContentMasterSegmentUnlocked(
       heading: cleanHeadings[1],
       content: secondContent,
       order: current.order + 0.5,
-      sourceIds: [...current.sourceIds],
+      sourceIds: Array.from(new Set(secondParagraphSourceIds.flat())),
+      paragraphSourceIds: secondParagraphSourceIds,
       status: "正常",
     };
     const segments = normalizeActiveOrders([

@@ -25,12 +25,16 @@ export interface CopyIntegrationReviewItem extends CopyIntegrationNote {
   reason: string;
 }
 
+export interface CopyIntegrationParagraph {
+  text: string;
+  sourceIds: string[];
+}
+
 export interface CopyIntegrationResult {
   draft: {
     sections: Array<{
       heading: string;
-      paragraphs: string[];
-      sourceIds: string[];
+      paragraphs: CopyIntegrationParagraph[];
     }>;
     fullText: string;
   };

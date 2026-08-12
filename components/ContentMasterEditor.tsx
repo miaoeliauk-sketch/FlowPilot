@@ -39,7 +39,14 @@ export function ContentMasterEditor({
     savingRef.current = true;
     setSaving(true);
     try {
-      const draft = await createContentMaster({ title, sections, sources });
+      const draft = await createContentMaster({
+        title,
+        sections: sections.map(section => ({
+          ...section,
+          sourceIds: Array.from(new Set(section.paragraphs.flatMap(paragraph => paragraph.sourceIds))),
+        })),
+        sources,
+      });
       setSavedDraft(draft);
       onDraftChange?.(draft);
       setError("");

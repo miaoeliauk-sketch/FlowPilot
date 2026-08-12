@@ -114,8 +114,10 @@ export default function CopyIntegrationPage() {
       .sort((first, second) => first.order - second.order)
       .map(segment => ({
         heading: segment.heading,
-        paragraphs: segment.content.split(/\n{2,}/),
-        sourceIds: segment.sourceIds,
+        paragraphs: segment.content.split(/\n{2,}/).map((text, paragraphIndex) => ({
+          text,
+          sourceIds: segment.paragraphSourceIds?.[paragraphIndex] ?? segment.sourceIds,
+        })),
       }))
     : result?.draft.sections ?? [];
 
@@ -214,9 +216,13 @@ export default function CopyIntegrationPage() {
                     <article key={`${section.heading}-${index}`}>
                       <h3 className="text-[15px] font-bold text-[#2B2B29]">{section.heading}</h3>
                       <div className="mt-2 flex flex-col gap-2 text-[13.5px] leading-7 text-[#444]">
-                        {section.paragraphs.map((paragraph, paragraphIndex) => <p key={paragraphIndex}>{paragraph}</p>)}
+                        {section.paragraphs.map((paragraph, paragraphIndex) => (
+                          <div key={paragraphIndex}>
+                            <p>{paragraph.text}</p>
+                            <NoteSources sourceIds={paragraph.sourceIds} names={sourceNames} />
+                          </div>
+                        ))}
                       </div>
-                      <NoteSources sourceIds={section.sourceIds} names={sourceNames} />
                     </article>
                   ))}
                 </div>
