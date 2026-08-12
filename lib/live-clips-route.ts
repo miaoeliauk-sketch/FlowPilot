@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { StructuredDeepSeekError } from "./structured-deepseek";
-import { LIVE_CLIP_FAILURE_REASONS } from "./live-clips-types";
+import { LIVE_CLIP_FAILURE_REASON_LABELS, isLiveClipFailureReason } from "./live-clips-types";
 import type {
   LiveClipFailureCause,
   LiveClipFailureReason,
@@ -63,9 +63,7 @@ function lastFailureCode(error: StructuredDeepSeekError): string {
 function lastReasonCode(error: StructuredDeepSeekError): LiveClipFailureReason | null {
   for (let index = error.attemptDiagnostics.length - 1; index >= 0; index -= 1) {
     const code = error.attemptDiagnostics[index].reasonCode;
-    if (typeof code === "string" && LIVE_CLIP_FAILURE_REASONS.includes(code as LiveClipFailureReason)) {
-      return code as LiveClipFailureReason;
-    }
+    if (isLiveClipFailureReason(code)) return code;
   }
   return null;
 }
@@ -106,21 +104,13 @@ export function liveClipErrorResponse(
     AI_REQUEST_FAIL: "AI请求失败",
     MISSING_API_KEY: "未配置DeepSeek API Key",
   };
-  const reasonLabel: Partial<Record<LiveClipFailureReason, string>> = {
-    START_QUOTE_NOT_FOUND: "开始句无法在原文中定位",
-    END_QUOTE_NOT_FOUND: "结束句无法在原文中定位",
-    REMOVAL_QUOTE_NOT_FOUND: "删除片段无法在原文中定位",
-    PURPOSE_EVIDENCE_NOT_FOUND: "内容目的证据无法在切片原文中定位",
-    FIELD_INVALID: "AI返回字段不完整或不合法",
-    OUTPUT_TRUNCATED: "AI返回被截断",
-  };
   const status = causeCode === "MISSING_API_KEY" || error instanceof LiveClipRequestError
     ? 400
     : causeCode === "TIMEOUT"
       ? 504
       : 502;
   return NextResponse.json({
-    error: `${stageLabel}失败：${reasonCode ? reasonLabel[reasonCode] : causeLabel[causeCode]}`,
+    error: `${stageLabel}失败：${reasonCode ? LIVE_CLIP_FAILURE_REASON_LABELS[reasonCode] : causeLabel[causeCode]}`,
     stageCode,
     causeCode,
     reasonCode,

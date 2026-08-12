@@ -216,9 +216,30 @@ test("刷新后保留细分失败原因，单独重试只清除当前分块的�
         chunk("chunk-removal", 1, "REMOVAL_QUOTE_NOT_FOUND"),
         chunk("chunk-field", 2, "FIELD_INVALID"),
       ],
-      topicBlocks: [], clipCandidates: [], clipPlans: [],
+      topicBlocks: [{
+        id: "topic-unrelated", liveTranscriptId: transcript.id, title: "旧失败主题", summary: "旧摘要",
+        startTime: null, endTime: null, startParagraph: 2, endParagraph: 2,
+        keywords: ["第二段"], mainPoint: "旧观点", sourceChunkIds: ["chunk-field"],
+        candidateStatus: "failed", candidateError: "SCHEMA_FAIL", candidateErrorReason: "FIELD_INVALID",
+        createdAt: "2026-08-11T00:00:00.000Z",
+      }], clipCandidates: [], clipPlans: [],
     }));
-    globalThis.fetch = async () => new Promise<Response>(() => undefined);
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      if (url.includes("/api/live-clips/topics")) {
+        return new Response(JSON.stringify({
+          topics: [{
+            id: "topic-retried", liveTranscriptId: transcript.id, title: "新主题", summary: "摘要",
+            startTime: null, endTime: null, startParagraph: 1, endParagraph: 1,
+            keywords: ["第一段"], mainPoint: "观点", sourceChunkIds: ["chunk-removal"],
+            candidateStatus: "pending", candidateError: null, candidateErrorReason: null,
+            createdAt: "2026-08-11T00:00:00.000Z",
+          }],
+          removalSuggestions: [],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Promise<Response>(() => undefined);
+    };
 
     const { cleanup, fireEvent, render, waitFor, within } = await import("@testing-library/react");
     cleanupPage = cleanup;
@@ -235,6 +256,8 @@ test("刷新后保留细分失败原因，单独重试只清除当前分块的�
       const saved = JSON.parse(localStorage.getItem(LIVE_CLIP_STORAGE_KEY) ?? "{}") as LiveClipWorkspaceState;
       assert.equal(saved.transcriptChunks.find(item => item.id === "chunk-removal")?.errorReason, null);
       assert.equal(saved.transcriptChunks.find(item => item.id === "chunk-field")?.errorReason, "FIELD_INVALID");
+      assert.equal(saved.topicBlocks.find(item => item.id === "topic-unrelated")?.candidateErrorReason, "FIELD_INVALID");
+      assert.equal(saved.topicBlocks.find(item => item.id === "topic-unrelated")?.candidateStatus, "failed");
     });
   } finally {
     cleanupPage?.();

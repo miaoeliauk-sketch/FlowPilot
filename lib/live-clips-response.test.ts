@@ -334,8 +334,10 @@ test("候选原话追溯失败时返回稳定细分原因码", () => {
     [{ ...base, startQuote: "AI编造的开始句" }, "START_QUOTE_NOT_FOUND"],
     [{ ...base, endQuote: "AI编造的结束句" }, "END_QUOTE_NOT_FOUND"],
     [{ ...base, removeSuggestions: [{ paragraphNumber: 3, quote: "AI编造的删除片段", reason: "冗余" }] }, "REMOVAL_QUOTE_NOT_FOUND"],
+    [{ ...base, removeSuggestions: [{ paragraphNumber: 1, quote: "开场", reason: "冗余" }] }, "REMOVAL_QUOTE_NOT_FOUND"],
     [{ ...base, startQuote: "最大的误区", removeSuggestions: [{ paragraphNumber: 2, quote: "知识付费", reason: "冗余" }] }, "REMOVAL_QUOTE_NOT_FOUND"],
     [{ ...base, primaryPurposeEvidence: { paragraphNumber: 3, quote: "AI编造的目的证据" } }, "PURPOSE_EVIDENCE_NOT_FOUND"],
+    [{ ...base, primaryPurposeEvidence: { paragraphNumber: 1, quote: "开场" } }, "PURPOSE_EVIDENCE_NOT_FOUND"],
     [{ ...base, clipType: "tutorial" }, "FIELD_INVALID"],
   ] as const;
 

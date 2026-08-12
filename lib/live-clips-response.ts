@@ -124,7 +124,7 @@ function parseRemoval(
   const quote = stringValue(object.quote, `${label}.quote`, 500);
   const reason = stringValue(object.reason, `${label}.reason`, 300);
   if (paragraphNumber < allowedStart || paragraphNumber > allowedEnd) {
-    schemaFail(`${label}超出允许段落范围`);
+    schemaFail(`${label}超出允许段落范围`, "REMOVAL_QUOTE_NOT_FOUND");
   }
   if (!verifySourceQuote(paragraphs, paragraphNumber, quote)) {
     schemaFail(`${label}无法在原文中唯一定位`, "REMOVAL_QUOTE_NOT_FOUND");
@@ -211,7 +211,7 @@ function parsePurposeEvidence(
   const paragraphNumber = integerValue(object.paragraphNumber, `${label}.paragraphNumber`);
   const quote = stringValue(object.quote, `${label}.quote`, 500);
   if (paragraphNumber < clip.startParagraph || paragraphNumber > clip.endParagraph) {
-    schemaFail(`${label}超出切片段落范围`);
+    schemaFail(`${label}超出切片段落范围`, "PURPOSE_EVIDENCE_NOT_FOUND");
   }
   if (!verifySourceQuote(paragraphs, paragraphNumber, quote)) {
     schemaFail(`${label}无法在原文中唯一定位`, "PURPOSE_EVIDENCE_NOT_FOUND");

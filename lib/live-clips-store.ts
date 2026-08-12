@@ -1,7 +1,7 @@
 import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_STORAGE_KEY,
-  LIVE_CLIP_FAILURE_REASONS,
+  isLiveClipFailureReason,
   type ClipCandidate,
   type ClipPlan,
   type LiveClipWorkspaceState,
@@ -59,9 +59,7 @@ function legacyPurpose(value: unknown): ContentPurpose | null {
 }
 
 function legacyFailureReason(value: unknown): LiveClipFailureReason | null {
-  return typeof value === "string" && LIVE_CLIP_FAILURE_REASONS.includes(value as LiveClipFailureReason)
-    ? value as LiveClipFailureReason
-    : null;
+  return isLiveClipFailureReason(value) ? value : null;
 }
 
 function legacyPurposeEvidence(value: unknown): PurposeEvidence | null {

@@ -45,6 +45,19 @@ export const LIVE_CLIP_FAILURE_REASONS = [
 
 export type LiveClipFailureReason = typeof LIVE_CLIP_FAILURE_REASONS[number];
 
+export const LIVE_CLIP_FAILURE_REASON_LABELS: Record<LiveClipFailureReason, string> = {
+  START_QUOTE_NOT_FOUND: "开始句无法在原文中定位",
+  END_QUOTE_NOT_FOUND: "结束句无法在原文中定位",
+  REMOVAL_QUOTE_NOT_FOUND: "删除片段无法在原文中定位",
+  PURPOSE_EVIDENCE_NOT_FOUND: "内容目的证据无法在切片原文中定位",
+  FIELD_INVALID: "AI返回字段不完整或不合法",
+  OUTPUT_TRUNCATED: "AI返回被截断",
+};
+
+export function isLiveClipFailureReason(value: unknown): value is LiveClipFailureReason {
+  return typeof value === "string" && LIVE_CLIP_FAILURE_REASONS.includes(value as LiveClipFailureReason);
+}
+
 export interface TranscriptParagraph {
   paragraphNumber: number;
   text: string;

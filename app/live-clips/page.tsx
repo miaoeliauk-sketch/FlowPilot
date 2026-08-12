@@ -18,8 +18,9 @@ import {
 } from "@/lib/live-clips-transcript";
 import {
   CLIP_TYPE_LABELS,
-  LIVE_CLIP_FAILURE_REASONS,
+  LIVE_CLIP_FAILURE_REASON_LABELS,
   LIVE_CLIP_TYPES,
+  isLiveClipFailureReason,
   type ClipCandidate,
   type ClipRecommendation,
   type ClipType,
@@ -53,11 +54,7 @@ const FAILURE_LABELS: Record<LiveClipFailureCause, string> = {
 };
 
 const FAILURE_REASON_LABELS: Record<LiveClipFailureReason, string> = {
-  START_QUOTE_NOT_FOUND: "开始句无法在原文中定位",
-  END_QUOTE_NOT_FOUND: "结束句无法在原文中定位",
-  REMOVAL_QUOTE_NOT_FOUND: "删除片段无法在原文中定位",
-  PURPOSE_EVIDENCE_NOT_FOUND: "内容目的证据无法在切片原文中定位",
-  FIELD_INVALID: "AI返回字段不完整或不合法",
+  ...LIVE_CLIP_FAILURE_REASON_LABELS,
   OUTPUT_TRUNCATED: "AI返回被截断，同参数重试可能再次失败",
 };
 
@@ -109,10 +106,7 @@ function apiFailure(data: unknown, fallback: LiveClipFailureCause): LiveClipApiE
       error: typeof record.error === "string" ? record.error : "AI分析失败",
       stageCode: record.stageCode === "CLIP_ANALYSIS_FAIL" ? "CLIP_ANALYSIS_FAIL" : "TOPIC_ANALYSIS_FAIL",
       causeCode: typeof record.causeCode === "string" ? record.causeCode as LiveClipFailureCause : fallback,
-      reasonCode: typeof record.reasonCode === "string"
-        && LIVE_CLIP_FAILURE_REASONS.includes(record.reasonCode as LiveClipFailureReason)
-        ? record.reasonCode as LiveClipFailureReason
-        : null,
+      reasonCode: isLiveClipFailureReason(record.reasonCode) ? record.reasonCode : null,
     };
   }
   return { error: "AI分析失败", stageCode: "TOPIC_ANALYSIS_FAIL", causeCode: fallback, reasonCode: null };
@@ -380,6 +374,7 @@ export default function LiveClipsPage() {
       const topicsToRun = working.topicBlocks.filter(topic => (
         topic.liveTranscriptId === transcript.id
         && (topic.candidateStatus === "pending" || topic.candidateStatus === "failed")
+        && (!onlyChunkId || topic.sourceChunkIds.includes(onlyChunkId))
       ));
       for (let index = 0; index < topicsToRun.length; index += 2) {
         const batch = topicsToRun.slice(index, index + 2);
