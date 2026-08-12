@@ -47,7 +47,7 @@ test("用户导入无时间逐字稿后先保存原文，再进入AI分析且不
     localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
     localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
     localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
-    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+    const { cleanup, fireEvent, render, waitFor, within } = await import("@testing-library/react");
     cleanupPage = cleanup;
     const { IPProvider } = await import("./ip-context");
     const { default: LiveClipsPage } = await import("../app/live-clips/page");
@@ -121,7 +121,7 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
       throw new Error(`unexpected request: ${url}`);
     };
 
-    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+    const { cleanup, fireEvent, render, waitFor, within } = await import("@testing-library/react");
     cleanupPage = cleanup;
     const { IPProvider } = await import("./ip-context");
     const { default: LiveClipsPage } = await import("../app/live-clips/page");
@@ -145,7 +145,17 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     assert.ok(view.getByText("00:01:08 → 00:01:38"));
     fireEvent.click(view.getByRole("checkbox", { name: "选择切片：为什么知识付费不能只证明懂得多" }));
     fireEvent.click(view.getByRole("button", { name: "生成切片方案" }));
-    await waitFor(() => assert.ok(view.getByText("已生成1条正式切片方案")));
+    const actionBar = view.getByRole("button", { name: "生成切片方案" }).parentElement as HTMLElement;
+    await waitFor(() => assert.ok(within(actionBar).getByText("已生成1条方案")));
+    const plansRegion = view.getByRole("region", { name: "正式切片方案" });
+    assert.ok(within(plansRegion).getByText("正式切片方案（1）"));
+    assert.ok(within(plansRegion).getByText("为什么知识付费不能只证明懂得多"));
+    assert.ok(within(plansRegion).getByText("00:01:08 → 00:01:38"));
+    assert.ok(within(plansRegion).getByRole("button", { name: "复制方案原始稿" }));
+    assert.ok(within(plansRegion).getByRole("button", { name: "复制方案清洗稿" }));
+
+    fireEvent.click(view.getByRole("button", { name: "生成切片方案" }));
+    await waitFor(() => assert.ok(within(actionBar).getByText("所选候选已生成过方案")));
 
     const state = JSON.parse(localStorage.getItem(LIVE_CLIP_STORAGE_KEY) || "{}") as LiveClipWorkspaceState;
     assert.equal(state.clipCandidates.length, 1);

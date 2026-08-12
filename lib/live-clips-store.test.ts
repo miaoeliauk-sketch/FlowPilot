@@ -157,3 +157,25 @@ test("只有用户勾选的候选会生成正式ClipPlan，重复生成不会重
   assert.equal(second.clipPlans.length, 1);
   assert.equal(second.clipPlans[0].id, "plan-1");
 });
+
+test("浏览器不支持randomUUID时仍能生成唯一的正式切片方案编号", () => {
+  const originalCrypto = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) },
+  });
+  try {
+    const state = {
+      ...createEmptyLiveClipState(),
+      activeLiveTranscriptId: transcript.id,
+      liveTranscripts: [transcript],
+      clipCandidates: [candidate, { ...candidate, id: "candidate-2", topic: "另一个主题" }],
+    };
+    const result = createClipPlans(state, transcript.id, ["candidate-1", "candidate-2"]);
+    assert.equal(result.clipPlans.length, 2);
+    assert.notEqual(result.clipPlans[0].id, result.clipPlans[1].id);
+    assert.ok(result.clipPlans.every(plan => plan.id.length > 0));
+  } finally {
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: originalCrypto });
+  }
+});

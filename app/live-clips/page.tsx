@@ -25,6 +25,7 @@ import {
   type ClipRecommendation,
   type ClipType,
   type LiveClipApiError,
+  type ClipPlan,
   type LiveClipFailureCause,
   type LiveClipFailureReason,
   type LiveClipWorkspaceState,
@@ -160,6 +161,7 @@ export default function LiveClipsPage() {
   const [recommendationFilter, setRecommendationFilter] = useState<"全部" | ClipRecommendation>("全部");
   const [typeFilter, setTypeFilter] = useState<"全部" | ClipType>("全部");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [planFeedback, setPlanFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -209,6 +211,9 @@ export default function LiveClipsPage() {
     : [];
   const currentCandidates = currentTranscript
     ? workspace.clipCandidates.filter(candidate => candidate.liveTranscriptId === currentTranscript.id)
+    : [];
+  const currentPlans = currentTranscript
+    ? workspace.clipPlans.filter(plan => plan.liveTranscriptId === currentTranscript.id)
     : [];
 
   async function handleFile(file: File | undefined) {
@@ -450,12 +455,32 @@ export default function LiveClipsPage() {
   }
 
   function generatePlans() {
-    if (!currentTranscript || selectedIds.size === 0) { setError("请至少勾选一条切片候选"); return; }
-    const next = createClipPlans(workspaceRef.current, currentTranscript.id, [...selectedIds]);
-    if (!commit(next)) return;
-    const count = next.clipPlans.filter(plan => plan.liveTranscriptId === currentTranscript.id).length;
-    setNotice(`已生成${count}条正式切片方案`);
-    setError(null);
+    if (!currentTranscript || selectedIds.size === 0) {
+      setPlanFeedback("请至少勾选一条切片候选");
+      setError("请至少勾选一条切片候选");
+      return;
+    }
+    try {
+      const beforeCount = workspaceRef.current.clipPlans.length;
+      const next = createClipPlans(workspaceRef.current, currentTranscript.id, [...selectedIds]);
+      const createdCount = next.clipPlans.length - beforeCount;
+      if (!commit(next)) {
+        setPlanFeedback("生成失败，请查看页面错误提示");
+        return;
+      }
+      setPlanFeedback(createdCount > 0 ? `已生成${createdCount}条方案` : "所选候选已生成过方案");
+      setNotice(createdCount > 0 ? `已生成${createdCount}条正式切片方案` : null);
+      setError(null);
+    } catch {
+      setPlanFeedback("生成失败，请稍后重试");
+      setError("生成切片方案失败，请稍后重试");
+    }
+  }
+
+  function planPositionLabel(plan: ClipPlan) {
+    if (plan.startTime && plan.endTime) return `${plan.startTime} → ${plan.endTime}`;
+    if (plan.startTime) return `${plan.startTime}起 · 第${plan.startParagraph}段 → 第${plan.endParagraph}段`;
+    return `第${plan.startParagraph}段 → 第${plan.endParagraph}段`;
   }
 
   const visibleCandidates = useMemo(() => currentCandidates.filter(candidate => (
@@ -624,8 +649,31 @@ export default function LiveClipsPage() {
             <ClipCandidateCard key={candidate.id} candidate={candidate} selected={selectedIds.has(candidate.id)} onToggle={() => toggleSelected(candidate.id)} onCopy={copyText} />
           ))}
 
+          {currentPlans.length > 0 && (
+            <section aria-label="正式切片方案" className="rounded-[16px] border border-[#DAD9D4] bg-white p-5 shadow-sm">
+              <h2 className="text-[15px] font-bold text-[#1C1C1B]">正式切片方案（{currentPlans.length}）</h2>
+              <div className="mt-3 divide-y divide-[#F0EFE9]">
+                {currentPlans.map(plan => (
+                  <div key={plan.id} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+                    <div>
+                      <div className="text-[13px] font-semibold text-[#333]">{plan.topic}</div>
+                      <div className="mt-1 text-[11.5px] text-[#888]">{planPositionLabel(plan)}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button type="button" aria-label="复制方案原始稿" onClick={() => void copyText(plan.rawClipText, "方案原始稿")} className="rounded-[9px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">复制原始稿</button>
+                      <button type="button" aria-label="复制方案清洗稿" onClick={() => void copyText(plan.cleanedClipText, "方案清洗稿")} className="rounded-[9px] bg-[#EAF3DE] px-3 py-1.5 text-[11.5px] font-semibold text-[#3B6D11]">复制清洗稿</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           <div className="sticky bottom-4 z-10 flex items-center justify-between gap-3 rounded-[14px] border border-[#DAD9D4] bg-white/95 px-5 py-3 shadow-lg backdrop-blur">
-            <div className="text-[12.5px] text-[#555]">AI负责发现，人负责决定。已勾选<b className="mx-1 text-[#1C1C1B]">{selectedIds.size}</b>条。</div>
+            <div className="text-[12.5px] text-[#555]">
+              <div>AI负责发现，人负责决定。已勾选<b className="mx-1 text-[#1C1C1B]">{selectedIds.size}</b>条。</div>
+              {planFeedback && <div className="mt-1 font-semibold text-[#3B6D11]">{planFeedback}</div>}
+            </div>
             <button type="button" onClick={generatePlans} disabled={selectedIds.size === 0 || storageBlocked} className="rounded-[11px] bg-[#1C1C1B] px-6 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">生成切片方案</button>
           </div>
         </div>

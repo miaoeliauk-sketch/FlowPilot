@@ -150,6 +150,16 @@ interface CreatePlansOptions {
   now?: () => string;
 }
 
+function createLocalId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const randomPart = typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function"
+    ? Array.from(crypto.getRandomValues(new Uint32Array(2)), value => value.toString(36)).join("")
+    : Math.random().toString(36).slice(2, 12);
+  return `live-clip-plan-${Date.now().toString(36)}-${randomPart}`;
+}
+
 export function createClipPlans(
   state: LiveClipWorkspaceState,
   liveTranscriptId: string,
@@ -158,7 +168,7 @@ export function createClipPlans(
 ): LiveClipWorkspaceState {
   const transcript = state.liveTranscripts.find(item => item.id === liveTranscriptId);
   if (!transcript) return state;
-  const createId = options.createId ?? (() => crypto.randomUUID());
+  const createId = options.createId ?? createLocalId;
   const now = options.now ?? (() => new Date().toISOString());
   const selected = new Set(selectedCandidateIds);
   const existingCandidateIds = new Set(state.clipPlans.map(plan => plan.clipCandidateId));
