@@ -1,3 +1,4 @@
+import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_TYPES,
   type ClipCandidate,
@@ -5,6 +6,7 @@ import {
   type ClipRating,
   type ClipRecommendation,
   type ClipType,
+  type PurposeEvidence,
   type SourceRemovalSuggestion,
   type TopicBlock,
   type TranscriptChunk,
@@ -188,6 +190,67 @@ function parseDimensions(value: unknown, label: string): ClipDimensions {
   };
 }
 
+function parsePurposeEvidence(
+  value: unknown,
+  paragraphs: TranscriptParagraph[],
+  clip: {
+    startParagraph: number;
+    endParagraph: number;
+    startQuote: string;
+    endQuote: string;
+  },
+  label: string,
+): PurposeEvidence {
+  const object = objectValue(value, label);
+  const paragraphNumber = integerValue(object.paragraphNumber, `${label}.paragraphNumber`);
+  const quote = stringValue(object.quote, `${label}.quote`, 500);
+  if (paragraphNumber < clip.startParagraph || paragraphNumber > clip.endParagraph) {
+    schemaFail(`${label}超出切片段落范围`);
+  }
+  if (!verifySourceQuote(paragraphs, paragraphNumber, quote)) {
+    schemaFail(`${label}无法在原文中唯一定位`);
+  }
+  const paragraph = paragraphs.find(item => item.paragraphNumber === paragraphNumber)!;
+  const startIndex = paragraphNumber === clip.startParagraph
+    ? paragraph.text.indexOf(clip.startQuote)
+    : 0;
+  const endIndex = paragraphNumber === clip.endParagraph
+    ? paragraph.text.indexOf(clip.endQuote) + clip.endQuote.length
+    : paragraph.text.length;
+  const clippedParagraph = paragraph.text.slice(startIndex, endIndex);
+  const evidenceIndex = clippedParagraph.indexOf(quote);
+  if (evidenceIndex < 0 || clippedParagraph.indexOf(quote, evidenceIndex + quote.length) >= 0) {
+    schemaFail(`${label}无法在切片原始稿中唯一定位`);
+  }
+  return { paragraphNumber, quote };
+}
+
+const SPECIFIC_LIVE_TIME_PATTERNS = [
+  /\d{1,2}月\d{1,2}[日号](?:[^，。！？]{0,8}(?:上午|下午|晚上|晚间|中午|凌晨)?\d{1,2}(?:[:：点时]\d{0,2})?)?/,
+  /(?:今天|今日|明天|明晚|今晚|本周[一二三四五六日天]|周[一二三四五六日天])[^，。！？]{0,8}\d{1,2}(?:[:：点时]\d{0,2})?/,
+  /(?:上午|下午|晚上|晚间|中午|凌晨)\s*\d{1,2}(?:[:：点时]\d{0,2})?/,
+  /(?:[01]?\d|2[0-3])[:：][0-5]\d/,
+  /\d{1,2}点(?:\d{1,2}分)?[^，。！？]{0,6}(?:开播|直播|开始)/,
+];
+
+const SPECIFIC_EVENT_ADDRESS_PATTERNS = [
+  /(?:路|街|巷|大道|酒店|宾馆|大厦|中心|园区|商场|广场|写字楼)[^，。！？]{0,8}(?:\d+号|\d+楼|[一二三四五六七八九十]+楼|[A-Za-z]\d*座|[东西南北]门)/i,
+  /\d+号[^，。！？]{0,8}(?:\d+楼|[一二三四五六七八九十]+楼|[A-Za-z]\d*座|[东西南北]门)?/i,
+];
+
+export function containsSpecificLiveScheduleOrAddress(value: string) {
+  return [...SPECIFIC_LIVE_TIME_PATTERNS, ...SPECIFIC_EVENT_ADDRESS_PATTERNS]
+    .some(pattern => pattern.test(value));
+}
+
+function safePackagingSuggestions(value: unknown, label: string, count: number) {
+  const suggestions = stringArray(value, label, { min: count, max: count });
+  if (suggestions.some(containsSpecificLiveScheduleOrAddress)) {
+    schemaFail(`${label}不得包含具体直播时间或活动地址`);
+  }
+  return suggestions;
+}
+
 export function parseCandidateAnalysisResponse(content: string, context: CandidateResponseContext) {
   const root = objectValue(strictJSON(content), "根节点");
   const createId = context.createId ?? (() => crypto.randomUUID());
@@ -233,6 +296,34 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
     const clipType = enumValue(object.clipType, LIVE_CLIP_TYPES, `candidates[${index}].clipType`);
     const secondaryTags = stringArray(object.secondaryTags, `candidates[${index}].secondaryTags`, { max: 2 })
       .map((tag, tagIndex) => enumValue(tag, LIVE_CLIP_TYPES, `candidates[${index}].secondaryTags[${tagIndex}]`));
+    const primaryPurpose = enumValue(
+      object.primaryPurpose,
+      CONTENT_PURPOSES,
+      `candidates[${index}].primaryPurpose`,
+    ) as ContentPurpose;
+    const primaryPurposeEvidence = parsePurposeEvidence(
+      object.primaryPurposeEvidence,
+      context.paragraphs,
+      clipTextInput,
+      `candidates[${index}].primaryPurposeEvidence`,
+    );
+    const secondaryPurpose = object.secondaryPurpose === null
+      ? null
+      : enumValue(object.secondaryPurpose, CONTENT_PURPOSES, `candidates[${index}].secondaryPurpose`) as ContentPurpose;
+    const secondaryPurposeEvidence = object.secondaryPurposeEvidence === null
+      ? null
+      : parsePurposeEvidence(
+        object.secondaryPurposeEvidence,
+        context.paragraphs,
+        clipTextInput,
+        `candidates[${index}].secondaryPurposeEvidence`,
+      );
+    if ((secondaryPurpose === null) !== (secondaryPurposeEvidence === null)) {
+      schemaFail(`candidates[${index}]辅助目的与证据必须同时为空或同时提供`);
+    }
+    if (secondaryPurpose === primaryPurpose) {
+      schemaFail(`candidates[${index}]辅助目的不得与主要目的重复`);
+    }
 
     return {
       id: createId(),
@@ -244,6 +335,10 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
       recommendation: enumValue(object.recommendation, RECOMMENDATIONS, `candidates[${index}].recommendation`),
       dimensions: parseDimensions(object.dimensions, `candidates[${index}].dimensions`),
       recommendReason: stringValue(object.recommendReason, `candidates[${index}].recommendReason`, 800),
+      primaryPurpose,
+      primaryPurposeEvidence,
+      secondaryPurpose,
+      secondaryPurposeEvidence,
       startTime: location.startTime,
       endTime: location.endTime,
       startParagraph,
@@ -267,8 +362,8 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
           endTime: removalLocation.endTime,
         };
       }),
-      titleSuggestions: stringArray(object.titleSuggestions, `candidates[${index}].titleSuggestions`, { min: 3, max: 3 }),
-      coverSuggestions: stringArray(object.coverSuggestions, `candidates[${index}].coverSuggestions`, { min: 2, max: 2 }),
+      titleSuggestions: safePackagingSuggestions(object.titleSuggestions, `candidates[${index}].titleSuggestions`, 3),
+      coverSuggestions: safePackagingSuggestions(object.coverSuggestions, `candidates[${index}].coverSuggestions`, 2),
       createdAt: now(),
     } satisfies ClipCandidate;
   });

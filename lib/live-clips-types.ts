@@ -1,3 +1,5 @@
+import type { ContentPurpose } from "./content-purpose";
+
 export const LIVE_CLIP_STORAGE_KEY = "ipwr:liveClipWorkspaces:v1";
 
 export const LIVE_CLIP_TYPES = [
@@ -115,6 +117,11 @@ export interface ClipDimensions {
   ipFit: ClipRating;
 }
 
+export interface PurposeEvidence {
+  paragraphNumber: number;
+  quote: string;
+}
+
 export interface ClipCandidate {
   id: string;
   liveTranscriptId: string;
@@ -125,6 +132,10 @@ export interface ClipCandidate {
   recommendation: ClipRecommendation;
   dimensions: ClipDimensions;
   recommendReason: string;
+  primaryPurpose: ContentPurpose | null;
+  primaryPurposeEvidence: PurposeEvidence | null;
+  secondaryPurpose: ContentPurpose | null;
+  secondaryPurposeEvidence: PurposeEvidence | null;
   startTime: string | null;
   endTime: string | null;
   startParagraph: number;
@@ -150,6 +161,10 @@ export interface ClipPlan {
   topic: string;
   clipType: ClipType;
   recommendation: ClipRecommendation;
+  primaryPurpose: ContentPurpose | null;
+  primaryPurposeEvidence: PurposeEvidence | null;
+  secondaryPurpose: ContentPurpose | null;
+  secondaryPurposeEvidence: PurposeEvidence | null;
   startTime: string | null;
   endTime: string | null;
   startParagraph: number;

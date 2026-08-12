@@ -42,9 +42,20 @@ const DIMENSION_LABELS: Array<[keyof ClipCandidate["dimensions"], string]> = [
 ];
 
 export function formatClipCardForCopy(candidate: ClipCandidate) {
+  const purpose = candidate.primaryPurpose
+    ? `${candidate.primaryPurpose}${candidate.secondaryPurpose ? `（辅助：${candidate.secondaryPurpose}）` : ""}`
+    : "旧数据未判断";
+  const purposeEvidence = candidate.primaryPurposeEvidence
+    ? `第${candidate.primaryPurposeEvidence.paragraphNumber}段「${candidate.primaryPurposeEvidence.quote}」`
+    : "无";
+  const secondaryPurposeEvidence = candidate.secondaryPurpose && candidate.secondaryPurposeEvidence
+    ? `\n辅助目的${candidate.secondaryPurpose}：第${candidate.secondaryPurposeEvidence.paragraphNumber}段「${candidate.secondaryPurposeEvidence.quote}」`
+    : "";
   return [
     `【切片主题】\n${candidate.topic}`,
     `【切片类型】\n${CLIP_TYPE_LABELS[candidate.clipType]}`,
+    `【内容目的】\n${purpose}`,
+    `【目的证据】\n${purposeEvidence}${secondaryPurposeEvidence}`,
     `【推荐程度】\n${candidate.recommendation}`,
     `【原始位置】\n${positionLabel(candidate)}`,
     `【预计成片长度】\n${formatDuration(candidate)}`,
@@ -88,6 +99,8 @@ export default function ClipCandidateCard({
             {candidate.secondaryTags.map(tag => (
               <span key={tag} className="rounded-full bg-[#F2F1ED] px-2.5 py-1 text-[10.5px] text-[#888]">{CLIP_TYPE_LABELS[tag]}</span>
             ))}
+            {candidate.primaryPurpose && <span className="rounded-full bg-[#E9F0FF] px-2.5 py-1 text-[10.5px] font-bold text-[#315E9C]">目的：{candidate.primaryPurpose}</span>}
+            {candidate.secondaryPurpose && <span className="rounded-full bg-[#F2F1ED] px-2.5 py-1 text-[10.5px] text-[#777]">辅助：{candidate.secondaryPurpose}</span>}
           </div>
           <h2 className="mt-3 text-[18px] font-bold leading-7 text-[#1C1C1B]">{candidate.topic}</h2>
           <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-[12px] text-[#888]">
@@ -119,6 +132,22 @@ export default function ClipCandidateCard({
           <p className="mt-1.5 text-[13px] leading-6 text-[#315C10]">{candidate.recommendReason}</p>
         </section>
       </div>
+
+      <section className="mt-3 rounded-[12px] border border-[#DCE7F8] bg-[#F6F9FF] p-3.5">
+        <div className="text-[11px] font-bold text-[#56739A]">内容目的依据</div>
+        {candidate.primaryPurposeEvidence ? (
+          <p className="mt-1.5 text-[12.5px] leading-6 text-[#315E9C]">
+            {candidate.primaryPurpose}：第{candidate.primaryPurposeEvidence.paragraphNumber}段「{candidate.primaryPurposeEvidence.quote}」
+          </p>
+        ) : (
+          <p className="mt-1.5 text-[12.5px] text-[#888]">旧数据未进行内容目的判断。</p>
+        )}
+        {candidate.secondaryPurpose && candidate.secondaryPurposeEvidence && (
+          <p className="mt-1 text-[12.5px] leading-6 text-[#666]">
+            辅助目的{candidate.secondaryPurpose}：第{candidate.secondaryPurposeEvidence.paragraphNumber}段「{candidate.secondaryPurposeEvidence.quote}」
+          </p>
+        )}
+      </section>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <section className="rounded-[12px] border border-[#E5E4DE] p-3.5">

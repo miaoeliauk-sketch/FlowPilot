@@ -122,3 +122,34 @@ test("候选路由把空content明确映射为EMPTY_CONTENT", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("候选提示词要求内容目的有原文证据且不能因提到课程就判为成交转化", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed } = fixture();
+  const topic: TopicBlock = {
+    id: "topic-purpose", liveTranscriptId: "live-1", title: "知识付费建立的信任", summary: "摘要",
+    startTime: "00:01:08", endTime: "00:01:38", startParagraph: 2, endParagraph: 4,
+    keywords: ["课程", "信任"], mainPoint: "用户购买解决问题的能力。", sourceChunkIds: ["chunk-1"],
+    candidateStatus: "pending", candidateError: null, createdAt: "2026-08-11T00:00:00.000Z",
+  };
+  let sentBody = "";
+  globalThis.fetch = async (_input, init) => {
+    sentBody = String(init?.body ?? "");
+    return aiResponse(JSON.stringify({ candidates: [] }));
+  };
+  try {
+    const response = await postCandidates(new Request("http://localhost/api/live-clips/candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({ liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs }),
+    }) as never);
+    assert.equal(response.status, 200);
+    const request = JSON.parse(sentBody) as { messages: Array<{ content: string }> };
+    const promptText = request.messages.map(message => message.content).join("\n");
+    assert.ok(promptText.includes("仅仅提到课程、产品、价格或直播，不足以自动判定为成交转化或直播导流"));
+    assert.ok(promptText.includes("primaryPurposeEvidence"));
+    assert.ok(promptText.includes("标题和封面不得出现具体直播日期、钟点或活动地址"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

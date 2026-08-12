@@ -104,7 +104,11 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
           recommendation: "强烈建议切", dimensions: {
             completeness: "强", hookStrength: "强", pointClarity: "强", informationDensity: "强", tension: "中", ipFit: "强",
           },
-          recommendReason: "观点完整，有清晰反差。", startTime: "00:01:08", endTime: "00:01:38",
+          recommendReason: "观点完整，有清晰反差。", primaryPurpose: "信任建立",
+          primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+          secondaryPurpose: "流量增长",
+          secondaryPurposeEvidence: { paragraphNumber: 2, quote: "知识付费最大的误区" },
+          startTime: "00:01:08", endTime: "00:01:38",
           startParagraph: 2, endParagraph: 4, estimatedDurationSeconds: 30, durationBasis: "actual",
           corePoint: "用户购买的是解决问题的能力。", startQuote: "知识付费最大的误区", endQuote: "解决问题的信任。",
           rawClipText: "知识付费最大的误区，就是天天证明自己懂得多。\n用户真正购买的是解决具体问题的能力。\n所以内容建立的不是知识量，而是解决问题的信任。",
@@ -135,6 +139,9 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     fireEvent.click(await view.findByRole("button", { name: "开始AI分析" }));
 
     await waitFor(() => assert.ok(view.getByText("为什么知识付费不能只证明懂得多")));
+    assert.ok(view.getByText("目的：信任建立"));
+    assert.ok(view.getByText("辅助：流量增长"));
+    assert.ok(view.getByText(/信任建立：第4段/));
     assert.ok(view.getByText("00:01:08 → 00:01:38"));
     fireEvent.click(view.getByRole("checkbox", { name: "选择切片：为什么知识付费不能只证明懂得多" }));
     fireEvent.click(view.getByRole("button", { name: "生成切片方案" }));
@@ -145,6 +152,8 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     assert.equal(state.clipPlans.length, 1);
     assert.equal(state.clipPlans[0].clipCandidateId, "candidate-1");
     assert.equal(state.clipPlans[0].userAccepted, true);
+    assert.equal(state.clipPlans[0].primaryPurpose, "信任建立");
+    assert.equal(state.clipPlans[0].primaryPurposeEvidence?.quote, "解决问题的信任");
   } finally {
     cleanupPage?.();
     globalThis.fetch = originalFetch;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  containsSpecificLiveScheduleOrAddress,
   dedupeClipCandidates,
   LiveClipResponseError,
   parseCandidateAnalysisResponse,
@@ -120,6 +121,10 @@ test("候选的原始稿和清洗稿全部由原文位置及删除片段生成",
         ipFit: "强"
       },
       recommendReason: "观点完整，有清晰反差。",
+      primaryPurpose: "信任建立",
+      primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+      secondaryPurpose: "流量增长",
+      secondaryPurposeEvidence: { paragraphNumber: 2, quote: "知识付费最大的误区" },
       startParagraph: 2,
       endParagraph: 4,
       startQuote: "知识付费最大的误区",
@@ -144,6 +149,10 @@ test("候选的原始稿和清洗稿全部由原文位置及删除片段生成",
   assert.ok(candidate.rawClipText.endsWith("解决问题的信任。"));
   assert.ok(candidate.rawClipText.includes("就是天天"));
   assert.ok(!candidate.cleanedClipText.includes("就是天天"));
+  assert.equal(candidate.primaryPurpose, "信任建立");
+  assert.equal(candidate.primaryPurposeEvidence?.quote, "解决问题的信任");
+  assert.equal(candidate.secondaryPurpose, "流量增长");
+  assert.equal(candidate.secondaryPurposeEvidence?.quote, "知识付费最大的误区");
   assert.ok(parsed.paragraphs.some(paragraph => paragraph.text.includes(candidate.startQuote)));
   assert.ok(parsed.paragraphs.some(paragraph => paragraph.text.includes(candidate.endQuote)));
 
@@ -167,7 +176,9 @@ test("相同语气词出现在不同段落时，按段落身份分别清理", ()
     candidates: [{
       topic: "先问题后方法", clipType: "method", secondaryTags: [], recommendation: "可以考虑",
       dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "弱", ipFit: "强" },
-      recommendReason: "结构完整。", startParagraph: 1, endParagraph: 2,
+      recommendReason: "结构完整。", primaryPurpose: "信任建立",
+      primaryPurposeEvidence: { paragraphNumber: 1, quote: "第一段先讲问题" },
+      secondaryPurpose: null, secondaryPurposeEvidence: null, startParagraph: 1, endParagraph: 2,
       startQuote: "嗯第一段", endQuote: "再讲方法。", corePoint: "先讲问题再讲方法。",
       removeSuggestions: [
         { paragraphNumber: 1, quote: "嗯", reason: "语气词" },
@@ -188,6 +199,90 @@ test("相同语气词出现在不同段落时，按段落身份分别清理", ()
   assert.equal(result.candidates[0].cleanedClipText, "第一段先讲问题。\n第二段再讲方法。");
 });
 
+test("包装建议只拦截具体直播时间和活动地址，不误伤普通城市观点", () => {
+  assert.equal(containsSpecificLiveScheduleOrAddress("杭州适合创业的三个原因"), false);
+  assert.equal(containsSpecificLiveScheduleOrAddress("合肥投资的长期逻辑"), false);
+  assert.equal(containsSpecificLiveScheduleOrAddress("今晚8点直播讲城市选择"), true);
+  assert.equal(containsSpecificLiveScheduleOrAddress("8月15日晚上8点开播"), true);
+  assert.equal(containsSpecificLiveScheduleOrAddress("20:00开始直播"), true);
+  assert.equal(containsSpecificLiveScheduleOrAddress("8点开播"), true);
+  assert.equal(containsSpecificLiveScheduleOrAddress("活动在星河酒店3楼举行"), true);
+  assert.equal(containsSpecificLiveScheduleOrAddress("地址是中山路88号"), true);
+});
+
+test("候选拒绝带具体直播时间的标题和具体活动地址的封面", () => {
+  const { parsed } = topicFixture();
+  const topic = {
+    id: "topic-guard", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
+    startTime: null, endTime: null, startParagraph: 2, endParagraph: 4,
+    keywords: ["信任"], mainPoint: "观点", sourceChunkIds: ["c1"],
+    candidateStatus: "pending", candidateError: null, createdAt: NOW,
+  } satisfies TopicBlock;
+  const base = {
+    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
+    recommendReason: "理由", primaryPurpose: "信任建立",
+    primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+    secondaryPurpose: null, secondaryPurposeEvidence: null,
+    startParagraph: 2, endParagraph: 4, startQuote: "知识付费最大的误区", endQuote: "解决问题的信任。",
+    corePoint: "观点", removeSuggestions: [],
+    titleSuggestions: ["杭州适合创业", "城市选择逻辑", "今晚8点直播讲城市选择"],
+    coverSuggestions: ["城市选择", "去星河酒店3楼听分享"],
+  };
+
+  for (const candidate of [
+    { ...base, coverSuggestions: ["城市选择", "投资逻辑"] },
+    { ...base, titleSuggestions: ["杭州适合创业", "城市选择逻辑", "投资长期逻辑"] },
+  ]) {
+    assert.throws(
+      () => parseCandidateAnalysisResponse(JSON.stringify({ candidates: [candidate] }), {
+        liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs,
+      }),
+      (error: unknown) => error instanceof LiveClipResponseError && error.code === "SCHEMA_FAIL",
+    );
+  }
+});
+
+test("候选必须有一个主要目的及证据，辅助目的最多一个且不能与主要目的重复", () => {
+  const { parsed } = topicFixture();
+  const topic = {
+    id: "topic-purpose-contract", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
+    startTime: null, endTime: null, startParagraph: 2, endParagraph: 4,
+    keywords: ["信任"], mainPoint: "观点", sourceChunkIds: ["c1"],
+    candidateStatus: "pending", candidateError: null, createdAt: NOW,
+  } satisfies TopicBlock;
+  const base = {
+    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
+    recommendReason: "理由", primaryPurpose: "信任建立",
+    primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+    secondaryPurpose: null, secondaryPurposeEvidence: null,
+    startParagraph: 2, endParagraph: 4, startQuote: "知识付费最大的误区", endQuote: "解决问题的信任。",
+    corePoint: "观点", removeSuggestions: [],
+    titleSuggestions: ["标题一", "标题二", "标题三"], coverSuggestions: ["封面一", "封面二"],
+  };
+  const invalidCandidates = [
+    { ...base, primaryPurpose: undefined },
+    { ...base, primaryPurposeEvidence: { paragraphNumber: 4, quote: "AI编造的目的证据" } },
+    {
+      ...base,
+      startQuote: "最大的误区",
+      primaryPurposeEvidence: { paragraphNumber: 2, quote: "知识付费" },
+    },
+    { ...base, secondaryPurpose: "流量增长", secondaryPurposeEvidence: null },
+    { ...base, secondaryPurpose: "信任建立", secondaryPurposeEvidence: { paragraphNumber: 2, quote: "知识付费最大的误区" } },
+  ];
+
+  for (const candidate of invalidCandidates) {
+    assert.throws(
+      () => parseCandidateAnalysisResponse(JSON.stringify({ candidates: [candidate] }), {
+        liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs,
+      }),
+      (error: unknown) => error instanceof LiveClipResponseError && error.code === "SCHEMA_FAIL",
+    );
+  }
+});
+
 test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝", () => {
   const { parsed } = topicFixture();
   const topic = {
@@ -199,7 +294,9 @@ test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝
   const base = {
     topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
     dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
-    recommendReason: "理由", startParagraph: 2, endParagraph: 4,
+    recommendReason: "理由", primaryPurpose: "信任建立",
+    primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+    secondaryPurpose: null, secondaryPurposeEvidence: null, startParagraph: 2, endParagraph: 4,
     startQuote: "AI写出的漂亮开头", endQuote: "解决问题的信任。", corePoint: "观点",
     removeSuggestions: [], titleSuggestions: ["标题1", "标题2", "标题3"], coverSuggestions: ["封面1", "封面2"],
   };

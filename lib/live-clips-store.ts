@@ -1,7 +1,10 @@
+import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_STORAGE_KEY,
+  type ClipCandidate,
   type ClipPlan,
   type LiveClipWorkspaceState,
+  type PurposeEvidence,
 } from "./live-clips-types";
 
 export type LiveClipStorageErrorCode = "WRITE_FAILED" | "VERIFY_FAILED" | "CORRUPTED";
@@ -47,6 +50,54 @@ function isWorkspaceState(value: unknown): value is LiveClipWorkspaceState {
     && Array.isArray(record.clipPlans);
 }
 
+function legacyPurpose(value: unknown): ContentPurpose | null {
+  return typeof value === "string" && CONTENT_PURPOSES.includes(value as ContentPurpose)
+    ? value as ContentPurpose
+    : null;
+}
+
+function legacyPurposeEvidence(value: unknown): PurposeEvidence | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return typeof record.paragraphNumber === "number"
+    && Number.isInteger(record.paragraphNumber)
+    && record.paragraphNumber > 0
+    && typeof record.quote === "string"
+    && record.quote.trim().length > 0
+    ? { paragraphNumber: record.paragraphNumber, quote: record.quote }
+    : null;
+}
+
+function migratePurposePair(purposeValue: unknown, evidenceValue: unknown) {
+  const purpose = legacyPurpose(purposeValue);
+  const evidence = legacyPurposeEvidence(evidenceValue);
+  return purpose && evidence ? { purpose, evidence } : { purpose: null, evidence: null };
+}
+
+function migrateCandidatePurpose(candidate: ClipCandidate): ClipCandidate {
+  const primary = migratePurposePair(candidate.primaryPurpose, candidate.primaryPurposeEvidence);
+  const secondary = migratePurposePair(candidate.secondaryPurpose, candidate.secondaryPurposeEvidence);
+  return {
+    ...candidate,
+    primaryPurpose: primary.purpose,
+    primaryPurposeEvidence: primary.evidence,
+    secondaryPurpose: secondary.purpose,
+    secondaryPurposeEvidence: secondary.evidence,
+  };
+}
+
+function migratePlanPurpose(plan: ClipPlan): ClipPlan {
+  const primary = migratePurposePair(plan.primaryPurpose, plan.primaryPurposeEvidence);
+  const secondary = migratePurposePair(plan.secondaryPurpose, plan.secondaryPurposeEvidence);
+  return {
+    ...plan,
+    primaryPurpose: primary.purpose,
+    primaryPurposeEvidence: primary.evidence,
+    secondaryPurpose: secondary.purpose,
+    secondaryPurposeEvidence: secondary.evidence,
+  };
+}
+
 export function loadLiveClipState(storage: LiveClipStorageLike | null = defaultStorage()) {
   if (!storage) return createEmptyLiveClipState();
   const raw = storage.getItem(LIVE_CLIP_STORAGE_KEY);
@@ -54,7 +105,11 @@ export function loadLiveClipState(storage: LiveClipStorageLike | null = defaultS
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!isWorkspaceState(parsed)) throw new Error("invalid state");
-    return parsed;
+    return {
+      ...parsed,
+      clipCandidates: parsed.clipCandidates.map(migrateCandidatePurpose),
+      clipPlans: parsed.clipPlans.map(migratePlanPurpose),
+    };
   } catch {
     throw new LiveClipStorageError("CORRUPTED", "直播切片本地数据损坏，已停止读取以保护原始数据。");
   }
@@ -107,6 +162,10 @@ export function createClipPlans(
       topic: candidate.topic,
       clipType: candidate.clipType,
       recommendation: candidate.recommendation,
+      primaryPurpose: candidate.primaryPurpose,
+      primaryPurposeEvidence: candidate.primaryPurposeEvidence,
+      secondaryPurpose: candidate.secondaryPurpose,
+      secondaryPurposeEvidence: candidate.secondaryPurposeEvidence,
       startTime: candidate.startTime,
       endTime: candidate.endTime,
       startParagraph: candidate.startParagraph,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DEEPSEEK_MODEL } from "@/lib/deepseek";
+import { CONTENT_PURPOSES } from "@/lib/content-purpose";
 import { parseCandidateAnalysisResponse } from "@/lib/live-clips-response";
 import {
   LiveClipRequestError,
@@ -18,7 +19,10 @@ const SYSTEM_PROMPT = `你是直播短视频切片策划。你只负责发现直
 4. startQuote、endQuote和removeSuggestions.quote必须逐字存在于指定原文段落。
 5. 标题和封面可以包装，但不能把新写的话冒充主播原话。
 6. 只允许观点型、方法型、反常识型、案例型、问答型、故事型六类。
-7. 不输出爆款分、概率、预计播放量。宁可候选少，也不要凑数。`;
+7. 每条候选必须判断一个主要内容目的，只能从${CONTENT_PURPOSES.join("、")}中选择；最多再给一个不同的辅助目的，也可以不提供。
+8. 每个内容目的都必须附带一条逐字存在于该候选段落范围内的原文证据。不得根据整场直播背景判断；仅仅提到课程、产品、价格或直播，不足以自动判定为成交转化或直播导流。
+9. 标题和封面不得出现具体直播日期、钟点或活动地址，例如“今晚8点”“8月15日”“某酒店3楼”“某路88号”；普通城市观点如“杭州适合创业”不属于活动地址，可以保留。
+10. 不输出爆款分、概率、预计播放量。宁可候选少，也不要凑数。`;
 
 function prompt(input: {
   topic: TopicBlock;
@@ -63,6 +67,10 @@ ${input.paragraphsText}
         "ipFit": "强|中|弱"
       },
       "recommendReason": "可解释的推荐理由",
+      "primaryPurpose": "${CONTENT_PURPOSES.join("|")}",
+      "primaryPurposeEvidence": { "paragraphNumber": ${input.topic.startParagraph}, "quote": "支持主要目的判断的连续原话" },
+      "secondaryPurpose": null,
+      "secondaryPurposeEvidence": null,
       "startParagraph": ${input.topic.startParagraph},
       "endParagraph": ${input.topic.endParagraph},
       "startQuote": "建议开始段落中的连续原话",
@@ -140,7 +148,7 @@ export async function POST(request: NextRequest) {
       maxRetries: 1,
       buildParseRetryInstruction: code => (
         code === "JSON_PARSE_FAIL" || code === "SCHEMA_FAIL"
-          ? "上次输出不符合JSON或原话追溯要求。只返回规定JSON，所有quote必须逐字复制自指定段落，不得返回时间或正文。"
+          ? "上次输出不符合JSON、内容目的、包装安全或原话追溯要求。只返回规定JSON，所有quote必须逐字复制自指定段落；每条候选必须有一个主要目的及证据；辅助目的和证据必须同时为空或同时提供；标题封面不得出现具体直播时间或活动地址；不得返回时间或正文。"
           : null
       ),
     });

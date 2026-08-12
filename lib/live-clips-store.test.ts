@@ -31,7 +31,10 @@ const candidate: ClipCandidate = {
   id: "candidate-1", liveTranscriptId: "live-1", topicBlockId: "topic-1", topic: "主题",
   clipType: "opinion", secondaryTags: [], recommendation: "强烈建议切",
   dimensions: { completeness: "强", hookStrength: "强", pointClarity: "强", informationDensity: "强", tension: "中", ipFit: "强" },
-  recommendReason: "值得剪", startTime: null, endTime: null, startParagraph: 1, endParagraph: 1,
+  recommendReason: "值得剪", primaryPurpose: "信任建立",
+  primaryPurposeEvidence: { paragraphNumber: 1, quote: "原始逐字稿" },
+  secondaryPurpose: null, secondaryPurposeEvidence: null,
+  startTime: null, endTime: null, startParagraph: 1, endParagraph: 1,
   estimatedDurationSeconds: 20, durationBasis: "text-estimate", corePoint: "核心观点",
   startQuote: "原始", endQuote: "逐字稿", rawClipText: "原始逐字稿", cleanedClipText: "原始逐字稿",
   removeSuggestions: [], titleSuggestions: ["标题1", "标题2", "标题3"], coverSuggestions: ["封面1", "封面2"],
@@ -45,6 +48,37 @@ test("原始逐字稿状态写入后立即回读校验，并能完整恢复", ()
 
   assert.ok(storage.getItem(LIVE_CLIP_STORAGE_KEY)?.includes("原始逐字稿"));
   assert.deepEqual(loadLiveClipState(storage), state);
+});
+
+test("旧版候选缺少内容目的字段时仍可读取并安全补为空值", () => {
+  const storage = new MemoryStorage();
+  const legacyCandidate = { ...candidate } as Record<string, unknown>;
+  delete legacyCandidate.primaryPurpose;
+  delete legacyCandidate.primaryPurposeEvidence;
+  delete legacyCandidate.secondaryPurpose;
+  delete legacyCandidate.secondaryPurposeEvidence;
+  const partialCandidate = { ...candidate, id: "candidate-partial", primaryPurposeEvidence: undefined };
+  const legacyPlan = {
+    id: "plan-old", liveTranscriptId: "live-1", clipCandidateId: "candidate-1", ipId: "ip-1",
+    topic: "旧方案", clipType: "opinion", recommendation: "可以考虑", startTime: null, endTime: null,
+    startParagraph: 1, endParagraph: 1, corePoint: "旧观点", rawClipText: "原始逐字稿",
+    cleanedClipText: "原始逐字稿", removeSuggestions: [], titleSuggestions: ["旧标题"],
+    coverSuggestions: ["旧封面"], userAccepted: true, createdAt: "2026-08-11T00:00:00.000Z",
+  };
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+    ...createEmptyLiveClipState(),
+    clipCandidates: [legacyCandidate, partialCandidate],
+    clipPlans: [legacyPlan],
+  }));
+
+  const restored = loadLiveClipState(storage);
+  assert.equal(restored.clipCandidates[0].primaryPurpose, null);
+  assert.equal(restored.clipCandidates[0].primaryPurposeEvidence, null);
+  assert.equal(restored.clipCandidates[0].secondaryPurpose, null);
+  assert.equal(restored.clipCandidates[1].primaryPurpose, null);
+  assert.equal(restored.clipCandidates[1].primaryPurposeEvidence, null);
+  assert.equal(restored.clipPlans[0].primaryPurpose, null);
+  assert.equal(restored.clipPlans[0].secondaryPurposeEvidence, null);
 });
 
 test("浏览器拒绝写入时抛出明确错误，不伪装成保存成功", () => {
@@ -87,6 +121,8 @@ test("只有用户勾选的候选会生成正式ClipPlan，重复生成不会重
   assert.equal(first.clipPlans.length, 1);
   assert.equal(first.clipPlans[0].clipCandidateId, "candidate-1");
   assert.equal(first.clipPlans[0].ipId, "ip-1");
+  assert.equal(first.clipPlans[0].primaryPurpose, "信任建立");
+  assert.deepEqual(first.clipPlans[0].primaryPurposeEvidence, { paragraphNumber: 1, quote: "原始逐字稿" });
   assert.equal(second.clipPlans.length, 1);
   assert.equal(second.clipPlans[0].id, "plan-1");
 });
