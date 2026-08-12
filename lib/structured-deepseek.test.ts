@@ -316,6 +316,7 @@ test("records safe metadata for every failed structured response", async () => {
             attempt: 1,
             stage: "parse",
             failureCode: "OUTPUT_TRUNCATED",
+            reasonCode: "OUTPUT_TRUNCATED",
             responseChars: 10,
             finishReason: "length",
             promptTokens: 80,

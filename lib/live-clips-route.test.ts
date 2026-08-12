@@ -65,6 +65,44 @@ test("即使JSON可解析，finish_reason=length也明确返回TRUNCATED", async
     assert.equal(response.status, 502);
     assert.equal(body.stageCode, "TOPIC_ANALYSIS_FAIL");
     assert.equal(body.causeCode, "TRUNCATED");
+    assert.equal(body.reasonCode, "OUTPUT_TRUNCATED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("候选接口安全透传开始句无法定位的稳定原因码", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed } = fixture();
+  const topic: TopicBlock = {
+    id: "topic-reason", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
+    startTime: null, endTime: null, startParagraph: 2, endParagraph: 4,
+    keywords: ["信任"], mainPoint: "观点", sourceChunkIds: ["chunk-1"],
+    candidateStatus: "pending", candidateError: null, createdAt: "2026-08-11T00:00:00.000Z",
+  };
+  const invalidCandidate = {
+    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
+    recommendReason: "理由", primaryPurpose: "信任建立",
+    primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+    secondaryPurpose: null, secondaryPurposeEvidence: null,
+    startParagraph: 2, endParagraph: 4, startQuote: "AI编造的开始句", endQuote: "解决问题的信任。",
+    corePoint: "观点", removeSuggestions: [],
+    titleSuggestions: ["标题一", "标题二", "标题三"], coverSuggestions: ["封面一", "封面二"],
+  };
+  globalThis.fetch = async () => aiResponse(JSON.stringify({ candidates: [invalidCandidate] }));
+  try {
+    const response = await postCandidates(new Request("http://localhost/api/live-clips/candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({ liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.causeCode, "SCHEMA_FAIL");
+    assert.equal(body.reasonCode, "START_QUOTE_NOT_FOUND");
+    assert.equal(body.error, "切片识别失败：开始句无法在原文中定位");
+    assert.equal(JSON.stringify(body).includes("AI编造的开始句"), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

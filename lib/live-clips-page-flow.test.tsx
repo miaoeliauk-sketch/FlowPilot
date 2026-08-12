@@ -183,3 +183,62 @@ test("本地直播切片数据损坏时页面进入保护状态且不允许覆�
     restore();
   }
 });
+
+test("刷新后保留细分失败原因，单独重试只清除当前分块的旧原因", async () => {
+  const restore = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  try {
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    const transcript = {
+      id: "live-reasons", title: "失败原因测试", ipId: ip.id, platform: "抖音",
+      rawTranscript: "第一段。\n第二段。", cleanedTranscript: "第一段。\n第二段。", hasTimecode: false,
+      sourceType: "paste", targetDuration: "1—3分钟", preferredClipTypes: [],
+      paragraphs: [1, 2].map(paragraphNumber => ({
+        paragraphNumber, text: `第${paragraphNumber}段。`, rawLine: `第${paragraphNumber}段。`,
+        startOffset: 0, endOffset: 4, startTime: null, endTime: null, startSeconds: null, endSeconds: null,
+      })),
+      analysisStatus: "partial", createdAt: "2026-08-11T00:00:00.000Z", updatedAt: "2026-08-11T00:00:00.000Z",
+    };
+    const chunk = (id: string, paragraphNumber: number, errorReason: string) => ({
+      id, liveTranscriptId: transcript.id, paragraphNumbers: [paragraphNumber],
+      ownedStartParagraph: paragraphNumber, ownedEndParagraph: paragraphNumber,
+      startParagraph: paragraphNumber, endParagraph: paragraphNumber,
+      startTime: null, endTime: null, text: `[P${paragraphNumber}] 第${paragraphNumber}段。`,
+      status: "failed", errorStage: "TOPIC_ANALYSIS_FAIL", errorCause: "SCHEMA_FAIL", errorReason,
+      removalSuggestions: [],
+    });
+    localStorage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+      version: 1, activeLiveTranscriptId: transcript.id, liveTranscripts: [transcript],
+      transcriptChunks: [
+        chunk("chunk-removal", 1, "REMOVAL_QUOTE_NOT_FOUND"),
+        chunk("chunk-field", 2, "FIELD_INVALID"),
+      ],
+      topicBlocks: [], clipCandidates: [], clipPlans: [],
+    }));
+    globalThis.fetch = async () => new Promise<Response>(() => undefined);
+
+    const { cleanup, fireEvent, render, waitFor, within } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const { IPProvider } = await import("./ip-context");
+    const { default: LiveClipsPage } = await import("../app/live-clips/page");
+    const view = render(<IPProvider><LiveClipsPage /></IPProvider>);
+
+    const firstRow = (await view.findByText("分块1 · 第1—1段")).closest("div.flex.items-center.justify-between") as HTMLElement;
+    assert.ok(view.getByText("主题识别失败：删除片段无法在原文中定位"));
+    assert.ok(view.getByText("主题识别失败：AI返回字段不完整或不合法"));
+    fireEvent.click(within(firstRow).getByRole("button", { name: "重试" }));
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(LIVE_CLIP_STORAGE_KEY) ?? "{}") as LiveClipWorkspaceState;
+      assert.equal(saved.transcriptChunks.find(item => item.id === "chunk-removal")?.errorReason, null);
+      assert.equal(saved.transcriptChunks.find(item => item.id === "chunk-field")?.errorReason, "FIELD_INVALID");
+    });
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restore();
+  }
+});

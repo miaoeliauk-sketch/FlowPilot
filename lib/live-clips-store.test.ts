@@ -81,6 +81,37 @@ test("旧版候选缺少内容目的字段时仍可读取并安全补为空值",
   assert.equal(restored.clipPlans[0].secondaryPurposeEvidence, null);
 });
 
+test("旧版分块和主题缺少细分原因时补为null，已保存原因刷新后保留", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+    ...createEmptyLiveClipState(),
+    transcriptChunks: [{
+      id: "chunk-old", liveTranscriptId: "live-1", paragraphNumbers: [1],
+      ownedStartParagraph: 1, ownedEndParagraph: 1, startParagraph: 1, endParagraph: 1,
+      startTime: null, endTime: null, text: "原文", status: "failed",
+      errorStage: "TOPIC_ANALYSIS_FAIL", errorCause: "SCHEMA_FAIL", removalSuggestions: [],
+    }],
+    topicBlocks: [{
+      id: "topic-reason", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
+      startTime: null, endTime: null, startParagraph: 1, endParagraph: 1,
+      keywords: ["原文"], mainPoint: "观点", sourceChunkIds: ["chunk-old"],
+      candidateStatus: "failed", candidateError: "SCHEMA_FAIL",
+      candidateErrorReason: "START_QUOTE_NOT_FOUND", createdAt: "2026-08-11T00:00:00.000Z",
+    }, {
+      id: "topic-invalid-reason", liveTranscriptId: "live-1", title: "主题2", summary: "摘要2",
+      startTime: null, endTime: null, startParagraph: 1, endParagraph: 1,
+      keywords: ["原文"], mainPoint: "观点2", sourceChunkIds: ["chunk-old"],
+      candidateStatus: "failed", candidateError: "SCHEMA_FAIL",
+      candidateErrorReason: "UNKNOWN_REASON", createdAt: "2026-08-11T00:00:00.000Z",
+    }],
+  }));
+
+  const restored = loadLiveClipState(storage);
+  assert.equal(restored.transcriptChunks[0].errorReason, null);
+  assert.equal(restored.topicBlocks[0].candidateErrorReason, "START_QUOTE_NOT_FOUND");
+  assert.equal(restored.topicBlocks[1].candidateErrorReason, null);
+});
+
 test("浏览器拒绝写入时抛出明确错误，不伪装成保存成功", () => {
   const storage = {
     getItem: () => null,

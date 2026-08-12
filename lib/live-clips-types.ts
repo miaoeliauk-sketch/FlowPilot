@@ -34,6 +34,17 @@ export type LiveClipFailureCause =
   | "AI_REQUEST_FAIL"
   | "MISSING_API_KEY";
 
+export const LIVE_CLIP_FAILURE_REASONS = [
+  "START_QUOTE_NOT_FOUND",
+  "END_QUOTE_NOT_FOUND",
+  "REMOVAL_QUOTE_NOT_FOUND",
+  "PURPOSE_EVIDENCE_NOT_FOUND",
+  "FIELD_INVALID",
+  "OUTPUT_TRUNCATED",
+] as const;
+
+export type LiveClipFailureReason = typeof LIVE_CLIP_FAILURE_REASONS[number];
+
 export interface TranscriptParagraph {
   paragraphNumber: number;
   text: string;
@@ -71,6 +82,7 @@ export interface TranscriptChunk {
   status: AnalysisProgress;
   errorStage: LiveClipStageCode | null;
   errorCause: LiveClipFailureCause | null;
+  errorReason?: LiveClipFailureReason | null;
   removalSuggestions: SourceRemovalSuggestion[];
 }
 
@@ -105,6 +117,7 @@ export interface TopicBlock {
   sourceChunkIds: string[];
   candidateStatus: AnalysisProgress;
   candidateError: LiveClipFailureCause | null;
+  candidateErrorReason?: LiveClipFailureReason | null;
   createdAt: string;
 }
 
@@ -193,6 +206,7 @@ export interface LiveClipApiError {
   error: string;
   stageCode: LiveClipStageCode;
   causeCode: LiveClipFailureCause;
+  reasonCode?: LiveClipFailureReason | null;
   diagnosticId?: string;
 }
 

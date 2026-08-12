@@ -18,12 +18,14 @@ import {
 } from "@/lib/live-clips-transcript";
 import {
   CLIP_TYPE_LABELS,
+  LIVE_CLIP_FAILURE_REASONS,
   LIVE_CLIP_TYPES,
   type ClipCandidate,
   type ClipRecommendation,
   type ClipType,
   type LiveClipApiError,
   type LiveClipFailureCause,
+  type LiveClipFailureReason,
   type LiveClipWorkspaceState,
   type LivePlatform,
   type LiveTranscript,
@@ -49,6 +51,19 @@ const FAILURE_LABELS: Record<LiveClipFailureCause, string> = {
   AI_REQUEST_FAIL: "AI请求失败",
   MISSING_API_KEY: "未配置DeepSeek API Key",
 };
+
+const FAILURE_REASON_LABELS: Record<LiveClipFailureReason, string> = {
+  START_QUOTE_NOT_FOUND: "开始句无法在原文中定位",
+  END_QUOTE_NOT_FOUND: "结束句无法在原文中定位",
+  REMOVAL_QUOTE_NOT_FOUND: "删除片段无法在原文中定位",
+  PURPOSE_EVIDENCE_NOT_FOUND: "内容目的证据无法在切片原文中定位",
+  FIELD_INVALID: "AI返回字段不完整或不合法",
+  OUTPUT_TRUNCATED: "AI返回被截断，同参数重试可能再次失败",
+};
+
+function failureLabel(cause: LiveClipFailureCause, reason?: LiveClipFailureReason | null) {
+  return reason ? FAILURE_REASON_LABELS[reason] : FAILURE_LABELS[cause];
+}
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <div className={`rounded-[16px] border border-[#E5E4DE] bg-white p-5 shadow-sm ${className}`}>{children}</div>;
@@ -94,9 +109,13 @@ function apiFailure(data: unknown, fallback: LiveClipFailureCause): LiveClipApiE
       error: typeof record.error === "string" ? record.error : "AI分析失败",
       stageCode: record.stageCode === "CLIP_ANALYSIS_FAIL" ? "CLIP_ANALYSIS_FAIL" : "TOPIC_ANALYSIS_FAIL",
       causeCode: typeof record.causeCode === "string" ? record.causeCode as LiveClipFailureCause : fallback,
+      reasonCode: typeof record.reasonCode === "string"
+        && LIVE_CLIP_FAILURE_REASONS.includes(record.reasonCode as LiveClipFailureReason)
+        ? record.reasonCode as LiveClipFailureReason
+        : null,
     };
   }
-  return { error: "AI分析失败", stageCode: "TOPIC_ANALYSIS_FAIL", causeCode: fallback };
+  return { error: "AI分析失败", stageCode: "TOPIC_ANALYSIS_FAIL", causeCode: fallback, reasonCode: null };
 }
 
 function paragraphsNearRange(paragraphs: TranscriptParagraph[], start: number, end: number) {
@@ -318,7 +337,7 @@ export default function LiveClipsPage() {
         working = {
           ...working,
           transcriptChunks: working.transcriptChunks.map(chunk => batch.some(item => item.id === chunk.id)
-            ? { ...chunk, status: "analyzing", errorStage: null, errorCause: null }
+            ? { ...chunk, status: "analyzing", errorStage: null, errorCause: null, errorReason: null }
             : chunk),
         };
         if (!commit(working)) throw new LiveClipStorageError("WRITE_FAILED", "分析进度保存失败，已停止继续分析。");
@@ -331,7 +350,7 @@ export default function LiveClipsPage() {
         for (const outcome of outcomes) {
           if (outcome.result) {
             transcriptChunks = transcriptChunks.map(chunk => chunk.id === outcome.chunk.id ? {
-              ...chunk, status: "completed", errorStage: null, errorCause: null,
+              ...chunk, status: "completed", errorStage: null, errorCause: null, errorReason: null,
               removalSuggestions: outcome.result!.removalSuggestions,
             } : chunk);
             topicBlocks = [...topicBlocks, ...outcome.result.topics];
@@ -339,6 +358,7 @@ export default function LiveClipsPage() {
             transcriptChunks = transcriptChunks.map(chunk => chunk.id === outcome.chunk.id ? {
               ...chunk, status: "failed", errorStage: "TOPIC_ANALYSIS_FAIL",
               errorCause: outcome.failure?.causeCode ?? "AI_REQUEST_FAIL",
+              errorReason: outcome.failure?.reasonCode ?? null,
             } : chunk);
           }
         }
@@ -366,7 +386,7 @@ export default function LiveClipsPage() {
         working = {
           ...working,
           topicBlocks: working.topicBlocks.map(topic => batch.some(item => item.id === topic.id)
-            ? { ...topic, candidateStatus: "analyzing", candidateError: null }
+            ? { ...topic, candidateStatus: "analyzing", candidateError: null, candidateErrorReason: null }
             : topic),
         };
         if (!commit(working)) throw new LiveClipStorageError("WRITE_FAILED", "分析进度保存失败，已停止继续分析。");
@@ -379,7 +399,7 @@ export default function LiveClipsPage() {
         for (const outcome of outcomes) {
           if (outcome.result) {
             topicBlocks = topicBlocks.map(topic => topic.id === outcome.topic.id
-              ? { ...topic, candidateStatus: "completed", candidateError: null }
+              ? { ...topic, candidateStatus: "completed", candidateError: null, candidateErrorReason: null }
               : topic);
             candidates = [
               ...candidates.filter(candidate => candidate.topicBlockId !== outcome.topic.id),
@@ -387,7 +407,12 @@ export default function LiveClipsPage() {
             ];
           } else {
             topicBlocks = topicBlocks.map(topic => topic.id === outcome.topic.id
-              ? { ...topic, candidateStatus: "failed", candidateError: outcome.failure?.causeCode ?? "AI_REQUEST_FAIL" }
+              ? {
+                ...topic,
+                candidateStatus: "failed",
+                candidateError: outcome.failure?.causeCode ?? "AI_REQUEST_FAIL",
+                candidateErrorReason: outcome.failure?.reasonCode ?? null,
+              }
               : topic);
           }
         }
@@ -540,7 +565,7 @@ export default function LiveClipsPage() {
                   <div key={chunk.id} className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F7F6F2] px-3 py-2.5">
                     <div className="min-w-0">
                       <div className="text-[12px] font-semibold text-[#555]">分块{index + 1} · 第{chunk.ownedStartParagraph}—{chunk.ownedEndParagraph}段</div>
-                      {chunk.errorCause && <div className="mt-0.5 text-[11px] text-[#A32D2D]">主题识别失败：{FAILURE_LABELS[chunk.errorCause]}</div>}
+                      {chunk.errorCause && <div className="mt-0.5 text-[11px] text-[#A32D2D]">主题识别失败：{failureLabel(chunk.errorCause, chunk.errorReason)}</div>}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] font-bold" style={{ color: chunk.status === "completed" ? "#639922" : chunk.status === "failed" ? "#A32D2D" : "#999" }}>{chunk.status === "pending" ? "待分析" : chunk.status === "analyzing" ? "分析中" : chunk.status === "completed" ? "已完成" : "失败"}</span>
@@ -561,7 +586,7 @@ export default function LiveClipsPage() {
                         <span className="shrink-0 text-[10.5px] font-bold" style={{ color: topic.candidateStatus === "completed" ? "#639922" : topic.candidateStatus === "failed" ? "#A32D2D" : "#999" }}>{topic.candidateStatus === "pending" ? "待发现切片" : topic.candidateStatus === "analyzing" ? "发现中" : topic.candidateStatus === "completed" ? "已完成" : "失败"}</span>
                       </div>
                       <p className="mt-1 text-[11.5px] leading-5 text-[#888]">第{topic.startParagraph}—{topic.endParagraph}段 · {topic.summary}</p>
-                      {topic.candidateError && <p className="mt-1 text-[11px] text-[#A32D2D]">切片识别失败：{FAILURE_LABELS[topic.candidateError]}</p>}
+                      {topic.candidateError && <p className="mt-1 text-[11px] text-[#A32D2D]">切片识别失败：{failureLabel(topic.candidateError, topic.candidateErrorReason)}</p>}
                     </div>
                   ))}
                 </div>

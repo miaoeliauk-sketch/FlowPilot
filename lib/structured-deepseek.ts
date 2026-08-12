@@ -29,6 +29,7 @@ export interface StructuredDeepSeekAttemptDiagnostic {
   attempt: number;
   stage: StructuredDeepSeekErrorStage | "success";
   failureCode?: string;
+  reasonCode?: string;
   responseChars: number | null;
   finishReason: string | null;
   promptTokens?: number;
@@ -117,7 +118,7 @@ function safeDiagnosticNumber(value: unknown): number | undefined {
 function parseFailureDiagnostic(
   error: unknown,
 ): Pick<StructuredDeepSeekAttemptDiagnostic,
-  "failureCode" | "itemCount" | "itemIndex" | "fieldCount"> {
+  "failureCode" | "reasonCode" | "itemCount" | "itemIndex" | "fieldCount"> {
   const source = error && typeof error === "object"
     ? error as StructuredParseDiagnosticSource
     : {};
@@ -125,9 +126,11 @@ function parseFailureDiagnostic(
     ? source.diagnosticDetails as Record<string, unknown>
     : {};
   const diagnostic: Pick<StructuredDeepSeekAttemptDiagnostic,
-    "failureCode" | "itemCount" | "itemIndex" | "fieldCount"> = {
+    "failureCode" | "reasonCode" | "itemCount" | "itemIndex" | "fieldCount"> = {
     failureCode: safeFailureCode(source.diagnosticCode, "PARSE_FAILED"),
   };
+  const reasonCode = safeFailureCode(details.reasonCode, "");
+  if (reasonCode) diagnostic.reasonCode = reasonCode;
   const itemCount = safeDiagnosticNumber(details.itemCount);
   const itemIndex = safeDiagnosticNumber(details.itemIndex);
   const fieldCount = safeDiagnosticNumber(details.fieldCount);
@@ -240,6 +243,7 @@ export async function callStructuredDeepSeek<T>(
       const parseDiagnostic = parseFailureDiagnostic(error);
       if (responseMeta.finishReason === "length") {
         parseDiagnostic.failureCode = "OUTPUT_TRUNCATED";
+        parseDiagnostic.reasonCode = "OUTPUT_TRUNCATED";
       }
       const failureCode = parseDiagnostic.failureCode ?? "PARSE_FAILED";
       parseRetryInstruction = attempt < totalAttempts

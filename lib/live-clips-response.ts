@@ -6,6 +6,7 @@ import {
   type ClipRating,
   type ClipRecommendation,
   type ClipType,
+  type LiveClipFailureReason,
   type PurposeEvidence,
   type SourceRemovalSuggestion,
   type TopicBlock,
@@ -56,8 +57,12 @@ interface CandidateResponseContext {
   now?: NowFactory;
 }
 
-function schemaFail(message: string, details: Record<string, unknown> = {}): never {
-  throw new LiveClipResponseError("SCHEMA_FAIL", message, details);
+function schemaFail(
+  message: string,
+  reasonCode: LiveClipFailureReason = "FIELD_INVALID",
+  details: Record<string, unknown> = {},
+): never {
+  throw new LiveClipResponseError("SCHEMA_FAIL", message, { ...details, reasonCode });
 }
 
 function strictJSON(content: string): unknown {
@@ -122,7 +127,7 @@ function parseRemoval(
     schemaFail(`${label}超出允许段落范围`);
   }
   if (!verifySourceQuote(paragraphs, paragraphNumber, quote)) {
-    schemaFail(`${label}无法在原文中唯一定位`);
+    schemaFail(`${label}无法在原文中唯一定位`, "REMOVAL_QUOTE_NOT_FOUND");
   }
   return { paragraphNumber, quote, reason };
 }
@@ -168,6 +173,7 @@ export function parseTopicAnalysisResponse(content: string, context: TopicRespon
       sourceChunkIds: [context.chunk.id],
       candidateStatus: "pending" as const,
       candidateError: null,
+      candidateErrorReason: null,
       createdAt: now(),
     } satisfies TopicBlock;
   }).filter((topic): topic is TopicBlock => topic !== null);
@@ -208,7 +214,7 @@ function parsePurposeEvidence(
     schemaFail(`${label}超出切片段落范围`);
   }
   if (!verifySourceQuote(paragraphs, paragraphNumber, quote)) {
-    schemaFail(`${label}无法在原文中唯一定位`);
+    schemaFail(`${label}无法在原文中唯一定位`, "PURPOSE_EVIDENCE_NOT_FOUND");
   }
   const paragraph = paragraphs.find(item => item.paragraphNumber === paragraphNumber)!;
   const startIndex = paragraphNumber === clip.startParagraph
@@ -220,7 +226,7 @@ function parsePurposeEvidence(
   const clippedParagraph = paragraph.text.slice(startIndex, endIndex);
   const evidenceIndex = clippedParagraph.indexOf(quote);
   if (evidenceIndex < 0 || clippedParagraph.indexOf(quote, evidenceIndex + quote.length) >= 0) {
-    schemaFail(`${label}无法在切片原始稿中唯一定位`);
+    schemaFail(`${label}无法在切片原始稿中唯一定位`, "PURPOSE_EVIDENCE_NOT_FOUND");
   }
   return { paragraphNumber, quote };
 }
@@ -271,6 +277,14 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
     }
     const startQuote = stringValue(object.startQuote, `candidates[${index}].startQuote`, 500);
     const endQuote = stringValue(object.endQuote, `candidates[${index}].endQuote`, 500);
+    const startParagraphSource = context.paragraphs.find(paragraph => paragraph.paragraphNumber === startParagraph);
+    const endParagraphSource = context.paragraphs.find(paragraph => paragraph.paragraphNumber === endParagraph);
+    if (!startParagraphSource || !verifySourceQuote(context.paragraphs, startParagraph, startQuote)) {
+      schemaFail("建议开始句无法在原文中唯一定位", "START_QUOTE_NOT_FOUND");
+    }
+    if (!endParagraphSource || !verifySourceQuote(context.paragraphs, endParagraph, endQuote)) {
+      schemaFail("建议结束句无法在原文中唯一定位", "END_QUOTE_NOT_FOUND");
+    }
     const clipTextInput = { startParagraph, endParagraph, startQuote, endQuote };
     let rawClipText: string;
     try {
@@ -290,7 +304,10 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
     try {
       cleanedClipText = extractCleanedClipText(context.paragraphs, clipTextInput, removals);
     } catch (error) {
-      schemaFail(error instanceof Error ? error.message : "删除建议无法在切片原文中定位");
+      schemaFail(
+        error instanceof Error ? error.message : "删除建议无法在切片原文中定位",
+        "REMOVAL_QUOTE_NOT_FOUND",
+      );
     }
     const location = deriveSourceLocation(context.paragraphs, startParagraph, endParagraph);
     const clipType = enumValue(object.clipType, LIVE_CLIP_TYPES, `candidates[${index}].clipType`);

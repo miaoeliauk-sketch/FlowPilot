@@ -264,6 +264,7 @@ export function buildTranscriptChunks(
       status: "pending" as const,
       errorStage: null,
       errorCause: null,
+      errorReason: null,
       removalSuggestions: [],
     };
   });
@@ -431,6 +432,7 @@ function mergeTopicPair(left: TopicBlock, right: TopicBlock): TopicBlock {
     sourceChunkIds: Array.from(new Set([...left.sourceChunkIds, ...right.sourceChunkIds])),
     candidateStatus: "pending",
     candidateError: null,
+    candidateErrorReason: null,
   };
 }
 

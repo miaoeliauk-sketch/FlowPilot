@@ -311,3 +311,42 @@ test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝
     );
   }
 });
+
+test("候选原话追溯失败时返回稳定细分原因码", () => {
+  const { parsed } = topicFixture();
+  const topic = {
+    id: "topic-reason", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
+    startTime: null, endTime: null, startParagraph: 2, endParagraph: 4,
+    keywords: ["信任"], mainPoint: "观点", sourceChunkIds: ["c1"],
+    candidateStatus: "pending", candidateError: null, createdAt: NOW,
+  } satisfies TopicBlock;
+  const base = {
+    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
+    recommendReason: "理由", primaryPurpose: "信任建立",
+    primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
+    secondaryPurpose: null, secondaryPurposeEvidence: null,
+    startParagraph: 2, endParagraph: 4, startQuote: "知识付费最大的误区", endQuote: "解决问题的信任。",
+    corePoint: "观点", removeSuggestions: [],
+    titleSuggestions: ["标题一", "标题二", "标题三"], coverSuggestions: ["封面一", "封面二"],
+  };
+  const cases = [
+    [{ ...base, startQuote: "AI编造的开始句" }, "START_QUOTE_NOT_FOUND"],
+    [{ ...base, endQuote: "AI编造的结束句" }, "END_QUOTE_NOT_FOUND"],
+    [{ ...base, removeSuggestions: [{ paragraphNumber: 3, quote: "AI编造的删除片段", reason: "冗余" }] }, "REMOVAL_QUOTE_NOT_FOUND"],
+    [{ ...base, startQuote: "最大的误区", removeSuggestions: [{ paragraphNumber: 2, quote: "知识付费", reason: "冗余" }] }, "REMOVAL_QUOTE_NOT_FOUND"],
+    [{ ...base, primaryPurposeEvidence: { paragraphNumber: 3, quote: "AI编造的目的证据" } }, "PURPOSE_EVIDENCE_NOT_FOUND"],
+    [{ ...base, clipType: "tutorial" }, "FIELD_INVALID"],
+  ] as const;
+
+  for (const [candidate, reasonCode] of cases) {
+    assert.throws(
+      () => parseCandidateAnalysisResponse(JSON.stringify({ candidates: [candidate] }), {
+        liveTranscriptId: "live-1", topic, paragraphs: parsed.paragraphs,
+      }),
+      (error: unknown) => error instanceof LiveClipResponseError
+        && error.code === "SCHEMA_FAIL"
+        && error.diagnosticDetails.reasonCode === reasonCode,
+    );
+  }
+});

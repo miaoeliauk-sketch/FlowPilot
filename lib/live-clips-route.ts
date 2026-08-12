@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { StructuredDeepSeekError } from "./structured-deepseek";
+import { LIVE_CLIP_FAILURE_REASONS } from "./live-clips-types";
 import type {
   LiveClipFailureCause,
+  LiveClipFailureReason,
   LiveClipStageCode,
   TranscriptChunk,
   TranscriptParagraph,
@@ -58,6 +60,16 @@ function lastFailureCode(error: StructuredDeepSeekError): string {
   return error.stage === "timeout" ? "TIMEOUT" : "AI_REQUEST_FAIL";
 }
 
+function lastReasonCode(error: StructuredDeepSeekError): LiveClipFailureReason | null {
+  for (let index = error.attemptDiagnostics.length - 1; index >= 0; index -= 1) {
+    const code = error.attemptDiagnostics[index].reasonCode;
+    if (typeof code === "string" && LIVE_CLIP_FAILURE_REASONS.includes(code as LiveClipFailureReason)) {
+      return code as LiveClipFailureReason;
+    }
+  }
+  return null;
+}
+
 export function failureCause(error: unknown): LiveClipFailureCause {
   if (error instanceof StructuredDeepSeekError) {
     const code = lastFailureCode(error);
@@ -79,6 +91,11 @@ export function liveClipErrorResponse(
   diagnosticId: string,
 ) {
   const causeCode = failureCause(error);
+  const reasonCode = causeCode === "TRUNCATED"
+    ? "OUTPUT_TRUNCATED"
+    : error instanceof StructuredDeepSeekError
+      ? lastReasonCode(error)
+      : causeCode === "SCHEMA_FAIL" ? "FIELD_INVALID" : null;
   const stageLabel = stageCode === "TOPIC_ANALYSIS_FAIL" ? "主题识别" : "切片识别";
   const causeLabel: Record<LiveClipFailureCause, string> = {
     EMPTY_CONTENT: "AI返回为空",
@@ -89,15 +106,24 @@ export function liveClipErrorResponse(
     AI_REQUEST_FAIL: "AI请求失败",
     MISSING_API_KEY: "未配置DeepSeek API Key",
   };
+  const reasonLabel: Partial<Record<LiveClipFailureReason, string>> = {
+    START_QUOTE_NOT_FOUND: "开始句无法在原文中定位",
+    END_QUOTE_NOT_FOUND: "结束句无法在原文中定位",
+    REMOVAL_QUOTE_NOT_FOUND: "删除片段无法在原文中定位",
+    PURPOSE_EVIDENCE_NOT_FOUND: "内容目的证据无法在切片原文中定位",
+    FIELD_INVALID: "AI返回字段不完整或不合法",
+    OUTPUT_TRUNCATED: "AI返回被截断",
+  };
   const status = causeCode === "MISSING_API_KEY" || error instanceof LiveClipRequestError
     ? 400
     : causeCode === "TIMEOUT"
       ? 504
       : 502;
   return NextResponse.json({
-    error: `${stageLabel}失败：${causeLabel[causeCode]}`,
+    error: `${stageLabel}失败：${reasonCode ? reasonLabel[reasonCode] : causeLabel[causeCode]}`,
     stageCode,
     causeCode,
+    reasonCode,
     diagnosticId,
   }, { status });
 }

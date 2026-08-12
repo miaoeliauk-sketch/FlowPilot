@@ -1,10 +1,12 @@
 import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_STORAGE_KEY,
+  LIVE_CLIP_FAILURE_REASONS,
   type ClipCandidate,
   type ClipPlan,
   type LiveClipWorkspaceState,
   type PurposeEvidence,
+  type LiveClipFailureReason,
 } from "./live-clips-types";
 
 export type LiveClipStorageErrorCode = "WRITE_FAILED" | "VERIFY_FAILED" | "CORRUPTED";
@@ -53,6 +55,12 @@ function isWorkspaceState(value: unknown): value is LiveClipWorkspaceState {
 function legacyPurpose(value: unknown): ContentPurpose | null {
   return typeof value === "string" && CONTENT_PURPOSES.includes(value as ContentPurpose)
     ? value as ContentPurpose
+    : null;
+}
+
+function legacyFailureReason(value: unknown): LiveClipFailureReason | null {
+  return typeof value === "string" && LIVE_CLIP_FAILURE_REASONS.includes(value as LiveClipFailureReason)
+    ? value as LiveClipFailureReason
     : null;
 }
 
@@ -107,6 +115,14 @@ export function loadLiveClipState(storage: LiveClipStorageLike | null = defaultS
     if (!isWorkspaceState(parsed)) throw new Error("invalid state");
     return {
       ...parsed,
+      transcriptChunks: parsed.transcriptChunks.map(chunk => ({
+        ...chunk,
+        errorReason: legacyFailureReason(chunk.errorReason),
+      })),
+      topicBlocks: parsed.topicBlocks.map(topic => ({
+        ...topic,
+        candidateErrorReason: legacyFailureReason(topic.candidateErrorReason),
+      })),
       clipCandidates: parsed.clipCandidates.map(migrateCandidatePurpose),
       clipPlans: parsed.clipPlans.map(migratePlanPurpose),
     };

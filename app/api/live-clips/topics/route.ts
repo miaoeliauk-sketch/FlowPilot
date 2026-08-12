@@ -82,6 +82,7 @@ export async function POST(request: NextRequest) {
         error: "主题识别失败：AI返回被截断",
         stageCode: "TOPIC_ANALYSIS_FAIL",
         causeCode: "TRUNCATED",
+        reasonCode: "OUTPUT_TRUNCATED",
         diagnosticId,
       }, { status: 502 });
     }
