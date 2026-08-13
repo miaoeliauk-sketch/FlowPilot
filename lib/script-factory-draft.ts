@@ -4,6 +4,7 @@ export const SCRIPT_FACTORY_DRAFT_STORAGE_KEY =
   "flowpilot_script_factory_partial_drafts_v1";
 
 export interface ScriptGenerationSettings {
+  generationMode?: "standard" | "ip";
   platform: string;
   formatCategory: string;
   durationSeconds: number;
@@ -65,6 +66,7 @@ function isGenerationSettings(value: unknown): value is ScriptGenerationSettings
   if (!value || typeof value !== "object") return false;
   const settings = value as Partial<ScriptGenerationSettings>;
   return (
+    (settings.generationMode === undefined || settings.generationMode === "standard" || settings.generationMode === "ip") &&
     typeof settings.platform === "string" &&
     typeof settings.formatCategory === "string" &&
     typeof settings.durationSeconds === "number" &&

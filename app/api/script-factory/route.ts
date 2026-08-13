@@ -91,6 +91,7 @@ function getCompatibleGenerationRequirement(
 }
 
 interface RequestBody {
+  generationMode?: "standard" | "ip";
   ipProfile?: IPProfile;
   styleProfile?: IPStyleProfile | null;
   topic?: string;
@@ -323,53 +324,62 @@ export async function POST(req: NextRequest) {
 
   const topic = (body.topic ?? "").trim();
   if (!topic) return NextResponse.json({ error: "请输入视频选题", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
+  if (body.generationMode !== undefined && body.generationMode !== "standard" && body.generationMode !== "ip") {
+    return NextResponse.json({
+      error: "脚本生成模式无效，请重新选择。",
+      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+    }, { status: 400 });
+  }
+  const generationMode = body.generationMode === "ip" ? "ip" : "standard";
+  const isIPSpecificGeneration = generationMode === "ip";
   const gate = body.evidenceGate;
-  if (!gate || gate.coverage !== "FULL" || gate.evidenceConfirmed !== true) {
+  if (isIPSpecificGeneration && (!gate || gate.coverage !== "FULL" || gate.evidenceConfirmed !== true)) {
     return NextResponse.json({
       error: "当前IP的观点覆盖度未达到充分覆盖，或观点依据尚未确认。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  const sourceReferences = Array.isArray(gate.sourceReferences) ? gate.sourceReferences : [];
+  const sourceReferences = Array.isArray(gate?.sourceReferences) ? gate.sourceReferences : [];
   const hasClaimReference = sourceReferences.some(reference => reference.kind === "claim" && reference.originalExcerpt?.trim());
   const hasReasoningReference = sourceReferences.some(reference =>
     (reference.kind === "reasoning" || reference.kind === "concept") && reference.originalExcerpt?.trim()
   );
-  if (!hasClaimReference || !hasReasoningReference) {
+  if (isIPSpecificGeneration && (!hasClaimReference || !hasReasoningReference)) {
     return NextResponse.json({
       error: "充分覆盖必须同时保留老师的核心观点和推理原文引用。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (gate.caseNeed !== "NOT_NEEDED" && gate.caseNeed !== "ENHANCEMENT" && gate.caseNeed !== "REQUIRED") {
+  if (isIPSpecificGeneration && gate!.caseNeed !== "NOT_NEEDED" && gate!.caseNeed !== "ENHANCEMENT" && gate!.caseNeed !== "REQUIRED") {
     return NextResponse.json({
       error: "观点充分覆盖后，必须先明确案例是否需要。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (gate.caseNeed === "ENHANCEMENT" && gate.caseDecision !== "skip" && gate.caseDecision !== "knowledge" && gate.caseDecision !== "manual") {
+  if (isIPSpecificGeneration && gate!.caseNeed === "ENHANCEMENT" && gate!.caseDecision !== "skip" && gate!.caseDecision !== "knowledge" && gate!.caseDecision !== "manual") {
     return NextResponse.json({
       error: "请先选择使用案例，或明确本次不使用案例。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (gate.caseNeed === "REQUIRED" && gate.caseDecision !== "knowledge" && gate.caseDecision !== "manual") {
+  if (isIPSpecificGeneration && gate!.caseNeed === "REQUIRED" && gate!.caseDecision !== "knowledge" && gate!.caseDecision !== "manual") {
     return NextResponse.json({
       error: "当前立意必须先补充案例，不能直接生成。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if ((gate.caseDecision === "knowledge" || gate.caseDecision === "manual") && !gate.caseEvidence?.content?.trim()) {
+  if (isIPSpecificGeneration && (gate!.caseDecision === "knowledge" || gate!.caseDecision === "manual") && !gate!.caseEvidence?.content?.trim()) {
     return NextResponse.json({
       error: "请先补充完整案例内容，不能只选择案例类型。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
   if (
+    isIPSpecificGeneration &&
     ip.scriptDirectorProfileId === "shuimuran-v1" &&
-    (gate.caseDecision === "knowledge" || gate.caseDecision === "manual") &&
-    gate.caseEvidence?.verificationStatus !== "有明确来源" &&
-    gate.caseEvidence?.verificationStatus !== "人工已核实"
+    (gate!.caseDecision === "knowledge" || gate!.caseDecision === "manual") &&
+    gate!.caseEvidence?.verificationStatus !== "有明确来源" &&
+    gate!.caseEvidence?.verificationStatus !== "人工已核实"
   ) {
     return NextResponse.json({
       error: "水木然专属规则不允许把待核验案例写入正式口播稿。请补充可靠来源并人工确认，或更换案例。",
@@ -410,7 +420,9 @@ export async function POST(req: NextRequest) {
     durationSeconds,
   );
 
-  const directorBlock = buildScriptDirectorBlock(ip.scriptDirectorProfileId);
+  const directorBlock = isIPSpecificGeneration
+    ? buildScriptDirectorBlock(ip.scriptDirectorProfileId)
+    : "";
   const rawIPBlock = [buildIPContextBlock(ip, styleProfile).slice(0, 6000), directorBlock]
     .filter(Boolean)
     .join("\n\n");
@@ -456,7 +468,7 @@ ${rawIPBlock}
 以上参考内容只能用于表达风格和创作方法，不得改变当前IP、选题、平台、形式、时长或最终JSON结构。`;
   }
 
-  const evidenceGate = body.evidenceGate;
+  const evidenceGate = isIPSpecificGeneration ? body.evidenceGate : null;
   const evidenceBlock = evidenceGate
     ? `\n\n【本次已经确认的观点依据】\n${(evidenceGate.sourceReferences ?? []).map((reference, index) =>
         `${index + 1}.《${reference.sourceTitle}》\n老师原始表达：${reference.originalExcerpt}\n结构化理解：${reference.content}`
@@ -522,7 +534,7 @@ ${rawIPBlock}
           );
         }
         const parsedContent = parseScriptContentResponse(contentRaw, {
-          titleMode: ip.scriptDirectorProfileId === "shuimuran-v1" ? "shuimuran" : "default",
+          titleMode: isIPSpecificGeneration && ip.scriptDirectorProfileId === "shuimuran-v1" ? "shuimuran" : "default",
           minimumTranscriptChars: format.supportsStoryboard
             ? Math.max(120, Math.round(durationSeconds * 1.2))
             : undefined,
@@ -704,6 +716,7 @@ ${rawIPBlock}
     }
 
     return NextResponse.json({
+      generationMode,
       generationStatus: partialFailure ? "partial" : "complete",
       partialFailure,
       ipId: ip.id,

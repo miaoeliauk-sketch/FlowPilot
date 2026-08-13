@@ -151,6 +151,7 @@ async function unlockGeneration(
   view: ReturnType<typeof import("@testing-library/react").render>,
   user: Awaited<ReturnType<typeof import("@testing-library/user-event").default.setup>>,
 ) {
+  await user.click(view.getByRole("button", { name: "IP专属生成" }));
   await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
   await view.findByText("充分覆盖");
   await user.click(view.getByRole("button", { name: "确认观点依据与案例边界" }));
@@ -267,7 +268,7 @@ test("脚本工厂通过topicId读取当前IP的合法选题并明确显示关�
   const linkedTopicBanner = linkedTopicHeading.parentElement;
   assert.ok(linkedTopicBanner);
   assert.ok(within(linkedTopicBanner).getByText(topic.title));
-  assert.ok(view.getByRole("button", { name: "检查观点覆盖度" }));
+  assert.ok(view.getByRole("button", { name: "生成完整内容" }));
 });
 
 test("URL打开选题B时不会继续展示同一IP选题A的旧草稿内容", { timeout: 5000 }, async () => {

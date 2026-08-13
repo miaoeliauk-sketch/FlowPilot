@@ -115,7 +115,7 @@ after(() => {
   restoreBrowser?.();
 });
 
-test("脚本工厂不把装修演示内容作为真实初始值", async () => {
+test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
@@ -138,8 +138,10 @@ test("脚本工厂不把装修演示内容作为真实初始值", async () => {
   assert.equal(view.queryByText("IP差异化验收测试"), null);
   assert.equal(view.queryByText("母稿驱动"), null);
   assert.equal(view.queryByText(/内容引擎（完整内容包）/), null);
-  assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
-  assert.ok(view.getByRole("button", { name: "检查观点覆盖度" }));
+  assert.ok(view.getByRole("button", { name: "固定脚本生成" }));
+  assert.ok(view.getByRole("button", { name: "IP专属生成" }));
+  assert.ok(view.getByRole("button", { name: "生成完整内容" }));
+  assert.equal(view.queryByRole("button", { name: "检查观点覆盖度" }), null);
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
 });
 
@@ -188,6 +190,8 @@ test("覆盖度为NONE时不允许直接生成", async () => {
       </IPProvider>,
     );
 
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+
     const topicInput = view.container.querySelector("textarea") as HTMLTextAreaElement | null;
     assert.ok(topicInput);
     const topic = "普通人如何判断下一轮行业变化";
@@ -235,6 +239,7 @@ test("充分覆盖并确认依据后才显示脚本生成按钮", async () => {
     const user = userEvent.setup({ document });
     const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
 
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"), "为什么持续更新仍会被忘记？");
     await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
     assert.ok(await view.findByText("充分覆盖"));
@@ -244,4 +249,56 @@ test("充分覆盖并确认依据后才显示脚本生成按钮", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("重新打开IP专属脚本时恢复对应生成模式", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-ip-mode",
+    ipId: SHUIMURAN.id,
+    title: "IP专属历史脚本",
+    cover: "封面",
+    content: "正文",
+    status: "草稿",
+    createdAt: "2026-08-13T00:00:00.000Z",
+    scriptResult: {
+      generationMode: "ip",
+      generationStatus: "complete",
+      partialFailure: null,
+      ipId: SHUIMURAN.id,
+      ipName: SHUIMURAN.name,
+      topic: "IP专属历史脚本",
+      platform: "抖音",
+      formatCategory: "short",
+      formatLabel: "短视频",
+      durationSeconds: 60,
+      durationLabel: "60秒",
+      goal: "建立信任",
+      videoType: "口播",
+      outputLabels: { cover: "封面文案", outline: "口播逐字稿", shooting: "拍摄建议", comment: "互动引导" },
+      titles: [{ title: "IP专属历史脚本", formula: "判断", platform: "抖音", whyFitsIP: "符合" }],
+      coverCopy: ["封面"],
+      outline: [{ label: "判断", timeRange: "0-60秒", content: "完整正文。" }],
+      commentGuidance: { interactionPrompt: "", keywordReplies: [], dmGuidance: "", materialPackGuidance: "" },
+      ipStyleExplanation: "",
+      storyboard: [],
+      shootingSuggestions: [],
+      shotPrompts: [],
+      editingRhythm: { subtitleHighlights: [], soundEffects: [], screenRecordingCuts: [], caseInserts: [], pauses: [] },
+      apiMeta: { apiCalled: true, calledAt: "2026-08-13T00:00:00.000Z", model: "test", ipUsed: SHUIMURAN.name, mockHit: false },
+    },
+  }]));
+  window.history.replaceState({}, "", "/script-factory?scriptId=script-ip-mode");
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  const modeButton = await view.findByRole("button", { name: "IP专属生成" });
+  assert.equal(modeButton.getAttribute("aria-pressed"), "true");
+  assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
+  window.history.replaceState({}, "", "/script-factory");
 });

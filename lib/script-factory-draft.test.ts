@@ -47,6 +47,22 @@ test("saves and restores the latest partial draft for each IP", () => {
   assert.equal(getPartialScriptDraft("ip-b", storage)?.topic, "另一个IP");
 });
 
+test("保存IP专属生成模式，并兼容没有模式字段的旧草稿", () => {
+  const storage = createMemoryStorage();
+  const ipDraft = {
+    ...createDraft("ip-a", "IP专属选题"),
+    generationSettings: {
+      ...createDraft("ip-a", "IP专属选题").generationSettings,
+      generationMode: "ip" as const,
+    },
+  };
+  assert.equal(savePartialScriptDraft(ipDraft, storage), true);
+  assert.equal(getPartialScriptDraft("ip-a", storage)?.generationSettings.generationMode, "ip");
+
+  assert.equal(savePartialScriptDraft(createDraft("ip-b", "旧版固定选题"), storage), true);
+  assert.equal(getPartialScriptDraft("ip-b", storage)?.generationSettings.generationMode, undefined);
+});
+
 test("clears only the requested IP draft", () => {
   const storage = createMemoryStorage();
   savePartialScriptDraft(createDraft("ip-a", "选题A"), storage);

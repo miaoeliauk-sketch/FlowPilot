@@ -28,6 +28,7 @@ import {
 } from "@/lib/script-factory-coverage";
 
 const TOPIC_PLACEHOLDER = "例如：一个正在发生的变化，普通人应该如何判断？";
+type GenerationMode = "standard" | "ip";
 
 // ── Types ──
 interface TitleOption { title: string; formula: string; platform: string; whyFitsIP: string; role?: "主推" | "流量" | "安全"; recommended?: boolean; }
@@ -47,6 +48,7 @@ interface EvidenceAudit {
   caseEvidence: { title: string; sourceType: string; verificationStatus: string; sourceUrl?: string } | null;
 }
 interface ScriptResult {
+  generationMode?: GenerationMode;
   generationStatus: ScriptGenerationStatus; partialFailure: ScriptPartialFailure | null;
   ipId: string; ipName: string; topic: string; platform: string;
   formatCategory: string; formatLabel: string; durationSeconds: number; durationLabel: string; goal: string; videoType: string;
@@ -462,6 +464,7 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
 
 export default function ScriptFactoryPage() {
   const { activeIP, loading: ipLoading } = useIP();
+  const [generationMode, setGenerationMode] = useState<GenerationMode>("standard");
   const [topic, setTopic] = useState("");
   const [angle, setAngle] = useState("");
   const [coverageLoading, setCoverageLoading] = useState(false);
@@ -557,6 +560,15 @@ export default function ScriptFactoryPage() {
   });
   const selectedKnowledgeCase = caseCandidates.find(entry => entry.id === selectedCaseId) ?? null;
   const permission = resolveGenerationPermission(coverage, caseDecision, evidenceConfirmed);
+  const canGenerate = generationMode === "standard" || permission.allowed;
+
+  function switchGenerationMode(nextMode: GenerationMode) {
+    setGenerationMode(nextMode);
+    setError(null);
+    setResult(null);
+    setApiMeta(null);
+    setPartialDraftSavedAt(null);
+  }
 
   function getCoverageSources(): CoverageSourceReference[] {
     if (!activeIP) return [];
@@ -584,7 +596,7 @@ export default function ScriptFactoryPage() {
     setManualCaseVerified(false);
     setEvidenceConfirmed(false);
     setShowInterviewOutline(false);
-  }, [topic, angle, activeIP?.id]);
+  }, [topic, angle, activeIP?.id, generationMode]);
 
   async function handleCoverageCheck() {
     if (!topic.trim()) { setCoverageError("请先填写选题"); return; }
@@ -670,6 +682,7 @@ export default function ScriptFactoryPage() {
       return "本地临时草稿数据不完整，已停止自动恢复。";
     }
     const settings = draft.generationSettings;
+    setGenerationMode(settings.generationMode ?? draft.result.generationMode ?? "standard");
     setTopic(draft.topic);
     setPlatform(settings.platform);
     setFormatCategory(settings.formatCategory);
@@ -703,6 +716,7 @@ export default function ScriptFactoryPage() {
     if (savedResult.ipId !== expectedIPId) {
       return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
     }
+    setGenerationMode(savedResult.generationMode ?? "standard");
     setTopic(savedResult.topic || script.title);
     setPlatform(savedResult.platform);
     setFormatCategory(savedResult.formatCategory);
@@ -813,12 +827,13 @@ export default function ScriptFactoryPage() {
       res = await apiFetch("/api/script-factory", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          generationMode,
           ipProfile: ip, topic: t,
           styleProfile: getStyleProfile(ip.id) ?? null,
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
           formatCategory, durationSeconds: duration, goal, videoType,
           needsStoryboard, needsShootingTips,
-          evidenceGate: coverage ? {
+          evidenceGate: generationMode === "ip" && coverage ? {
             coverage: coverage.coverage,
             reason: coverage.reason,
             sourceReferences: coverage.sourceReferences,
@@ -884,7 +899,7 @@ export default function ScriptFactoryPage() {
   async function handleGenerate() {
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
-    if (!permission.allowed) { setError(permission.reason); return; }
+    if (generationMode === "ip" && !permission.allowed) { setError(permission.reason); return; }
     const requestIP = activeIP;
     const requestedTopic = topic.trim();
     let linkedTopicAtRequest: TopicAsset | null = null;
@@ -926,6 +941,7 @@ export default function ScriptFactoryPage() {
           failedStage: data.partialFailure.stage,
           warning: data.partialFailure.message,
           generationSettings: {
+            generationMode,
             platform,
             formatCategory,
             durationSeconds: duration,
@@ -983,13 +999,38 @@ export default function ScriptFactoryPage() {
           </div>
           <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">AI IP脚本工厂</h1>
           <p className="mt-1.5 max-w-[640px] text-[13.5px] leading-6 text-[#8A8A86]">
-            先证明这个观点属于当前IP，再调用老师的原始内容、表达语料和必要案例组织成稿。系统不会只凭IP身份替老师创造新观点。
+            {generationMode === "standard"
+              ? "固定脚本生成保留原来的直接产出流程；需要严格依据老师原始观点时，再切换到IP专属生成。"
+              : "先证明这个观点属于当前IP，再调用老师的原始内容、表达语料和必要案例组织成稿。"}
           </p>
         </div>
         <span className="whitespace-nowrap rounded-full bg-[#EAF3DE] px-3.5 py-1.5 text-[12px] font-semibold text-[#3B6D11]">02 · 脚本生成</span>
       </header>
 
       <>
+
+      <div className="mb-4 grid grid-cols-1 gap-3 rounded-[16px] border border-[#E5E4DE] bg-white p-3 sm:grid-cols-2">
+        <button
+          type="button"
+          aria-label="固定脚本生成"
+          aria-pressed={generationMode === "standard"}
+          onClick={() => switchGenerationMode("standard")}
+          className={`rounded-[12px] px-4 py-3 text-left transition-all ${generationMode === "standard" ? "bg-[#1C1C1B] text-white" : "bg-[#F7F6F2] text-[#555]"}`}
+        >
+          <div className="text-[13.5px] font-bold">固定脚本生成</div>
+          <div className={`mt-1 text-[11.5px] ${generationMode === "standard" ? "text-white/70" : "text-[#888]"}`}>输入选题后直接生成固定内容包，不检查观点覆盖度。</div>
+        </button>
+        <button
+          type="button"
+          aria-label="IP专属生成"
+          aria-pressed={generationMode === "ip"}
+          onClick={() => switchGenerationMode("ip")}
+          className={`rounded-[12px] px-4 py-3 text-left transition-all ${generationMode === "ip" ? "bg-[#1C1C1B] text-white" : "bg-[#F7F6F2] text-[#555]"}`}
+        >
+          <div className="text-[13.5px] font-bold">IP专属生成</div>
+          <div className={`mt-1 text-[11.5px] ${generationMode === "ip" ? "text-white/70" : "text-[#888]"}`}>调用当前IP的原始内容、表达语料和专属规则。</div>
+        </button>
+      </div>
 
       {!ipLoading && (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-[#FBF3D6] px-4 py-2.5 text-[13px] text-[#7A5C00]">
@@ -998,7 +1039,7 @@ export default function ScriptFactoryPage() {
               {activeIP?.avatar ?? "?"}
             </span>
             当前以 <b>{activeIP?.name ?? "未选择IP"}</b> 的人设、受众、表达风格与拍摄习惯生成内容。
-            {activeIP?.scriptDirectorProfileId === "shuimuran-v1" && (
+            {generationMode === "ip" && activeIP?.scriptDirectorProfileId === "shuimuran-v1" && (
               <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-[#639922]">水木然专属编导规则已启用</span>
             )}
           </div>
@@ -1020,22 +1061,22 @@ export default function ScriptFactoryPage() {
 
       {/* 主工作流 */}
       <Card className="mb-6">
-        <SectionHead num="①">输入选题并检查观点覆盖度</SectionHead>
+        <SectionHead num="①">{generationMode === "standard" ? "输入选题并设置产出" : "输入选题并检查观点覆盖度"}</SectionHead>
         <div className="flex flex-col gap-3">
           <textarea
             value={topic} onChange={e => setTopic(e.target.value)}
             placeholder={TOPIC_PLACEHOLDER}
             className="min-h-[52px] resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"
           />
-          <input
+          {generationMode === "ip" && <input
             aria-label="本次切入角度"
             value={angle}
             onChange={event => setAngle(event.target.value)}
             placeholder="本次切入角度，例如：从创作者只追求更新频率切入"
             className="rounded-[12px] border border-[#E5E4DE] bg-white px-4 py-3 text-[13.5px] text-[#1C1C1B] outline-none focus:border-[#639922]"
-          />
+          />}
 
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          {generationMode === "ip" && <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-[12px] leading-5 text-[#888]">系统只检查当前IP知识库中的“IP原始内容”，IP人设和表达风格不能代替老师的真实观点。</p>
             <button
               type="button"
@@ -1045,11 +1086,11 @@ export default function ScriptFactoryPage() {
             >
               {coverageLoading ? "检查中…" : "检查观点覆盖度"}
             </button>
-          </div>
+          </div>}
 
-          {coverageError && <div className="rounded-[10px] bg-[#FCEBEB] px-4 py-3 text-[12.5px] text-[#A32D2D]">{coverageError}</div>}
+          {generationMode === "ip" && coverageError && <div className="rounded-[10px] bg-[#FCEBEB] px-4 py-3 text-[12.5px] text-[#A32D2D]">{coverageError}</div>}
 
-          {coverage && (
+          {generationMode === "ip" && coverage && (
             <div className="rounded-[14px] border border-[#D9E8C7] bg-[#FBFEF7] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-[13px] font-bold text-[#1C1C1B]">观点覆盖度</div>
@@ -1091,7 +1132,7 @@ export default function ScriptFactoryPage() {
             </div>
           )}
 
-          {coverage?.coverage === "FULL" && (
+          {generationMode === "ip" && coverage?.coverage === "FULL" && (
             <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="text-[13px] font-bold text-[#1C1C1B]">② 判断是否需要案例</div>
@@ -1140,9 +1181,9 @@ export default function ScriptFactoryPage() {
             </div>
           )}
 
-          {evidenceConfirmed && <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />}
+          {(generationMode === "standard" || evidenceConfirmed) && <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />}
 
-          {evidenceConfirmed && (<>
+          {(generationMode === "standard" || evidenceConfirmed) && (<>
           <div>
             <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">内容形式</label>
             <div className="flex flex-wrap gap-2">
@@ -1194,10 +1235,10 @@ export default function ScriptFactoryPage() {
               需要{formatCategory === "live" ? "直播间布置建议" : "拍摄/呈现建议"}
             </label>
             <button
-              onClick={handleGenerate} disabled={loading || !permission.allowed}
+              onClick={handleGenerate} disabled={loading || !canGenerate}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
-              {loading ? "生成中…" : "依据确认后生成脚本"}
+              {loading ? "生成中…" : generationMode === "standard" ? "生成完整内容" : "依据确认后生成脚本"}
             </button>
           </div>
           </>)}
@@ -1219,8 +1260,8 @@ export default function ScriptFactoryPage() {
 
       {!loading && !result && !error && (
         <div className="py-16 text-center text-[#8A8A86]">
-          <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">先确认老师是否表达过这个观点</h3>
-          <p className="text-[13.5px]">填写选题和切入角度，系统会先从当前IP的原始内容中寻找观点依据。</p>
+          <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">{generationMode === "standard" ? "还没有生成结果" : "先确认老师是否表达过这个观点"}</h3>
+          <p className="text-[13.5px]">{generationMode === "standard" ? "输入选题、设置内容形式和时长后，即可生成完整内容包。" : "填写选题和切入角度，系统会先从当前IP的原始内容中寻找观点依据。"}</p>
         </div>
       )}
 

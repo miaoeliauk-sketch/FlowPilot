@@ -174,6 +174,7 @@ function deepSeekResponse(content: unknown, id: string): Response {
 function scriptFactoryRequest(
   styleProfile: unknown,
   ipProfile: IPProfile = SHUIMURAN,
+  generationMode: "standard" | "ip" = "ip",
 ): NextRequest {
   return new NextRequest("http://localhost/api/script-factory", {
     method: "POST",
@@ -182,6 +183,7 @@ function scriptFactoryRequest(
       "X-DeepSeek-Key": "test-key",
     },
     body: JSON.stringify({
+      generationMode,
       ipProfile,
       styleProfile,
       topic: "普通人如何判断下一轮行业变化",
@@ -205,6 +207,42 @@ function scriptFactoryRequest(
     }),
   });
 }
+
+test("固定脚本生成不要求观点覆盖度，也不启用IP专属编导规则", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(VALID_CONTENT), "standard-content");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "standard-review");
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "standard-storyboard");
+  };
+
+  try {
+    const request = scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }, "standard");
+    const requestBody = await request.clone().json();
+    delete requestBody.evidenceGate;
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+
+    assert.equal(response.status, 200);
+    assert.doesNotMatch(prompts[0], /水木然专属内容编导规则/);
+    assert.doesNotMatch(prompts[0], /本次已经确认的观点依据/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("只有启用水木然专属编导规则的IP才会注入规则并强制三类标题", async () => {
   const originalFetch = globalThis.fetch;

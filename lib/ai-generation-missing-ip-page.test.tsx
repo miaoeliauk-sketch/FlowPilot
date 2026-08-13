@@ -87,6 +87,8 @@ test("未选择IP时禁用观点覆盖度检查且不发送请求", async () => 
       </IPProvider>,
     );
 
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+
     await user.type(
       view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"),
       "测试选题",

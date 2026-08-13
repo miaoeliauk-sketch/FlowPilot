@@ -202,6 +202,7 @@ test("脚本工厂非阻断展示论证待核对提示并保留生成结果", as
       </IPProvider>,
     );
 
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
     const topicInput = view.container.querySelector("textarea") as HTMLTextAreaElement;
     await user.type(topicInput, "Jellycat为什么能卖出情绪溢价");
     await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));

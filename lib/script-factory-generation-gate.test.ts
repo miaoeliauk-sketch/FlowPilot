@@ -26,7 +26,7 @@ test("新版脚本请求没有充分覆盖和人工确认时在调用模型前�
       method: "POST",
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
       body: JSON.stringify({
-        workflowVersion: 2,
+        generationMode: "ip",
         ipProfile: IP,
         topic: "测试选题",
         evidenceGate: { coverage: "NONE", evidenceConfirmed: true },
@@ -41,7 +41,7 @@ test("新版脚本请求没有充分覆盖和人工确认时在调用模型前�
   }
 });
 
-test("省略工作流标记也不能绕过观点覆盖度", async () => {
+test("IP专属生成显式选择后不能绕过观点覆盖度", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => { called = true; return new Response("{}"); };
@@ -49,10 +49,26 @@ test("省略工作流标记也不能绕过观点覆盖度", async () => {
     const response = await POST(new NextRequest("http://localhost/api/script-factory", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
-      body: JSON.stringify({ ipProfile: IP, topic: "测试选题" }),
+      body: JSON.stringify({ generationMode: "ip", ipProfile: IP, topic: "测试选题" }),
     }));
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /观点覆盖度/);
+    assert.equal(called, false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("未知生成模式会在调用模型前被拒绝", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response("{}"); };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({ generationMode: "unknown", ipProfile: IP, topic: "测试选题" }),
+    }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /生成模式无效/);
     assert.equal(called, false);
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -66,7 +82,7 @@ test("充分覆盖缺少观点或推理原文引用时也不能绕过", async ()
       method: "POST",
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
       body: JSON.stringify({
-        workflowVersion: 2, ipProfile: IP, topic: "测试选题",
+        generationMode: "ip", ipProfile: IP, topic: "测试选题",
         evidenceGate: {
           coverage: "FULL", evidenceConfirmed: true, caseNeed: "NOT_NEEDED", caseDecision: "skip",
           sourceReferences: [{ sourceId: "s1", sourceTitle: "原文", itemId: "c1", kind: "claim", content: "观点", originalExcerpt: "观点", extractionStatus: "人工确认" }],
@@ -88,7 +104,7 @@ test("案例为必需但案例内容为空时不能生成", async () => {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
       body: JSON.stringify({
-        workflowVersion: 2, ipProfile: IP, topic: "测试选题",
+        generationMode: "ip", ipProfile: IP, topic: "测试选题",
         evidenceGate: {
           coverage: "FULL", evidenceConfirmed: true, caseNeed: "REQUIRED", caseDecision: "manual",
           sourceReferences: [
@@ -114,7 +130,7 @@ test("案例可增强时没有做选择也不能生成", async () => {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
       body: JSON.stringify({
-        ipProfile: IP, topic: "测试选题",
+        generationMode: "ip", ipProfile: IP, topic: "测试选题",
         evidenceGate: {
           coverage: "FULL", evidenceConfirmed: true, caseNeed: "ENHANCEMENT",
           sourceReferences: [
@@ -139,6 +155,7 @@ test("水木然专属规则阻止未经核验的案例进入正式口播稿", as
       method: "POST",
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
       body: JSON.stringify({
+        generationMode: "ip",
         ipProfile: { ...IP, scriptDirectorProfileId: "shuimuran-v1" },
         topic: "测试选题",
         evidenceGate: {
