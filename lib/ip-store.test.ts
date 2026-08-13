@@ -174,6 +174,13 @@ test("读取时保留全部同名IP", async () => {
   ]);
 });
 
+test("旧IP没有专属编导规则字段时保持兼容且按未启用处理", async () => {
+  const { getAllIPs } = await import("./ip-store");
+  seed([makeIP("legacy-ip", "旧IP", "2026-07-28T00:00:00.000Z")]);
+
+  assert.equal(getAllIPs()[0]?.scriptDirectorProfileId, undefined);
+});
+
 test("创建同名IP时不删除已有记录", async () => {
   const { createIP } = await import("./ip-store");
   seed();

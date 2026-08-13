@@ -129,3 +129,30 @@ test("案例可增强时没有做选择也不能生成", async () => {
     assert.equal(called, false);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("水木然专属规则阻止未经核验的案例进入正式口播稿", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response("{}"); };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        ipProfile: { ...IP, scriptDirectorProfileId: "shuimuran-v1" },
+        topic: "测试选题",
+        evidenceGate: {
+          coverage: "FULL", evidenceConfirmed: true, caseNeed: "REQUIRED", caseDecision: "manual",
+          sourceReferences: [
+            { sourceId: "s1", sourceTitle: "原文", itemId: "c1", kind: "claim", content: "观点", originalExcerpt: "观点", extractionStatus: "人工确认" },
+            { sourceId: "s1", sourceTitle: "原文", itemId: "r1", kind: "reasoning", content: "推理", originalExcerpt: "推理", extractionStatus: "人工确认" },
+          ],
+          caseEvidence: { title: "待核验案例", content: "一条未经核验的网络说法", sourceType: "用户提供", verificationStatus: "未经系统核验" },
+        },
+      }),
+    }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /不允许把待核验案例写入正式口播稿/);
+    assert.equal(called, false);
+  } finally { globalThis.fetch = originalFetch; }
+});

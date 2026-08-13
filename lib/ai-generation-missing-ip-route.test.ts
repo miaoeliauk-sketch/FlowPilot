@@ -139,6 +139,31 @@ test("经典脚本接口拒绝只有ID和名称的不完整IP档案且不调用D
   }
 });
 
+test("经典脚本接口拒绝未登记的专属编导规则", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    throw new Error("无效专属规则不应调用DeepSeek");
+  };
+
+  try {
+    const response = await scriptFactoryPOST(postRequest("/api/script-factory", {
+      topic: "普通人如何判断下一轮行业变化",
+      ipProfile: { ...VALID_IP, scriptDirectorProfileId: "unknown" },
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(result.errorCode, "INVALID_IP_PROFILE");
+    assert.equal(result.errorField, "ipProfile.scriptDirectorProfileId");
+    assert.equal(result.apiMeta.apiCalled, false);
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("选题和IP同时缺失时优先返回IP错误", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;

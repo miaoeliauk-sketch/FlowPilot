@@ -1,4 +1,5 @@
 import type { IPProfile } from "./types";
+import { isScriptDirectorProfileId } from "./script-director-profile";
 
 export type IPProfileValidationResult =
   | { ok: true; ipProfile: IPProfile }
@@ -98,6 +99,13 @@ export function parseRequiredIPProfile(value: unknown): IPProfileValidationResul
   }
   for (const field of BOOLEAN_FIELDS) {
     if (typeof profile[field] !== "boolean") return invalid(`ipProfile.${field}`);
+  }
+  if (
+    profile.scriptDirectorProfileId !== undefined &&
+    profile.scriptDirectorProfileId !== null &&
+    !isScriptDirectorProfileId(profile.scriptDirectorProfileId)
+  ) {
+    return invalid("ipProfile.scriptDirectorProfileId");
   }
 
   return { ok: true, ipProfile: value as IPProfile };

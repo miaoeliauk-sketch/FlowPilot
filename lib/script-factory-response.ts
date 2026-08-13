@@ -20,6 +20,8 @@ export interface ScriptContentResponse {
     formula: string;
     platform: string;
     whyFitsIP: string;
+    role?: "主推" | "流量" | "安全";
+    recommended?: boolean;
   }>;
   coverCopy: string[];
   outline: Array<{
@@ -180,15 +182,46 @@ export function parseScriptContentResponse(
   options: {
     expectedOutlineCount?: number;
     minimumTranscriptChars?: number;
+    titleMode?: "default" | "shuimuran";
   } = {},
 ): ScriptContentResponse {
   const object = parseJSONObject(content);
-  const titles = requiredObjectArray(object.titles, "titles").map(title => ({
-    title: requiredString(title, "title", "titles[].title"),
-    formula: optionalString(title.formula),
-    platform: optionalString(title.platform),
-    whyFitsIP: optionalString(title.whyFitsIP),
-  }));
+  const titles = requiredObjectArray(object.titles, "titles").map(title => {
+    const roleValue = optionalString(title.role);
+    const role: "主推" | "流量" | "安全" | undefined =
+      roleValue === "主推" || roleValue === "流量" || roleValue === "安全"
+        ? roleValue
+        : undefined;
+    return {
+      title: requiredString(title, "title", "titles[].title"),
+      formula: optionalString(title.formula),
+      platform: optionalString(title.platform),
+      whyFitsIP: optionalString(title.whyFitsIP),
+      ...(role ? { role } : {}),
+      ...(typeof title.recommended === "boolean"
+        ? { recommended: title.recommended }
+        : {}),
+    };
+  });
+  if (options.titleMode === "shuimuran") {
+    const roles = titles.map(title => title.role);
+    const expectedRoles = ["主推", "流量", "安全"];
+    if (
+      titles.length !== 3 ||
+      expectedRoles.some(role => roles.filter(item => item === role).length !== 1) ||
+      titles.filter(title => title.recommended).length !== 1 ||
+      !titles.find(title => title.role === "主推")?.recommended ||
+      titles[0]?.role !== "主推" ||
+      titles[1]?.role !== "流量" ||
+      titles[2]?.role !== "安全" ||
+      !titles[0]?.whyFitsIP
+    ) {
+      throw new ScriptFactoryResponseError(
+        "incomplete_fields",
+        "脚本结果字段不完整：titles.role",
+      );
+    }
+  }
   const coverCopy = stringArray(object.coverCopy);
   if (coverCopy.length === 0) {
     throw new ScriptFactoryResponseError(

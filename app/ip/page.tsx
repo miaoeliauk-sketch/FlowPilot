@@ -8,6 +8,7 @@ import { getTopicAssets, getCommentAssets, getScriptAssets, getVoiceSamples, add
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Icon } from "@/components/ui/icon";
 import { Select } from "@/components/ui/select";
+import { SCRIPT_DIRECTOR_PROFILE_OPTIONS, type ScriptDirectorProfileId } from "@/lib/script-director-profile";
 
 const PLATFORM_OPTIONS = ["抖音", "小红书", "B站", "视频号", "微博", "公众号"];
 
@@ -37,6 +38,7 @@ interface FormState {
   needsSubtitleHighlight: boolean;
   sampleViralTitles: string[];
   styleNotes: string;
+  scriptDirectorProfileId: ScriptDirectorProfileId | null;
   bio: string;
 }
 
@@ -46,7 +48,7 @@ const EMPTY_FORM: FormState = {
   tone: "", commonOpenings: [], commonClosings: [], catchphrases: [], forbiddenExpressions: [], pacing: "",
   commonScenes: [], commonShotTypes: [],
   showsFace: true, usesScreenRecording: true, needsBroll: false, needsCaseScreenshots: true, needsSubtitleHighlight: true,
-  sampleViralTitles: [], styleNotes: "", bio: "",
+  sampleViralTitles: [], styleNotes: "", scriptDirectorProfileId: null, bio: "",
 };
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -204,6 +206,20 @@ function IPFormModal({
           <SectionTitle>历史内容参考</SectionTitle>
           <TagListEditor label="历史爆款标题" hint="供AI参考爆款规律，回车添加多个" placeholder="例如：我花了一周搞懂的AI工具，回车添加" values={form.sampleViralTitles} onChange={(v) => set("sampleViralTitles", v)} />
           <TextField label="账号爆款风格说明" value={form.styleNotes} onChange={(v) => set("styleNotes", v)} placeholder="总结一下这个账号过往爆款内容的共性规律" rows={2} />
+
+          <SectionTitle>脚本工厂专属规则</SectionTitle>
+          <div>
+            <label className="mb-1.5 block text-[12.5px] font-semibold text-[#555]">专属编导规则</label>
+            <p className="mb-1.5 text-[11px] leading-5 text-[#AAA]">只影响脚本工厂的素材分工、推理和表达，不会替代知识库中的老师原始观点。</p>
+            <Select
+              value={form.scriptDirectorProfileId ?? ""}
+              onChange={(value) => set("scriptDirectorProfileId", value ? value as ScriptDirectorProfileId : null)}
+              options={[
+                { value: "", label: "不使用专属编导规则" },
+                ...SCRIPT_DIRECTOR_PROFILE_OPTIONS,
+              ]}
+            />
+          </div>
 
           <TextField label="账号简介 / Bio" value={form.bio} onChange={(v) => set("bio", v)} rows={2} />
         </div>
@@ -607,7 +623,9 @@ export default function IPCenterPage() {
 
       {(creating || editing) && (
         <IPFormModal
-          initial={editing ? { ...editing } : EMPTY_FORM}
+          initial={editing
+            ? { ...editing, scriptDirectorProfileId: editing.scriptDirectorProfileId ?? null }
+            : EMPTY_FORM}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSave={handleSave}
         />

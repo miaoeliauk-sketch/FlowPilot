@@ -87,6 +87,30 @@ test("normalizes safe optional core fields", () => {
   assert.deepEqual(result.commentGuidance.keywordReplies, []);
 });
 
+test("水木然专属标题必须同时提供主推、流量和安全三个版本", () => {
+  const result = parseScriptContentResponse(JSON.stringify({
+    ...VALID_CONTENT,
+    titles: [
+      { title: "主推标题", formula: "核心冲突", platform: "视频号", whyFitsIP: "切中核心判断", role: "主推", recommended: true },
+      { title: "流量标题", formula: "危机感", platform: "视频号", whyFitsIP: "力度更强", role: "流量", recommended: false },
+      { title: "安全标题", formula: "克制判断", platform: "视频号", whyFitsIP: "表达更稳妥", role: "安全", recommended: false },
+    ],
+  }), { titleMode: "shuimuran" });
+
+  assert.equal(result.titles.length, 3);
+  assert.equal(result.titles[0].recommended, true);
+});
+
+test("水木然专属标题缺少任一版本时拒绝结果", () => {
+  expectError(() => parseScriptContentResponse(JSON.stringify({
+    ...VALID_CONTENT,
+    titles: [
+      { title: "主推标题", role: "主推", recommended: true },
+      { title: "流量标题", role: "流量", recommended: false },
+    ],
+  }), { titleMode: "shuimuran" }), "incomplete_fields");
+});
+
 test("rejects core response when the required transcript is missing", () => {
   expectError(
     () => parseScriptContentResponse(JSON.stringify({

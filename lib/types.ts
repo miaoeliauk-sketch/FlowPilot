@@ -1,4 +1,5 @@
 import type { TopicBoardResult, TopicEvaluationSummary } from "./topic-board-contract";
+import type { ScriptDirectorProfileId } from "./script-director-profile";
 
 // ── IP风格改写引擎：口播逐字稿样本库 + 风格学习机制 ──
 // 注：原 StyleProfile / AIMemory / TrainingSource 三个接口是早期"AI人格训练"功能
@@ -71,6 +72,7 @@ export interface IPProfile {
   // 历史内容（轻量字段，完整资产走 TopicAsset/ScriptAsset 资产库）
   sampleViralTitles: string[];
   styleNotes: string;
+  scriptDirectorProfileId?: ScriptDirectorProfileId | null;
   bio: string;
   color: string;
   createdAt: string;

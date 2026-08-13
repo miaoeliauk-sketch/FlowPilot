@@ -30,7 +30,7 @@ import {
 const TOPIC_PLACEHOLDER = "例如：一个正在发生的变化，普通人应该如何判断？";
 
 // ── Types ──
-interface TitleOption { title: string; formula: string; platform: string; whyFitsIP: string; }
+interface TitleOption { title: string; formula: string; platform: string; whyFitsIP: string; role?: "主推" | "流量" | "安全"; recommended?: boolean; }
 interface KeywordReply { keyword: string; reply: string; }
 interface CommentGuidance { interactionPrompt: string; keywordReplies: KeywordReply[]; dmGuidance: string; materialPackGuidance: string; }
 interface OutlineSection { label: string; timeRange: string; content: string; subPoints?: string[]; }
@@ -292,7 +292,10 @@ function ResultView({
         <div className="flex flex-col gap-2">
           {data.titles.slice(0, compact ? 3 : undefined).map((t, i) => (
             <div key={i} className="rounded-[10px] bg-[#F7F6F2] p-3">
-              <div className="text-[13.5px] font-semibold text-[#1C1C1B]">{t.title}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                {t.role && <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${t.recommended ? "bg-[#1C1C1B] text-white" : "bg-white text-[#777]"}`}>{t.role}{t.recommended ? "·推荐" : ""}</span>}
+                <div className="text-[13.5px] font-semibold text-[#1C1C1B]">{t.title}</div>
+              </div>
               {!compact && (
                 <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-[#888]">
                   <span className="rounded-full bg-[#EAF3DE] px-2 py-0.5 text-[#3B6D11]">{t.formula}</span>
@@ -469,6 +472,7 @@ export default function ScriptFactoryPage() {
   const [manualCaseTitle, setManualCaseTitle] = useState("");
   const [manualCaseContent, setManualCaseContent] = useState("");
   const [manualCaseSource, setManualCaseSource] = useState("");
+  const [manualCaseVerified, setManualCaseVerified] = useState(false);
   const [evidenceConfirmed, setEvidenceConfirmed] = useState(false);
   const [showInterviewOutline, setShowInterviewOutline] = useState(false);
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
@@ -577,6 +581,7 @@ export default function ScriptFactoryPage() {
     setManualCaseTitle("");
     setManualCaseContent("");
     setManualCaseSource("");
+    setManualCaseVerified(false);
     setEvidenceConfirmed(false);
     setShowInterviewOutline(false);
   }, [topic, angle, activeIP?.id]);
@@ -622,6 +627,22 @@ export default function ScriptFactoryPage() {
     }
     if (caseDecision === "manual" && !manualCaseContent.trim()) {
       setCoverageError("请填写案例内容。 ");
+      return;
+    }
+    if (
+      activeIP?.scriptDirectorProfileId === "shuimuran-v1" &&
+      caseDecision === "knowledge" &&
+      selectedKnowledgeCase?.sourceTier !== "高"
+    ) {
+      setCoverageError("这条案例还没有可靠来源，不能进入水木然正式口播稿。请更换案例。 ");
+      return;
+    }
+    if (
+      activeIP?.scriptDirectorProfileId === "shuimuran-v1" &&
+      caseDecision === "manual" &&
+      (!manualCaseSource.trim() || !manualCaseVerified)
+    ) {
+      setCoverageError("请补充案例来源，并确认你已经核对原始来源与事实。 ");
       return;
     }
     setCoverageError(null);
@@ -814,7 +835,7 @@ export default function ScriptFactoryPage() {
               title: manualCaseTitle.trim() || "人工补充案例",
               content: manualCaseContent.trim(),
               sourceType: "用户提供",
-              verificationStatus: "未经系统核验",
+              verificationStatus: manualCaseVerified ? "人工已核实" : "未经系统核验",
               sourceUrl: manualCaseSource.trim(),
             } : null,
           } : null,
@@ -922,7 +943,7 @@ export default function ScriptFactoryPage() {
       } else {
         const scriptInput = {
           ipId: requestIP.id,
-          title: data.titles?.[0]?.title || topic,
+          title: data.titles?.find(item => item.recommended)?.title || data.titles?.[0]?.title || topic,
           cover: data.coverCopy?.[0] || "",
           content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
           status: "草稿" as const,
@@ -977,6 +998,9 @@ export default function ScriptFactoryPage() {
               {activeIP?.avatar ?? "?"}
             </span>
             当前以 <b>{activeIP?.name ?? "未选择IP"}</b> 的人设、受众、表达风格与拍摄习惯生成内容。
+            {activeIP?.scriptDirectorProfileId === "shuimuran-v1" && (
+              <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-[#639922]">水木然专属编导规则已启用</span>
+            )}
           </div>
           <button onClick={() => setShowContext(true)} disabled={!activeIP} className="whitespace-nowrap rounded-[10px] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#7A5C00] disabled:opacity-50">
             查看当前IP上下文
@@ -1099,8 +1123,14 @@ export default function ScriptFactoryPage() {
                 <div className="mt-3 grid gap-2">
                   <input aria-label="案例名称" value={manualCaseTitle} onChange={event => { setManualCaseTitle(event.target.value); setEvidenceConfirmed(false); }} placeholder="案例人物或事件" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
                   <textarea aria-label="案例内容" value={manualCaseContent} onChange={event => { setManualCaseContent(event.target.value); setEvidenceConfirmed(false); }} placeholder="只填写你能确认的事实。人工提供不代表已经核实。" className="min-h-[90px] rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setEvidenceConfirmed(false); }} placeholder="来源链接或出处（可选）" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  <p className="text-[11.5px] text-[#A36C16]">来源状态：用户提供·未经系统核验。案例不能替老师生成从未表达过的核心观点。</p>
+                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setManualCaseVerified(false); setEvidenceConfirmed(false); }} placeholder={activeIP?.scriptDirectorProfileId === "shuimuran-v1" ? "来源链接或明确出处（必填）" : "来源链接或出处（可选）"} className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  {activeIP?.scriptDirectorProfileId === "shuimuran-v1" && (
+                    <label className="flex items-start gap-2 rounded-[9px] bg-[#F7F6F2] px-3 py-2 text-[11.5px] leading-5 text-[#555]">
+                      <input type="checkbox" checked={manualCaseVerified} onChange={event => { setManualCaseVerified(event.target.checked); setEvidenceConfirmed(false); }} className="mt-1" />
+                      <span>我已核对案例原始来源与事实。此确认只代表人工核对，不代表系统联网核验。</span>
+                    </label>
+                  )}
+                  <p className="text-[11.5px] text-[#A36C16]">来源状态：用户提供·{manualCaseVerified ? "人工已核实" : "未经系统核验"}。案例不能替老师生成从未表达过的核心观点。</p>
                 </div>
               )}
               <div className="mt-4 flex justify-end">

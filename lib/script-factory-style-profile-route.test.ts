@@ -78,6 +78,36 @@ const VALID_CONTENT = {
   ipStyleExplanation: "使用水木然的判断式开头，并用行动建议收束。",
 };
 
+const SHUIMURAN_DIRECTOR_CONTENT = {
+  ...VALID_CONTENT,
+  titles: [
+    {
+      title: "未来，真正稀缺的是判断力",
+      formula: "时代趋势+明确人群+结果",
+      platform: "视频号",
+      whyFitsIP: "切中了老师关于认知分层与个人选择的核心判断",
+      role: "主推",
+      recommended: true,
+    },
+    {
+      title: "AI越强，为什么多数人反而失去判断力？",
+      formula: "趋势+冲突",
+      platform: "视频号",
+      whyFitsIP: "强化时代变化带来的认知冲突",
+      role: "流量",
+      recommended: false,
+    },
+    {
+      title: "工具越来越强，人更需要保留自己的判断",
+      formula: "现象+选择",
+      platform: "视频号",
+      whyFitsIP: "用克制表达承接老师关于个人选择的判断",
+      role: "安全",
+      recommended: false,
+    },
+  ],
+};
+
 const VALID_STORYBOARD = {
   storyboard: [{
     time: "0-3秒",
@@ -141,7 +171,10 @@ function deepSeekResponse(content: unknown, id: string): Response {
   });
 }
 
-function scriptFactoryRequest(styleProfile: unknown): NextRequest {
+function scriptFactoryRequest(
+  styleProfile: unknown,
+  ipProfile: IPProfile = SHUIMURAN,
+): NextRequest {
   return new NextRequest("http://localhost/api/script-factory", {
     method: "POST",
     headers: {
@@ -149,7 +182,7 @@ function scriptFactoryRequest(styleProfile: unknown): NextRequest {
       "X-DeepSeek-Key": "test-key",
     },
     body: JSON.stringify({
-      ipProfile: SHUIMURAN,
+      ipProfile,
       styleProfile,
       topic: "普通人如何判断下一轮行业变化",
       platform: "视频号",
@@ -172,6 +205,45 @@ function scriptFactoryRequest(styleProfile: unknown): NextRequest {
     }),
   });
 }
+
+test("只有启用水木然专属编导规则的IP才会注入规则并强制三类标题", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-content");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-review");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "director-storyboard");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.titles.length, 3);
+    assert.equal(result.titles[0].role, "主推");
+    assert.equal(result.titles[0].recommended, true);
+    assert.match(prompts[0], /水木然专属内容编导规则/);
+    assert.match(prompts[0], /不能替IP创造老师从未表达过的核心判断/);
+    assert.match(prompts[0], /这些是动作库，不是固定八段模板/);
+    assert.match(prompts[0], /严格输出3个标题/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("水木然已学习的风格画像同时进入核心脚本和分镜提示词", async () => {
   const originalFetch = globalThis.fetch;
