@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { POST as scriptFactoryPOST } from "../app/api/script-factory/route";
-import { POST as contentEnginePOST } from "../app/api/skill/content-engine/route";
 import type { IPProfile } from "./types";
 
 const VALID_IP: IPProfile = {
@@ -111,44 +110,11 @@ test("经典脚本接口缺少当前IP时返回400且不调用DeepSeek", async (
   }
 });
 
-test("Content Engine接口缺少当前IP时返回400且不调用DeepSeek", async () => {
-  const originalFetch = globalThis.fetch;
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
-    return new Response(JSON.stringify({
-      choices: [{ finish_reason: "stop", message: { content: "{}" } }],
-    }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  };
-
-  try {
-    const response = await contentEnginePOST(postRequest("/api/skill/content-engine", {
-      topic: "普通人如何判断下一轮行业变化",
-    }));
-    const result = await response.json();
-
-    assert.equal(response.status, 400);
-    assert.equal(result.errorCode, "MISSING_IP_PROFILE");
-    assert.match(result.error, /当前操盘IP/);
-    assert.equal(result.apiMeta.apiCalled, false);
-    assert.equal(called, false);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test("经典脚本接口拒绝ID或名称为空的IP", async () => {
   await assertInvalidIPRejected(scriptFactoryPOST, "/api/script-factory");
 });
 
-test("Content Engine接口拒绝ID或名称为空的IP", async () => {
-  await assertInvalidIPRejected(contentEnginePOST, "/api/skill/content-engine");
-});
-
-test("两个接口拒绝只有ID和名称的不完整IP档案且不调用DeepSeek", async () => {
+test("经典脚本接口拒绝只有ID和名称的不完整IP档案且不调用DeepSeek", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => {
@@ -157,28 +123,23 @@ test("两个接口拒绝只有ID和名称的不完整IP档案且不调用DeepSee
   };
 
   try {
-    for (const { post, path } of [
-      { post: scriptFactoryPOST, path: "/api/script-factory" },
-      { post: contentEnginePOST, path: "/api/skill/content-engine" },
-    ]) {
-      const response = await post(postRequest(path, {
-        topic: "普通人如何判断下一轮行业变化",
-        ipProfile: { id: "ip-shuimuran", name: "水木然" },
-      }));
-      const result = await response.json();
+    const response = await scriptFactoryPOST(postRequest("/api/script-factory", {
+      topic: "普通人如何判断下一轮行业变化",
+      ipProfile: { id: "ip-shuimuran", name: "水木然" },
+    }));
+    const result = await response.json();
 
-      assert.equal(response.status, 400);
-      assert.equal(result.errorCode, "INVALID_IP_PROFILE");
-      assert.equal(result.errorField, "ipProfile.avatar");
-      assert.equal(result.apiMeta.apiCalled, false);
-    }
+    assert.equal(response.status, 400);
+    assert.equal(result.errorCode, "INVALID_IP_PROFILE");
+    assert.equal(result.errorField, "ipProfile.avatar");
+    assert.equal(result.apiMeta.apiCalled, false);
     assert.equal(called, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("选题和IP同时缺失时两个接口优先返回IP错误", async () => {
+test("选题和IP同时缺失时优先返回IP错误", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => {
@@ -187,24 +148,19 @@ test("选题和IP同时缺失时两个接口优先返回IP错误", async () => {
   };
 
   try {
-    for (const { post, path } of [
-      { post: scriptFactoryPOST, path: "/api/script-factory" },
-      { post: contentEnginePOST, path: "/api/skill/content-engine" },
-    ]) {
-      const response = await post(postRequest(path, {}));
-      const result = await response.json();
+    const response = await scriptFactoryPOST(postRequest("/api/script-factory", {}));
+    const result = await response.json();
 
-      assert.equal(response.status, 400);
-      assert.equal(result.errorCode, "MISSING_IP_PROFILE");
-      assert.equal(result.apiMeta.apiCalled, false);
-    }
+    assert.equal(response.status, 400);
+    assert.equal(result.errorCode, "MISSING_IP_PROFILE");
+    assert.equal(result.apiMeta.apiCalled, false);
     assert.equal(called, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("两个接口拒绝错误的IP数组和布尔字段类型且不调用DeepSeek", async () => {
+test("经典脚本接口拒绝错误的IP数组和布尔字段类型且不调用DeepSeek", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => {
@@ -224,23 +180,18 @@ test("两个接口拒绝错误的IP数组和布尔字段类型且不调用DeepSe
       },
     ];
 
-    for (const { post, path } of [
-      { post: scriptFactoryPOST, path: "/api/script-factory" },
-      { post: contentEnginePOST, path: "/api/skill/content-engine" },
-    ]) {
-      for (const { ipProfile, errorField } of invalidProfiles) {
-        const response = await post(postRequest(path, {
-          topic: "普通人如何判断下一轮行业变化",
-          ipProfile,
-        }));
-        const result = await response.json();
+    for (const { ipProfile, errorField } of invalidProfiles) {
+      const response = await scriptFactoryPOST(postRequest("/api/script-factory", {
+        topic: "普通人如何判断下一轮行业变化",
+        ipProfile,
+      }));
+      const result = await response.json();
 
-        assert.equal(response.status, 400);
-        assert.equal(result.errorCode, "INVALID_IP_PROFILE");
-        assert.equal(result.errorField, errorField);
-        assert.match(result.error, new RegExp(errorField.replace("ipProfile.", "")));
-        assert.equal(result.apiMeta.apiCalled, false);
-      }
+      assert.equal(response.status, 400);
+      assert.equal(result.errorCode, "INVALID_IP_PROFILE");
+      assert.equal(result.errorField, errorField);
+      assert.match(result.error, new RegExp(errorField.replace("ipProfile.", "")));
+      assert.equal(result.apiMeta.apiCalled, false);
     }
     assert.equal(called, false);
   } finally {

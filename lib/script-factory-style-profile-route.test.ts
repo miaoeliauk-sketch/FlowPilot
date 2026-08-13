@@ -99,6 +99,37 @@ const VALID_STORYBOARD = {
   },
 };
 
+const DENSE_CLOSING_CONTENT = {
+  ...VALID_CONTENT,
+  outline: VALID_CONTENT.outline.map(section => section.label === "评论区引导"
+    ? {
+        ...section,
+        content: "记住，真正的机会来自看懂变化之后的行动。明白吗？听懂了没有？",
+      }
+    : section),
+};
+
+const VALID_ARGUMENT_REVIEW = { issues: [] };
+
+const INVALID_ANALOGY_CONTENT = {
+  ...VALID_CONTENT,
+  outline: VALID_CONTENT.outline.map(section => section.label === "核心方法"
+    ? {
+        ...section,
+        content: "Jellycat靠情绪价值提高消费者的支付意愿。就像奶茶卖得越多，每杯分摊成本越低，所以情绪价值也能带来更高定价权。",
+      }
+    : section),
+};
+
+const INVALID_ANALOGY_REVIEW = {
+  issues: [{
+    code: "analogy_mechanism_mismatch",
+    sectionLabel: "核心方法",
+    excerpt: "奶茶卖得越多，每杯分摊成本越低",
+    reason: "奶茶案例说明规模效应带来的成本下降，不能直接支持情绪价值提高支付意愿形成的定价权。",
+  }],
+};
+
 function deepSeekResponse(content: unknown, id: string): Response {
   return new Response(JSON.stringify({
     id,
@@ -128,6 +159,16 @@ function scriptFactoryRequest(styleProfile: unknown): NextRequest {
       videoType: "口播",
       needsStoryboard: true,
       needsShootingTips: true,
+      evidenceGate: {
+        coverage: "FULL",
+        evidenceConfirmed: true,
+        caseNeed: "NOT_NEEDED",
+        caseDecision: "skip",
+        sourceReferences: [
+          { sourceId: "source-1", sourceTitle: "课程原文", itemId: "claim-1", kind: "claim", content: "趋势会改变普通人的选择。", originalExcerpt: "趋势最终会落到普通人的现实选择。", extractionStatus: "人工确认" },
+          { sourceId: "source-1", sourceTitle: "课程原文", itemId: "reasoning-1", kind: "reasoning", content: "判断趋势要观察需求和行为。", originalExcerpt: "判断趋势要同时观察需求、成本和普通人的真实行为。", extractionStatus: "人工确认" },
+        ],
+      },
     }),
   });
 }
@@ -144,9 +185,13 @@ test("水木然已学习的风格画像同时进入核心脚本和分镜提示�
     outboundPrompts.push(
       (body.messages ?? []).map(message => message.content ?? "").join("\n"),
     );
-    return calls === 1
-      ? deepSeekResponse(JSON.stringify(VALID_CONTENT), "content-request")
-      : deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(VALID_CONTENT), "content-request");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "quality-review-request");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
   };
 
   try {
@@ -155,10 +200,10 @@ test("水木然已学习的风格画像同时进入核心脚本和分镜提示�
 
     assert.equal(response.status, 200);
     assert.equal(result.generationStatus, "complete");
-    assert.equal(calls, 2);
-    assert.equal(outboundPrompts.length, 2);
+    assert.equal(calls, 3);
+    assert.equal(outboundPrompts.length, 3);
 
-    for (const prompt of outboundPrompts) {
+    for (const prompt of [outboundPrompts[0], outboundPrompts[2]]) {
       assert.match(prompt, /IP名称：水木然/);
       assert.match(prompt, /IP定位：商业认知作者/);
       assert.match(prompt, /目标受众：关注商业趋势和个人成长的人/);
@@ -168,6 +213,89 @@ test("水木然已学习的风格画像同时进入核心脚本和分镜提示�
       assert.match(prompt, /额外禁用表达[^\n]*空洞成功学口号/);
       assert.doesNotMatch(prompt, /设计师石空|准备装修|室内设计|比例关系|材质关系|灯光关系/);
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("经典脚本结尾密集堆叠强调式口头禅时只重生成一次再进入论证复核", async () => {
+  const originalFetch = globalThis.fetch;
+  const outboundPrompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    outboundPrompts.push(
+      (body.messages ?? []).map(message => message.content ?? "").join("\n"),
+    );
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(DENSE_CLOSING_CONTENT), "dense-content-request");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(VALID_CONTENT), "revised-content-request");
+    }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "quality-review-request");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.generationStatus, "complete");
+    assert.equal(calls, 4);
+    assert.match(outboundPrompts[0], /自然、选择性使用/);
+    assert.doesNotMatch(outboundPrompts[0], /要主动使用这个IP的常用口头禅/);
+    assert.match(outboundPrompts[0], /结尾最多使用一个强调式口头禅或反问/);
+    assert.match(outboundPrompts[0], /类比双方必须具有相同的因果机制/);
+    assert.match(outboundPrompts[1], /上次生成的结尾存在强调式口头禅或反问密集堆叠/);
+    assert.match(outboundPrompts[2], /只检查案例是否支持结论/);
+    assert.equal(result.qualityCheck.status, "passed");
+    assert.deepEqual(result.qualityCheck.warnings, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("独立论证复核发现类比机制不一致时标记待核对但不改写脚本", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(INVALID_ANALOGY_CONTENT), "content-request");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(INVALID_ANALOGY_REVIEW), "quality-review-request");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.generationStatus, "complete");
+    assert.equal(calls, 3);
+    assert.equal(result.qualityCheck.status, "needs_review");
+    assert.deepEqual(result.qualityCheck.warnings, [{
+      category: "argument",
+      code: "analogy_mechanism_mismatch",
+      title: "论证待核对",
+      sectionLabel: "核心方法",
+      excerpt: "奶茶卖得越多，每杯分摊成本越低",
+      message: "奶茶案例说明规模效应带来的成本下降，不能直接支持情绪价值提高支付意愿形成的定价权。",
+    }]);
+    assert.match(
+      result.outline.find((section: { label: string }) => section.label === "核心方法")?.content ?? "",
+      /奶茶卖得越多，每杯分摊成本越低/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

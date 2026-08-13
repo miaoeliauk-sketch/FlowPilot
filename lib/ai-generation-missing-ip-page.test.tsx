@@ -67,7 +67,7 @@ after(() => {
   restoreBrowser?.();
 });
 
-test("经典模式未选择IP时显示明确提示且不发送生成请求", async () => {
+test("未选择IP时禁用观点覆盖度检查且不发送请求", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => {
@@ -91,46 +91,21 @@ test("经典模式未选择IP时显示明确提示且不发送生成请求", asy
       view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"),
       "测试选题",
     );
-    await user.click(view.getByRole("button", { name: "生成完整内容" }));
-
-    assert.ok(view.getByText("请先在「IP身份中心」选择一个当前操盘IP"));
+    const checkButton = view.getByRole("button", { name: "检查观点覆盖度" }) as HTMLButtonElement;
+    assert.equal(checkButton.disabled, true);
+    assert.match(view.container.textContent ?? "", /未选择IP/);
     assert.equal(called, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("Content Engine未选择IP时禁用生成按钮并显示明确提示", async () => {
-  const originalFetch = globalThis.fetch;
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
-    throw new Error("未选择IP时不应发送请求");
-  };
+test("脚本工厂不再展示独立内容引擎和母稿驱动入口", async () => {
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
 
-  try {
-    const { render } = await import("@testing-library/react");
-    const userEvent = (await import("@testing-library/user-event")).default;
-    const { IPProvider } = await import("./ip-context");
-    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
-    const user = userEvent.setup({ document });
-    const view = render(
-      <IPProvider>
-        <ScriptFactoryPage />
-      </IPProvider>,
-    );
-
-    await user.click(view.getByRole("button", { name: /内容引擎（完整内容包）/ }));
-    await user.type(
-      view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"),
-      "测试选题",
-    );
-
-    const generateButton = view.getByRole("button", { name: "⚡ 一键生成完整内容包" }) as HTMLButtonElement;
-    assert.equal(generateButton.disabled, true);
-    assert.ok(view.getByText(/请先在「IP身份中心」选择一个当前操盘IP/));
-    assert.equal(called, false);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(view.queryByText(/内容引擎（完整内容包）/), null);
+  assert.equal(view.queryByText("母稿驱动"), null);
 });

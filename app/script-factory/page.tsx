@@ -2,9 +2,8 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
-import { getIPDisplayLabel } from "@/lib/ip-display";
-import { addScriptAsset, getActiveIPId, getKnowledgeEntries, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
-import { IPProfile, KnowledgeEntry, TopicAsset } from "@/lib/types";
+import { addScriptAsset, getActiveIPId, getKnowledgeEntries, getScriptAssets, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
+import { IPProfile, KnowledgeEntry, ScriptAsset, TopicAsset } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
 import { CitationSummary } from "@/components/ui/citation-summary";
@@ -18,8 +17,15 @@ import {
 import type {
   ScriptGenerationStatus,
   ScriptPartialFailure,
+  ScriptQualityCheck,
 } from "@/lib/script-factory-contract";
 import { addScriptAssetForTopic, resolveTopicForScript, TopicScriptLinkError } from "@/lib/topic-script-link";
+import {
+  resolveGenerationPermission,
+  type CaseDecision,
+  type CoverageAssessment,
+  type CoverageSourceReference,
+} from "@/lib/script-factory-coverage";
 
 const TOPIC_PLACEHOLDER = "例如：一个正在发生的变化，普通人应该如何判断？";
 
@@ -33,6 +39,13 @@ interface ShotPrompt { scene: string; prompt: string; }
 interface EditingRhythm { subtitleHighlights: string[]; soundEffects: string[]; screenRecordingCuts: string[]; caseInserts: string[]; pauses: string[]; }
 interface OutputLabels { cover: string; outline: string; shooting: string; comment: string; }
 interface ApiMeta { apiCalled: boolean; calledAt: string; model: string | null; ipUsed: string | null; mockHit: boolean; error?: string; }
+interface EvidenceAudit {
+  coverage: string;
+  reason: string;
+  sourceReferences: CoverageSourceReference[];
+  caseNeed: string;
+  caseEvidence: { title: string; sourceType: string; verificationStatus: string; sourceUrl?: string } | null;
+}
 interface ScriptResult {
   generationStatus: ScriptGenerationStatus; partialFailure: ScriptPartialFailure | null;
   ipId: string; ipName: string; topic: string; platform: string;
@@ -40,26 +53,22 @@ interface ScriptResult {
   outputLabels: OutputLabels;
   titles: TitleOption[]; coverCopy: string[]; outline: OutlineSection[]; commentGuidance: CommentGuidance;
   ipStyleExplanation: string;
+  qualityCheck?: ScriptQualityCheck;
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
+  evidenceAudit?: EvidenceAudit;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function isStoredScriptResult(value: unknown): value is ScriptResult {
-  if (!isRecord(value) || value.generationStatus !== "partial") return false;
-  const partialFailure = value.partialFailure;
+function hasStoredScriptResultShape(value: Record<string, unknown>): boolean {
   const outputLabels = value.outputLabels;
   const commentGuidance = value.commentGuidance;
   const editingRhythm = value.editingRhythm;
   const apiMeta = value.apiMeta;
   if (
-    !isRecord(partialFailure) ||
-    (partialFailure.stage !== "storyboard" && partialFailure.stage !== "execution") ||
-    typeof partialFailure.errorCode !== "string" ||
-    typeof partialFailure.message !== "string" ||
     !isRecord(outputLabels) ||
     !isRecord(commentGuidance) ||
     !Array.isArray(commentGuidance.keywordReplies) ||
@@ -98,6 +107,30 @@ function isStoredScriptResult(value: unknown): value is ScriptResult {
     Array.isArray(value.shotPrompts) &&
     rhythmFields.every(Array.isArray)
   );
+}
+
+function isStoredScriptResult(value: unknown): value is ScriptResult {
+  if (!isRecord(value) || value.generationStatus !== "partial") return false;
+  const partialFailure = value.partialFailure;
+  return (
+    isRecord(partialFailure) &&
+    (partialFailure.stage === "storyboard" || partialFailure.stage === "execution") &&
+    typeof partialFailure.errorCode === "string" &&
+    typeof partialFailure.message === "string" &&
+    hasStoredScriptResultShape(value)
+  );
+}
+
+function normalizeStoredCompleteScriptResult(value: unknown): ScriptResult | null {
+  if (!isRecord(value) || !hasStoredScriptResultShape(value)) return null;
+  const isCurrentComplete = value.generationStatus === "complete" && value.partialFailure === null;
+  const isLegacyComplete = value.generationStatus === undefined && value.partialFailure === undefined;
+  if (!isCurrentComplete && !isLegacyComplete) return null;
+  return {
+    ...(value as unknown as Omit<ScriptResult, "generationStatus" | "partialFailure">),
+    generationStatus: "complete",
+    partialFailure: null,
+  };
 }
 
 // ── 内容形式 → 时长选项（架构在后端按formatCategory切换，这里只管UI选项） ──
@@ -180,6 +213,25 @@ function ResultView({
 }) {
   return (
     <div className="flex flex-col gap-5">
+      {data.evidenceAudit && (
+        <div className="rounded-[12px] border border-[#C8F04A] bg-[#FBFEF2] p-4">
+          <div className="text-[12.5px] font-bold text-[#3B6D11]">本次脚本观点来源</div>
+          <p className="mt-1 text-[12px] leading-5 text-[#555]">{data.evidenceAudit.reason}</p>
+          <div className="mt-2 flex flex-col gap-2">
+            {data.evidenceAudit.sourceReferences.map(reference => (
+              <div key={`${reference.sourceId}-${reference.itemId}`} className="rounded-[9px] bg-white px-3 py-2 text-[12px] leading-5 text-[#444]">
+                <span className="font-semibold">【老师明确表达】《{reference.sourceTitle}》：</span>{reference.originalExcerpt}
+              </div>
+            ))}
+            {data.evidenceAudit.caseEvidence && (
+              <div className="rounded-[9px] bg-white px-3 py-2 text-[12px] leading-5 text-[#444]">
+                <span className="font-semibold">【案例／事实补充】{data.evidenceAudit.caseEvidence.title}</span>
+                <span className="ml-2 text-[#A36C16]">{data.evidenceAudit.caseEvidence.sourceType}·{data.evidenceAudit.caseEvidence.verificationStatus}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {data.generationStatus === "partial" && data.partialFailure && (
         <div className="rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4 text-[#755700]">
           <div className="text-[13px] font-bold">核心脚本已保留，补充内容未完成</div>
@@ -198,6 +250,27 @@ function ResultView({
               清除临时草稿
             </button>
           )}
+        </div>
+      )}
+
+      {data.qualityCheck && data.qualityCheck.status !== "passed" && (
+        <div className="rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4 text-[#755700]">
+          <div className="text-[13px] font-bold">
+            {data.qualityCheck.status === "unavailable" ? "自动论证复核未完成" : "脚本质量提示"}
+          </div>
+          {data.qualityCheck.message && (
+            <p className="mt-1 text-[12.5px] leading-5">{data.qualityCheck.message}</p>
+          )}
+          {data.qualityCheck.warnings.map((warning, index) => (
+            <div key={`${warning.code}-${warning.sectionLabel}-${index}`} className="mt-2 rounded-[9px] bg-white/70 p-3">
+              <div className="text-[12.5px] font-bold">{warning.title} · {warning.sectionLabel}</div>
+              <p className="mt-1 text-[12px] leading-5 text-[#6B5512]">原文：{warning.excerpt}</p>
+              <p className="mt-1 text-[12px] leading-5 text-[#6B5512]">{warning.message}</p>
+            </div>
+          ))}
+          <p className="mt-2 text-[11.5px] text-[#8A6B13]">
+            脚本仍可继续查看和使用，建议正式发布前完成核对。
+          </p>
         </div>
       )}
 
@@ -385,41 +458,19 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
 }
 
 export default function ScriptFactoryPage() {
-  const { activeIP, ips, loading: ipLoading } = useIP();
+  const { activeIP, loading: ipLoading } = useIP();
   const [topic, setTopic] = useState("");
-  // 模式切换：engine=先走SKILL.md完整工作流；classic=现有脚本生成
-  const [mode, setMode] = useState<"engine" | "classic">("classic");
-
-  // Content Engine 状态
-  const [ceGoal, setCeGoal] = useState<"traffic" | "conversion" | "persona">("traffic");
-  const [ceAudience, setCeAudience] = useState("");
-  const [ceIndustry, setCeIndustry] = useState("");
-  const [ceLoading, setCeLoading] = useState(false);
-  const [ceError, setCeError] = useState<string | null>(null);
-  const [ceResult, setCeResult] = useState<Record<string, any> | null>(null); // eslint-disable-line @typescript-eslint/no-explicit-any
-  const [ceSelectedHook, setCeSelectedHook] = useState<number | null>(null);
-
-  async function handleEngineGenerate() {
-    if (!topic.trim()) { setCeError("请输入选题或关键词"); return; }
-    if (!activeIP) { setCeError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
-    setCeLoading(true); setCeError(null); setCeResult(null);
-    try {
-      const res = await apiFetch("/api/skill/content-engine", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic, targetAudience: ceAudience, contentGoal: ceGoal,
-          industry: ceIndustry,
-          ipProfile: activeIP,
-          styleProfile: activeIP ? getStyleProfile(activeIP.id) : null,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setCeError(data.error ?? "生成失败"); return; }
-      setCeResult(data);
-    } catch (err) { setCeError(err instanceof Error ? err.message : "网络错误"); }
-    finally { setCeLoading(false); }
-  }
-
+  const [angle, setAngle] = useState("");
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const [coverage, setCoverage] = useState<CoverageAssessment | null>(null);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [caseDecision, setCaseDecision] = useState<CaseDecision | null>(null);
+  const [selectedCaseId, setSelectedCaseId] = useState("");
+  const [manualCaseTitle, setManualCaseTitle] = useState("");
+  const [manualCaseContent, setManualCaseContent] = useState("");
+  const [manualCaseSource, setManualCaseSource] = useState("");
+  const [evidenceConfirmed, setEvidenceConfirmed] = useState(false);
+  const [showInterviewOutline, setShowInterviewOutline] = useState(false);
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
@@ -437,6 +488,8 @@ export default function ScriptFactoryPage() {
     const allEntries = getKnowledgeEntries().filter(e => {
       if (e.ipId && e.ipId !== activeIP?.id) return false;
       const category = getNormalizedCategory(e);
+      // 原始内容只通过“观点覆盖度→引用确认”进入生成，不能混入通用方法检索。
+      if (category === "IP原始内容") return false;
       return isGlobalMethodCategory(category) || isIPKnowledgeCategory(category);
     });
     if (allEntries.length === 0) { setKnowledgeSearched(true); setKnowledgeRefs([]); return; }
@@ -493,6 +546,87 @@ export default function ScriptFactoryPage() {
   const [linkedTopic, setLinkedTopic] = useState<TopicAsset | null>(null);
 
   const currentFormat = FORMAT_CATEGORIES.find(f => f.id === formatCategory) ?? FORMAT_CATEGORIES[0];
+  const caseCandidates = getKnowledgeEntries().filter(entry => {
+    if (entry.ipId && entry.ipId !== activeIP?.id) return false;
+    const category = getNormalizedCategory(entry);
+    return category === "爆款案例" || category === "选题案例" || category === "IP历史内容" || category === "IP高表现内容";
+  });
+  const selectedKnowledgeCase = caseCandidates.find(entry => entry.id === selectedCaseId) ?? null;
+  const permission = resolveGenerationPermission(coverage, caseDecision, evidenceConfirmed);
+
+  function getCoverageSources(): CoverageSourceReference[] {
+    if (!activeIP) return [];
+    return getKnowledgeEntries("IP原始内容")
+      .filter(entry => entry.ipId === activeIP.id)
+      .flatMap(entry => (entry.sourceAnalysis?.items ?? []).map(item => ({
+        sourceId: entry.id,
+        sourceTitle: entry.title,
+        itemId: item.id,
+        kind: item.kind,
+        content: item.content,
+        originalExcerpt: item.originalExcerpt,
+        extractionStatus: item.extractionStatus,
+      })));
+  }
+
+  useEffect(() => {
+    setCoverage(null);
+    setCoverageError(null);
+    setCaseDecision(null);
+    setSelectedCaseId("");
+    setManualCaseTitle("");
+    setManualCaseContent("");
+    setManualCaseSource("");
+    setEvidenceConfirmed(false);
+    setShowInterviewOutline(false);
+  }, [topic, angle, activeIP?.id]);
+
+  async function handleCoverageCheck() {
+    if (!topic.trim()) { setCoverageError("请先填写选题"); return; }
+    if (!activeIP) { setCoverageError("请先在「IP身份中心」选择当前操盘IP"); return; }
+    setCoverageLoading(true);
+    setCoverageError(null);
+    setCoverage(null);
+    setCaseDecision(null);
+    setEvidenceConfirmed(false);
+    try {
+      const response = await apiFetch("/api/script-factory/coverage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: topic.trim(),
+          angle: angle.trim(),
+          sources: getCoverageSources(),
+        }),
+      });
+      const data = await response.json() as { assessment?: CoverageAssessment; error?: string };
+      if (!response.ok || !data.assessment) throw new Error(data.error ?? "观点覆盖度分析失败");
+      setCoverage(data.assessment);
+      if (data.assessment.caseNeed === "NOT_NEEDED") setCaseDecision("skip");
+    } catch (coverageFailure) {
+      setCoverageError(coverageFailure instanceof Error ? coverageFailure.message : "观点覆盖度分析失败");
+    } finally {
+      setCoverageLoading(false);
+    }
+  }
+
+  function confirmEvidence() {
+    if (!coverage || coverage.coverage !== "FULL") return;
+    if (coverage.caseNeed === "REQUIRED" && !caseDecision) {
+      setCoverageError("这个立意需要案例，请先从知识库选择或人工补充。 ");
+      return;
+    }
+    if (caseDecision === "knowledge" && !selectedKnowledgeCase) {
+      setCoverageError("请先选择一条案例。 ");
+      return;
+    }
+    if (caseDecision === "manual" && !manualCaseContent.trim()) {
+      setCoverageError("请填写案例内容。 ");
+      return;
+    }
+    setCoverageError(null);
+    setEvidenceConfirmed(true);
+  }
 
   function handleFormatChange(id: string) {
     setFormatCategory(id);
@@ -537,6 +671,39 @@ export default function ScriptFactoryPage() {
     return null;
   }
 
+  function restoreSavedScript(script: ScriptAsset, expectedIPId: string): string | null {
+    if (script.ipId !== expectedIPId) {
+      return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
+    }
+    const savedResult = normalizeStoredCompleteScriptResult(script.scriptResult);
+    if (!savedResult) {
+      return "保存的脚本数据不完整，无法恢复到脚本工厂。";
+    }
+    if (savedResult.ipId !== expectedIPId) {
+      return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
+    }
+    setTopic(savedResult.topic || script.title);
+    setPlatform(savedResult.platform);
+    setFormatCategory(savedResult.formatCategory);
+    setDuration(savedResult.durationSeconds);
+    setGoal(savedResult.goal);
+    setVideoType(savedResult.videoType);
+    setNeedsStoryboard(savedResult.storyboard.length > 0);
+    setNeedsShootingTips(savedResult.shootingSuggestions.length > 0 || savedResult.shotPrompts.length > 0);
+    setResult(savedResult);
+    setApiMeta(savedResult.apiMeta);
+    setPartialDraftSavedAt(null);
+    setLinkedTopic(null);
+    if (script.topicId) {
+      try {
+        setLinkedTopic(resolveTopicForScript(script.topicId, expectedIPId));
+      } catch {
+        // 已保存脚本仍可查看；原选题失效不应阻断脚本恢复。
+      }
+    }
+    return null;
+  }
+
   useEffect(() => {
     setLinkedTopic(null);
     setResult(null);
@@ -559,22 +726,42 @@ export default function ScriptFactoryPage() {
 
   useEffect(() => {
     if (ipLoading || typeof window === "undefined") return;
-    const topicId = new URLSearchParams(window.location.search).get("topicId");
-    if (!topicId) return;
+    const params = new URLSearchParams(window.location.search);
+    const scriptId = params.get("scriptId");
+    const topicId = params.get("topicId");
+    if (!scriptId && !topicId) return;
     if (!activeIP) {
       setLinkedTopic(null);
-      setError("这个选题需要绑定当前操盘IP，请先选择对应IP后重试。");
+      setResult(null);
+      setError("需要先选择对应的当前操盘IP，才能恢复这条内容。");
       return;
     }
+
+    if (scriptId) {
+      setLinkedTopic(null);
+      setTopic("");
+      setResult(null);
+      setApiMeta(null);
+      setPartialDraftSavedAt(null);
+      const script = getScriptAssets(activeIP.id).find(asset => asset.id === scriptId);
+      if (!script) {
+        setError("没有找到这条脚本，或脚本不属于当前操盘IP。");
+        return;
+      }
+      const restoreError = restoreSavedScript(script, activeIP.id);
+      setDraftStorageError(restoreError);
+      setError(restoreError);
+      return;
+    }
+
     try {
-      const asset = resolveTopicForScript(topicId, activeIP.id);
+      const asset = resolveTopicForScript(topicId!, activeIP.id);
       const currentDraft = getPartialScriptDraft(activeIP.id);
       if (currentDraft?.topicId?.trim() !== asset.id) {
         setResult(null);
         setApiMeta(null);
         setPartialDraftSavedAt(null);
       }
-      setMode("classic");
       setTopic(asset.title);
       setLinkedTopic(asset);
       setError(null);
@@ -599,21 +786,6 @@ export default function ScriptFactoryPage() {
     setDraftStorageError(null);
   }
 
-  // ── 验收测试：同一选题，两个IP对比（使用当前表单选中的形式/时长/目标，保持条件一致） ──
-  const [compareTopic, setCompareTopic] = useState("");
-  const [compareAId, setCompareAId] = useState("");
-  const [compareBId, setCompareBId] = useState("");
-  const [compareLoading, setCompareLoading] = useState(false);
-  const [compareError, setCompareError] = useState<string | null>(null);
-  const [compareResults, setCompareResults] = useState<{ ip: IPProfile; data: ScriptResult }[] | null>(null);
-
-  useEffect(() => {
-    if (ips.length >= 2 && !compareAId && !compareBId) {
-      setCompareAId(ips[0].id);
-      setCompareBId(ips[1].id);
-    }
-  }, [ips, compareAId, compareBId]);
-
   async function generateFor(ip: IPProfile, t: string) {
     let res: Response;
     try {
@@ -625,6 +797,36 @@ export default function ScriptFactoryPage() {
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
           formatCategory, durationSeconds: duration, goal, videoType,
           needsStoryboard, needsShootingTips,
+          evidenceGate: coverage ? {
+            coverage: coverage.coverage,
+            reason: coverage.reason,
+            sourceReferences: coverage.sourceReferences,
+            caseNeed: coverage.caseNeed,
+            caseDecision,
+            evidenceConfirmed,
+            caseEvidence: caseDecision === "knowledge" && selectedKnowledgeCase ? {
+              title: selectedKnowledgeCase.title,
+              content: selectedKnowledgeCase.rawContent,
+              sourceType: "知识库",
+              verificationStatus: selectedKnowledgeCase.sourceTier === "高" ? "有明确来源" : "未核实",
+              sourceUrl: selectedKnowledgeCase.sourceUrl,
+            } : caseDecision === "manual" ? {
+              title: manualCaseTitle.trim() || "人工补充案例",
+              content: manualCaseContent.trim(),
+              sourceType: "用户提供",
+              verificationStatus: "未经系统核验",
+              sourceUrl: manualCaseSource.trim(),
+            } : null,
+          } : null,
+          voiceSamples: getKnowledgeEntries("IP表达语料")
+            .filter(entry => entry.ipId === ip.id)
+            .slice(0, 5)
+            .map(entry => ({
+              id: entry.id,
+              title: entry.title,
+              rawText: entry.rawContent,
+              type: "IP表达语料",
+            })),
           knowledgeRefs: knowledgeRefs.map(ref => ({
             id: ref.id,
             title: ref.entry.title,
@@ -661,6 +863,7 @@ export default function ScriptFactoryPage() {
   async function handleGenerate() {
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
+    if (!permission.allowed) { setError(permission.reason); return; }
     const requestIP = activeIP;
     const requestedTopic = topic.trim();
     let linkedTopicAtRequest: TopicAsset | null = null;
@@ -750,23 +953,6 @@ export default function ScriptFactoryPage() {
     }
   }
 
-  async function runCompare() {
-    const ipA = ips.find(i => i.id === compareAId);
-    const ipB = ips.find(i => i.id === compareBId);
-    if (!compareTopic.trim()) { setCompareError("请输入测试选题"); return; }
-    if (!ipA || !ipB) { setCompareError("请选择两个IP"); return; }
-    if (ipA.id === ipB.id) { setCompareError("请选择两个不同的IP才能对比"); return; }
-    setCompareError(null); setCompareLoading(true); setCompareResults(null);
-    try {
-      const [a, b] = await Promise.all([ipA, ipB].map(async (ip) => ({ ip, data: await generateFor(ip, compareTopic) })));
-      setCompareResults([a, b]);
-    } catch (err) {
-      setCompareError(err instanceof Error ? err.message : "对比测试失败，请重试");
-    } finally {
-      setCompareLoading(false);
-    }
-  }
-
   return (
     <div className="min-h-screen p-6 md:p-8">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -776,221 +962,13 @@ export default function ScriptFactoryPage() {
           </div>
           <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">AI IP脚本工厂</h1>
           <p className="mt-1.5 max-w-[640px] text-[13.5px] leading-6 text-[#8A8A86]">
-            当前IP是谁，生成出来的脚本就应该像谁。不同内容形式用的是完全不同的内容架构——短视频是钩子+痛点+方法，课程是模块化教学结构，直播是环节化流程，不只是字数多少的区别。
+            先证明这个观点属于当前IP，再调用老师的原始内容、表达语料和必要案例组织成稿。系统不会只凭IP身份替老师创造新观点。
           </p>
         </div>
         <span className="whitespace-nowrap rounded-full bg-[#EAF3DE] px-3.5 py-1.5 text-[12px] font-semibold text-[#3B6D11]">02 · 脚本生成</span>
       </header>
 
-      {/* 模式选择器 */}
-      <div className="mb-5 flex gap-2">
-        <button onClick={() => setMode("classic")}
-          className="rounded-[10px] px-4 py-2.5 text-[13px] font-semibold"
-          style={mode === "classic" ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>
-          经典脚本生成
-        </button>
-        <button onClick={() => setMode("engine")}
-          className="rounded-[10px] px-4 py-2.5 text-[13px] font-semibold"
-          style={mode === "engine" ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>
-          ⚡ 内容引擎（完整内容包）
-        </button>
-        {mode === "engine" && (
-          <span className="flex items-center text-[12px] text-[#8A8A86]">
-            IP定位 → 10条钩子 → 结构选择 → 完整脚本 → 20标题+10封面
-          </span>
-        )}
-      </div>
-
-      {/* ════════════ 内容引擎模式 ════════════ */}
-      {mode === "engine" && (
-        <div className="flex flex-col gap-5">
-          {!ipLoading && (
-            <div className="flex flex-wrap items-center gap-2 rounded-[12px] bg-[#FBF3D6] px-4 py-2.5 text-[13px] text-[#7A5C00]">
-              {activeIP ? (
-                <>当前IP：<b>{activeIP.name}</b> · 内容引擎会结合IP定位和受众生成全套内容</>
-              ) : (
-                <>请先在「IP身份中心」选择一个当前操盘IP，再使用内容引擎生成。</>
-              )}
-            </div>
-          )}
-
-          {/* 输入区 */}
-          <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
-            <div className="mb-4 text-[13px] font-bold text-[#1C1C1B]">输入内容参数</div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="sm:col-span-2">
-                <label className="mb-1 block text-[11.5px] text-[#888]">选题 / 关键词 *</label>
-                <input value={topic} onChange={e => setTopic(e.target.value)}
-                  placeholder={TOPIC_PLACEHOLDER} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13.5px]" />
-              </div>
-              <div>
-                <label className="mb-1 block text-[11.5px] text-[#888]">目标受众（可选，留空由AI推断）</label>
-                <input value={ceAudience} onChange={e => setCeAudience(e.target.value)}
-                  placeholder="留空则使用当前IP的目标受众" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
-              </div>
-              <div>
-                <label className="mb-1 block text-[11.5px] text-[#888]">行业/赛道（可选）</label>
-                <input value={ceIndustry} onChange={e => setCeIndustry(e.target.value)}
-                  placeholder="留空则使用当前IP的内容方向" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
-              </div>
-              <div>
-                <label className="mb-1 block text-[11.5px] text-[#888]">内容目标 *</label>
-                <div className="flex gap-2">
-                  {([["traffic", "流量/转粉"], ["conversion", "变现/转化"], ["persona", "人设/信任"]] as const).map(([v, label]) => (
-                    <button key={v} onClick={() => setCeGoal(v)} className="flex-1 rounded-[8px] py-2 text-[12px] font-semibold"
-                      style={ceGoal === v ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            {ceError && <div className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{ceError}</div>}
-            <div className="mt-4 flex justify-end">
-              <button onClick={handleEngineGenerate} disabled={ceLoading || !topic.trim() || !activeIP}
-                className="rounded-[12px] bg-[#1C1C1B] px-8 py-3 text-[13.5px] font-bold text-white disabled:opacity-40">
-                {ceLoading ? "生成中（约30秒）…" : "⚡ 一键生成完整内容包"}
-              </button>
-            </div>
-          </div>
-
-          {/* 结果展示 */}
-          {ceResult && (
-            <div className="flex flex-col gap-4">
-              {/* Step 1: IP定位 */}
-              {ceResult.step1_positioning && (() => {
-                const p = ceResult.step1_positioning as Record<string, string>;
-                return (
-                  <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
-                    <div className="mb-3 text-[13px] font-bold text-[#1C1C1B]">① IP定位确认</div>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {([["受众画像", p.audienceDefinition], ["痛苦/欲望/压力", p.audiencePainOrDesire], ["建议人设", p.recommendedPersona], ["信任角度", p.trustAngle]] as [string, string][]).map(([label, val]) => (
-                        <div key={label} className="rounded-[8px] bg-[#F7F6F2] p-2.5">
-                          <div className="mb-0.5 text-[10.5px] font-bold text-[#888]">{label}</div>
-                          <p className="text-[12.5px] text-[#333]">{String(val)}</p>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="mt-2 text-[12px] text-[#639922]">💡 {p.positioningNote}</p>
-                  </div>
-                );
-              })()}
-
-              {/* Step 2: 10条钩子 */}
-              {Array.isArray(ceResult.step2_hooks) && (
-                <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
-                  <div className="mb-1 text-[13px] font-bold text-[#1C1C1B]">② 10条开头钩子</div>
-                  <p className="mb-3 text-[11.5px] text-[#888]">点选你最喜欢的一条，可以直接用于脚本开头</p>
-                  <div className="flex flex-col gap-2">
-                    {(ceResult.step2_hooks as { type: string; hook: string; tension: string; bestFor: string }[]).map((h, i) => (
-                      <div key={i} onClick={() => setCeSelectedHook(i)} className="cursor-pointer rounded-[10px] border p-3 transition"
-                        style={{ borderColor: ceSelectedHook === i ? "#1C1C1B" : "#E5E4DE", background: ceSelectedHook === i ? "#F7F6F2" : "#fff" }}>
-                        <div className="flex flex-wrap items-center gap-1.5 mb-1">
-                          <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[10.5px] font-bold text-[#555]">{h.type}</span>
-                          <span className="rounded-full bg-[#EAF3DE] px-2 py-0.5 text-[10.5px] text-[#3B6D11]">适合{h.bestFor}</span>
-                          {ceSelectedHook === i && <span className="rounded-full bg-[#1C1C1B] px-2 py-0.5 text-[10.5px] font-bold text-white">✓ 已选</span>}
-                        </div>
-                        <p className="text-[13px] font-semibold text-[#1C1C1B]">{h.hook}</p>
-                        <p className="mt-0.5 text-[11.5px] text-[#888]">张力：{h.tension}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Step 3: 文案结构 */}
-              {ceResult.step3_structure && (() => {
-                const s = ceResult.step3_structure as { chosen: string; reason: string; outline: { block: string; content: string }[] };
-                const STRUCT_LABEL: Record<string, string> = { problem_solving: "解决问题型", conflict: "认知颠覆型", recommendation: "推荐型", phenomenon: "现象分析型" };
-                return (
-                  <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
-                    <div className="mb-2 text-[13px] font-bold text-[#1C1C1B]">③ 文案结构</div>
-                    <div className="mb-2 flex items-center gap-2">
-                      <span className="rounded-full bg-[#1C1C1B] px-2.5 py-1 text-[11.5px] font-bold text-white">{STRUCT_LABEL[s.chosen] ?? s.chosen}</span>
-                      <span className="text-[12px] text-[#639922]">{s.reason}</span>
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      {s.outline?.map((block, i) => (
-                        <div key={i} className="flex gap-2.5 rounded-[8px] bg-[#F7F6F2] p-2.5">
-                          <span className="flex-shrink-0 text-[11px] font-bold text-[#888] w-16">{block.block}</span>
-                          <p className="text-[12.5px] text-[#333]">{block.content}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Step 4: 完整脚本 */}
-              {ceResult.step4_script && (() => {
-                const sc = ceResult.step4_script as Record<string, string>;
-                return (
-                  <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
-                    <div className="mb-3 text-[13px] font-bold text-[#1C1C1B]">④ 完整脚本</div>
-                    <div className="mb-3 flex flex-col gap-2">
-                      {([["开头钩子", sc.opening], ["场景铺垫", sc.scene], ["核心观点", sc.corePoint], ["方法/步骤", sc.method], ["案例/数据", sc.case], ["结尾CTA", sc.cta]] as [string, string][]).map(([label, val]) => (
-                        <div key={label} className="rounded-[8px] border-l-2 border-[#639922] pl-3 py-1">
-                          <div className="text-[10.5px] font-bold text-[#639922]">{label}</div>
-                          <p className="text-[12.5px] leading-6 text-[#333]">{String(val)}</p>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="rounded-[10px] bg-[#F7F6F2] p-3">
-                      <div className="mb-1.5 text-[11px] font-bold text-[#888]">完整口播逐字稿</div>
-                      <p className="whitespace-pre-line text-[13px] leading-7 text-[#1C1C1B]">{sc.fullScript}</p>
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Step 5: 标题 + 封面 */}
-              {ceResult.step5_titles_and_covers && (() => {
-                const tc = ceResult.step5_titles_and_covers as { titles: { title: string; angle: string; platform: string }[]; coverCopy: { copy: string; style: string }[] };
-                const ANGLE_LABEL: Record<string, string> = { pain: "痛点", result: "结果", warning: "警示", contrast: "对比", checklist: "清单", mistake: "错误", case: "案例", direct_benefit: "直接利益" };
-                return (
-                  <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-5">
-                    <div className="mb-3 text-[13px] font-bold text-[#1C1C1B]">⑤ 标题 + 封面文案</div>
-                    <div className="mb-1.5 text-[12px] font-bold text-[#555]">20条标题</div>
-                    <div className="mb-4 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                      {tc.titles?.map((t, i) => (
-                        <div key={i} className="flex items-start gap-2 rounded-[8px] bg-[#F7F6F2] px-3 py-2">
-                          <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[#1C1C1B] text-[9px] font-bold text-white">{i+1}</span>
-                          <div>
-                            <p className="text-[12.5px] text-[#1C1C1B]">{t.title}</p>
-                            <p className="text-[10.5px] text-[#888]">{ANGLE_LABEL[t.angle] ?? t.angle} · {t.platform}</p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mb-1.5 text-[12px] font-bold text-[#555]">10条封面文案</div>
-                    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-                      {tc.coverCopy?.map((c, i) => (
-                        <div key={i} className="rounded-[8px] bg-[#EAF3DE] p-2.5 text-center">
-                          <p className="text-[13px] font-bold text-[#1C1C1B]">{c.copy}</p>
-                          <p className="mt-0.5 text-[10.5px] text-[#3B6D11]">{c.style}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* Meta */}
-              {ceResult._meta && (() => {
-                const m = ceResult._meta as Record<string, string | number>;
-                return (
-                  <div className="rounded-[10px] bg-[#F7F6F2] px-4 py-2.5 text-[11.5px] text-[#888]">
-                    生成了 {m.hookCount} 条钩子 · {m.titleCount} 条标题 · {m.coverCount} 条封面文案 · 受众：{m.audience} · 目标：{m.goal}
-                  </div>
-                );
-              })()}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ════════════ 经典脚本生成模式 ════════════ */}
-      {mode === "classic" && (<>
+      <>
 
       {!ipLoading && (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-[#FBF3D6] px-4 py-2.5 text-[13px] text-[#7A5C00]">
@@ -1016,68 +994,125 @@ export default function ScriptFactoryPage() {
 
       <ApiStatusPanel meta={apiMeta} />
 
-      {/* IP差异化验收测试 */}
-      <div className="mb-6 rounded-[20px] border-2 border-dashed border-[#C8F04A] bg-[#FBFEF2] p-5">
-        <div className="mb-3">
-          <div className="text-[14px] font-bold text-[#1C1C1B]">IP差异化验收测试</div>
-          <p className="mt-0.5 text-[12px] text-[#888]">用同一个选题、同一种内容形式与时长（取下方主表单当前的选择），分别套用两个不同IP的身份各生成一套内容，对比是否明显不同。</p>
-        </div>
-        {ips.length < 2 ? (
-          <div className="rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">需要至少2个IP身份才能运行对比测试，请先在「IP身份中心」创建。</div>
-        ) : (
-          <div className="flex flex-col gap-3 md:flex-row md:items-end">
-            <div className="flex-1">
-              <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">测试选题</label>
-              <input value={compareTopic} onChange={e => setCompareTopic(e.target.value)} className="h-[56px] w-full rounded-[16px] border border-[#E5E4DE] bg-white px-5 text-[13.5px] outline-none focus:border-[#639922]" />
-            </div>
-            <div className="w-[180px] flex-shrink-0">
-              <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">IP A</label>
-              <Select
-                value={compareAId} onChange={setCompareAId}
-                options={ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))}
-              />
-            </div>
-            <div className="w-[180px] flex-shrink-0">
-              <label className="mb-1 block text-[11.5px] font-semibold text-[#888]">IP B</label>
-              <Select
-                value={compareBId} onChange={setCompareBId}
-                options={ips.map((ip): SelectOption => ({ value: ip.id, label: getIPDisplayLabel(ip, ips), avatarText: ip.avatar, avatarColor: ip.color }))}
-              />
-            </div>
-            <button onClick={runCompare} disabled={compareLoading} className="h-[56px] flex-shrink-0 rounded-[16px] px-6 text-[13.5px] font-bold disabled:opacity-50" style={{ background: "#C8F04A", color: "#1A1A1A" }}>
-              {compareLoading ? "对比中…" : "运行对比测试"}
-            </button>
-          </div>
-        )}
-        {compareError && <div className="mt-3 rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{compareError}</div>}
-        {compareLoading && <div className="mt-4 text-[12.5px] text-[#888]">正在分别用两个IP的身份各生成一套「{currentFormat.label}」内容，大约需要1-2分钟…</div>}
-        {compareResults && (
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            {compareResults.map(({ ip, data }) => (
-              <div key={ip.id} className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
-                <div className="mb-3 flex items-center gap-2">
-                  <span className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold text-white" style={{ background: ip.color }}>{ip.avatar}</span>
-                  <span className="text-[13.5px] font-bold text-[#1C1C1B]">{getIPDisplayLabel(ip, ips)}</span>
-                </div>
-                <ResultView data={data} compact />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* 主生成表单 */}
+      {/* 主工作流 */}
       <Card className="mb-6">
-        <SectionHead num="①">输入视频选题与生成条件</SectionHead>
+        <SectionHead num="①">输入选题并检查观点覆盖度</SectionHead>
         <div className="flex flex-col gap-3">
           <textarea
             value={topic} onChange={e => setTopic(e.target.value)}
             placeholder={TOPIC_PLACEHOLDER}
             className="min-h-[52px] resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"
           />
+          <input
+            aria-label="本次切入角度"
+            value={angle}
+            onChange={event => setAngle(event.target.value)}
+            placeholder="本次切入角度，例如：从创作者只追求更新频率切入"
+            className="rounded-[12px] border border-[#E5E4DE] bg-white px-4 py-3 text-[13.5px] text-[#1C1C1B] outline-none focus:border-[#639922]"
+          />
 
-          <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-[12px] leading-5 text-[#888]">系统只检查当前IP知识库中的“IP原始内容”，IP人设和表达风格不能代替老师的真实观点。</p>
+            <button
+              type="button"
+              onClick={handleCoverageCheck}
+              disabled={coverageLoading || !topic.trim() || !activeIP}
+              className="rounded-[11px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40"
+            >
+              {coverageLoading ? "检查中…" : "检查观点覆盖度"}
+            </button>
+          </div>
 
+          {coverageError && <div className="rounded-[10px] bg-[#FCEBEB] px-4 py-3 text-[12.5px] text-[#A32D2D]">{coverageError}</div>}
+
+          {coverage && (
+            <div className="rounded-[14px] border border-[#D9E8C7] bg-[#FBFEF7] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[13px] font-bold text-[#1C1C1B]">观点覆盖度</div>
+                <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${coverage.coverage === "FULL" ? "bg-[#EAF3DE] text-[#3B6D11]" : coverage.coverage === "PARTIAL" ? "bg-[#FFF0C2] text-[#7A5C00]" : "bg-[#FCEBEB] text-[#A32D2D]"}`}>
+                  {coverage.coverage === "FULL" ? "充分覆盖" : coverage.coverage === "PARTIAL" ? "部分覆盖" : "没有覆盖"}
+                </span>
+              </div>
+              <p className="mt-2 text-[13px] leading-6 text-[#444]">{coverage.reason}</p>
+              {coverage.missingDimensions.length > 0 && (
+                <p className="mt-2 text-[12px] text-[#8A6515]">当前缺口：{coverage.missingDimensions.join("、")}</p>
+              )}
+              {coverage.sourceReferences.length > 0 && (
+                <div className="mt-3 flex flex-col gap-2">
+                  <div className="text-[11.5px] font-bold text-[#639922]">找到的老师原始表达</div>
+                  {coverage.sourceReferences.map(reference => (
+                    <div key={`${reference.sourceId}-${reference.itemId}`} className="rounded-[10px] bg-white p-3">
+                      <div className="text-[11px] font-semibold text-[#888]">《{reference.sourceTitle}》· {reference.extractionStatus}</div>
+                      <p className="mt-1 text-[12.5px] leading-5 text-[#333]">{reference.originalExcerpt}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {coverage.coverage !== "FULL" && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <a href="/knowledge-intake/original" className="rounded-[9px] bg-[#1C1C1B] px-3.5 py-2 text-[12px] font-semibold text-white">补充IP原始内容</a>
+                  <button type="button" onClick={() => { setTopic(""); setAngle(""); }} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">修改选题角度</button>
+                  <button type="button" onClick={() => setShowInterviewOutline(true)} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">生成采访提纲</button>
+                </div>
+              )}
+              {showInterviewOutline && coverage.coverage !== "FULL" && (
+                <div className="mt-3 rounded-[10px] bg-[#F7F6F2] p-3 text-[12.5px] leading-6 text-[#444]">
+                  <div className="font-bold text-[#1C1C1B]">建议追问老师</div>
+                  <div>1. 对“{topic}”，您最核心的判断是什么？</div>
+                  <div>2. 您为什么这样判断？中间最关键的一层原因是什么？</div>
+                  <div>3. 哪个真实经历、案例或反例最能说明这个判断？</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {coverage?.coverage === "FULL" && (
+            <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[13px] font-bold text-[#1C1C1B]">② 判断是否需要案例</div>
+                <span className="rounded-full bg-[#F2F1ED] px-2.5 py-1 text-[11px] font-semibold text-[#555]">
+                  {coverage.caseNeed === "NOT_NEEDED" ? "不需要案例" : coverage.caseNeed === "ENHANCEMENT" ? "案例可增强" : "案例为论证必需"}
+                </span>
+              </div>
+              <p className="text-[12.5px] leading-5 text-[#555]">{coverage.caseReason}</p>
+              {coverage.caseNeed !== "NOT_NEEDED" && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {coverage.caseNeed === "ENHANCEMENT" && (
+                    <button type="button" onClick={() => { setCaseDecision("skip"); setEvidenceConfirmed(false); }} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "skip" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>本次不使用案例</button>
+                  )}
+                  <button type="button" onClick={() => { setCaseDecision("knowledge"); setEvidenceConfirmed(false); }} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "knowledge" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>从知识库选择</button>
+                  <button type="button" onClick={() => { setCaseDecision("manual"); setEvidenceConfirmed(false); }} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "manual" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>人工补充案例</button>
+                </div>
+              )}
+              {caseDecision === "knowledge" && (
+                <div className="mt-3">
+                  {caseCandidates.length > 0 ? (
+                    <select aria-label="知识库案例" value={selectedCaseId} onChange={event => { setSelectedCaseId(event.target.value); setEvidenceConfirmed(false); }} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]">
+                      <option value="">请选择案例</option>
+                      {caseCandidates.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}
+                    </select>
+                  ) : <p className="text-[12px] text-[#888]">当前知识库暂无案例，可改用人工补充。</p>}
+                </div>
+              )}
+              {caseDecision === "manual" && (
+                <div className="mt-3 grid gap-2">
+                  <input aria-label="案例名称" value={manualCaseTitle} onChange={event => { setManualCaseTitle(event.target.value); setEvidenceConfirmed(false); }} placeholder="案例人物或事件" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  <textarea aria-label="案例内容" value={manualCaseContent} onChange={event => { setManualCaseContent(event.target.value); setEvidenceConfirmed(false); }} placeholder="只填写你能确认的事实。人工提供不代表已经核实。" className="min-h-[90px] rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setEvidenceConfirmed(false); }} placeholder="来源链接或出处（可选）" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  <p className="text-[11.5px] text-[#A36C16]">来源状态：用户提供·未经系统核验。案例不能替老师生成从未表达过的核心观点。</p>
+                </div>
+              )}
+              <div className="mt-4 flex justify-end">
+                <button type="button" onClick={confirmEvidence} className="rounded-[10px] bg-[#639922] px-4 py-2.5 text-[12.5px] font-semibold text-white">确认观点依据与案例边界</button>
+              </div>
+              {evidenceConfirmed && <div className="mt-3 rounded-[9px] bg-[#EAF3DE] px-3 py-2 text-[12px] font-semibold text-[#3B6D11]">依据已确认，可以设置内容形式并生成。</div>}
+            </div>
+          )}
+
+          {evidenceConfirmed && <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />}
+
+          {evidenceConfirmed && (<>
           <div>
             <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">内容形式</label>
             <div className="flex flex-wrap gap-2">
@@ -1129,12 +1164,13 @@ export default function ScriptFactoryPage() {
               需要{formatCategory === "live" ? "直播间布置建议" : "拍摄/呈现建议"}
             </label>
             <button
-              onClick={handleGenerate} disabled={loading}
+              onClick={handleGenerate} disabled={loading || !permission.allowed}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
-              {loading ? "生成中…" : "生成完整内容"}
+              {loading ? "生成中…" : "依据确认后生成脚本"}
             </button>
           </div>
+          </>)}
         </div>
       </Card>
 
@@ -1153,8 +1189,8 @@ export default function ScriptFactoryPage() {
 
       {!loading && !result && !error && (
         <div className="py-16 text-center text-[#8A8A86]">
-          <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">还没有生成结果</h3>
-          <p className="text-[13.5px]">输入选题、选好内容形式和时长后点击「生成完整内容」，系统会按这种形式专属的内容架构生成。</p>
+          <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">先确认老师是否表达过这个观点</h3>
+          <p className="text-[13.5px]">填写选题和切入角度，系统会先从当前IP的原始内容中寻找观点依据。</p>
         </div>
       )}
 
@@ -1176,7 +1212,7 @@ export default function ScriptFactoryPage() {
           </Card>
         </>
       )} {/* !loading && result */}
-      </> )} {/* mode === classic */}
+      </>
     </div>
   );
 }

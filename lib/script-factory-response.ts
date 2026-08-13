@@ -1,7 +1,8 @@
 export type ScriptFactoryResponseErrorCode =
   | "empty_content"
   | "invalid_json"
-  | "incomplete_fields";
+  | "incomplete_fields"
+  | "quality_retry";
 
 export class ScriptFactoryResponseError extends Error {
   readonly code: ScriptFactoryResponseErrorCode;

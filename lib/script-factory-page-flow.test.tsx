@@ -121,10 +121,8 @@ test("脚本工厂不把装修演示内容作为真实初始值", async () => {
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
 
   const { render } = await import("@testing-library/react");
-  const userEvent = (await import("@testing-library/user-event")).default;
   const { IPProvider } = await import("./ip-context");
   const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
-  const user = userEvent.setup({ document });
 
   const view = render(
     <IPProvider>
@@ -137,37 +135,32 @@ test("脚本工厂不把装修演示内容作为真实初始值", async () => {
   assert.equal(classicTopic.value, "");
   assert.equal(classicTopic.placeholder, topicPlaceholder);
   assert.equal(view.queryByText(/本次演示生成要求/), null);
+  assert.equal(view.queryByText("IP差异化验收测试"), null);
+  assert.equal(view.queryByText("母稿驱动"), null);
+  assert.equal(view.queryByText(/内容引擎（完整内容包）/), null);
+  assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
+  assert.ok(view.getByRole("button", { name: "检查观点覆盖度" }));
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
-
-  await user.click(view.getByRole("button", { name: /内容引擎（完整内容包）/ }));
-  const engineTopic = view.getByPlaceholderText(topicPlaceholder) as HTMLInputElement;
-  const audiencePlaceholder = "留空则使用当前IP的目标受众";
-  const industryPlaceholder = "留空则使用当前IP的内容方向";
-  const audienceInput = view.getByPlaceholderText(audiencePlaceholder) as HTMLInputElement;
-  const industryInput = view.getByPlaceholderText(industryPlaceholder) as HTMLInputElement;
-
-  assert.equal(engineTopic.placeholder, topicPlaceholder);
-  assert.equal(audienceInput.value, "");
-  assert.equal(industryInput.value, "");
-  assert.equal(audienceInput.placeholder, audiencePlaceholder);
-  assert.equal(industryInput.placeholder, industryPlaceholder);
-  assert.doesNotMatch(view.container.textContent ?? "", /准备装修的业主|室内设计与全案装修/);
 });
 
-test("经典模式使用当前水木然档案且不提交固定装修要求", async () => {
+test("覆盖度为NONE时不允许直接生成", async () => {
   const originalFetch = globalThis.fetch;
-  let resolveRequest!: (body: Record<string, unknown>) => void;
-  const capturedRequest = new Promise<Record<string, unknown>>(resolve => {
-    resolveRequest = resolve;
-  });
+  let generationCalled = false;
 
   globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/script-factory/coverage") {
+      return new Response(JSON.stringify({ assessment: {
+        coverage: "NONE",
+        reason: "当前IP没有表达过这个观点。",
+        coveredDimensions: [],
+        missingDimensions: ["核心判断", "推理过程"],
+        sourceReferences: [],
+        caseNeed: "NOT_ASSESSED",
+        caseReason: "先补充老师原始内容。",
+      } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (String(input) === "/api/script-factory") {
-      resolveRequest(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-      return new Response(JSON.stringify({ error: "测试已截获请求" }), {
-        status: 503,
-        headers: { "Content-Type": "application/json" },
-      });
+      generationCalled = true;
     }
     return new Response(JSON.stringify({ results: [], debug: null }), {
       status: 200,
@@ -195,28 +188,59 @@ test("经典模式使用当前水木然档案且不提交固定装修要求", as
       </IPProvider>,
     );
 
-    const currentIPLabel = await view.findByText("当前操盘IP");
-    assert.match(currentIPLabel.closest("button")?.textContent ?? "", /水木然/);
-
     const topicInput = view.container.querySelector("textarea") as HTMLTextAreaElement | null;
     assert.ok(topicInput);
     const topic = "普通人如何判断下一轮行业变化";
     await user.type(topicInput, topic);
 
-    await user.click(view.getByRole("button", { name: "生成完整内容" }));
-    const [requestBody] = await Promise.all([
-      waitWithTimeout(capturedRequest, 7000),
-      view.findByText(/测试已截获请求/),
-    ]);
-    const sentIP = requestBody.ipProfile as IPProfile | undefined;
+    await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
+    assert.ok(await view.findByText("没有覆盖"));
+    assert.ok(view.getByRole("link", { name: "补充IP原始内容" }));
+    assert.ok(view.getByRole("button", { name: "生成采访提纲" }));
+    assert.equal(view.queryByRole("button", { name: "依据确认后生成脚本" }), null);
+    assert.equal(generationCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
-    assert.equal(requestBody.topic, topic);
-    assert.deepEqual(sentIP, SHUIMURAN);
-    assert.equal(Object.hasOwn(requestBody, "generationRequirement"), false);
-    assert.doesNotMatch(
-      JSON.stringify(requestBody),
-      /设计师石空|准备装修的业主|室内设计与全案装修|比例关系|材质关系|灯光关系/,
-    );
+test("充分覆盖并确认依据后才显示脚本生成按钮", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/script-factory/coverage") {
+      return new Response(JSON.stringify({ assessment: {
+        coverage: "FULL",
+        reason: "原始内容同时包含核心判断和推理。",
+        coveredDimensions: ["核心判断", "推理过程"],
+        missingDimensions: [],
+        sourceReferences: [{
+          sourceId: "source-1", sourceTitle: "课程复盘", itemId: "claim-1", kind: "claim",
+          content: "持续输出不是更换话题。", originalExcerpt: "持续输出不是每天换一个新话题。", extractionStatus: "人工确认",
+        }],
+        caseNeed: "NOT_NEEDED",
+        caseReason: "原文内部论证已经完整。",
+      } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.type(view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"), "为什么持续更新仍会被忘记？");
+    await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
+    assert.ok(await view.findByText("充分覆盖"));
+    assert.equal(view.queryByRole("button", { name: "依据确认后生成脚本" }), null);
+    await user.click(view.getByRole("button", { name: "确认观点依据与案例边界" }));
+    assert.ok(view.getByRole("button", { name: "依据确认后生成脚本" }));
   } finally {
     globalThis.fetch = originalFetch;
   }

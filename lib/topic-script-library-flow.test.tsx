@@ -132,6 +132,31 @@ function readRequestIPId(requestBody: Record<string, unknown>): string | null {
   return isRecord(ipProfile) && typeof ipProfile.id === "string" ? ipProfile.id : null;
 }
 
+function fullCoverageResponse() {
+  return new Response(JSON.stringify({ assessment: {
+    coverage: "FULL",
+    reason: "当前IP原始内容包含核心判断和推理。",
+    coveredDimensions: ["核心判断", "推理过程"],
+    missingDimensions: [],
+    sourceReferences: [{
+      sourceId: "source-1", sourceTitle: "测试原始内容", itemId: "claim-1", kind: "claim",
+      content: "测试核心判断", originalExcerpt: "测试核心判断和推理过程。", extractionStatus: "人工确认",
+    }],
+    caseNeed: "NOT_NEEDED",
+    caseReason: "原始内容内部论证完整。",
+  } }), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+async function unlockGeneration(
+  view: ReturnType<typeof import("@testing-library/react").render>,
+  user: Awaited<ReturnType<typeof import("@testing-library/user-event").default.setup>>,
+) {
+  await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
+  await view.findByText("充分覆盖");
+  await user.click(view.getByRole("button", { name: "确认观点依据与案例边界" }));
+  return view.getByRole("button", { name: "依据确认后生成脚本" });
+}
+
 before(() => {
   restoreBrowser = installBrowserEnvironment();
 });
@@ -242,7 +267,7 @@ test("脚本工厂通过topicId读取当前IP的合法选题并明确显示关�
   const linkedTopicBanner = linkedTopicHeading.parentElement;
   assert.ok(linkedTopicBanner);
   assert.ok(within(linkedTopicBanner).getByText(topic.title));
-  assert.ok(view.getByRole("button", { name: "生成完整内容" }));
+  assert.ok(view.getByRole("button", { name: "检查观点覆盖度" }));
 });
 
 test("URL打开选题B时不会继续展示同一IP选题A的旧草稿内容", { timeout: 5000 }, async () => {
@@ -497,6 +522,7 @@ test("生成失败后也拒绝恢复外层IP与内部结果IP不一致的损坏�
   }), true);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify({ error: "模拟生成失败" }), {
         status: 502,
@@ -522,7 +548,7 @@ test("生成失败后也拒绝恢复外层IP与内部结果IP不一致的损坏�
     );
 
     await view.findByDisplayValue(topic.title);
-    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    await user.click(await unlockGeneration(view, user));
     assert.ok(await view.findByText(`${activeIP.name}：API返回错误（HTTP 502）：模拟生成失败`));
     assert.equal(
       view.queryByText("核心脚本已保留，补充内容未完成") === null,
@@ -560,6 +586,7 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
   });
 
   globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       const requestBody: unknown = JSON.parse(String(init?.body ?? "{}"));
       if (!isRecord(requestBody)) throw new Error("脚本工厂请求体不是对象");
@@ -588,7 +615,7 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
     );
 
     await view.findByDisplayValue(topic.title);
-    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    await user.click(await unlockGeneration(view, user));
     const requestBody = await waitWithTimeout(capturedRequest, 3000);
     await waitFor(() => assert.equal(getScriptAssets(ip.id).length, 1));
 
@@ -623,6 +650,7 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
     markRequested = resolve;
   });
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       markRequested();
       return new Promise<Response>(resolve => {
@@ -651,7 +679,7 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
     );
 
     await view.findByDisplayValue(topic.title);
-    const clickGeneration = user.click(view.getByRole("button", { name: "生成完整内容" }));
+    const clickGeneration = user.click(await unlockGeneration(view, user));
     await waitWithTimeout(requested, 3000);
     await act(async () => {
       setActiveIPId(otherIP.id);
@@ -682,6 +710,7 @@ test("接口返回的脚本IP与请求IP不一致时停止保存", async () => {
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
 
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(createCompleteScriptResponse("ip-wrong", "错误IP", topic.title)), {
         status: 200,
@@ -707,7 +736,7 @@ test("接口返回的脚本IP与请求IP不一致时停止保存", async () => {
     );
 
     await view.findByDisplayValue(topic.title);
-    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    await user.click(await unlockGeneration(view, user));
     assert.ok(await view.findByText("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。"));
     assert.equal(getScriptAssets(ip.id).length, 0);
     assert.equal(getScriptAssets("ip-wrong").length, 0);
@@ -740,6 +769,7 @@ test("部分成功草稿保存topicId并在刷新后恢复选题关联", async (
   };
 
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(partialResponse), {
         status: 200,
@@ -765,7 +795,7 @@ test("部分成功草稿保存topicId并在刷新后恢复选题关联", async (
     );
 
     await firstView.findByDisplayValue(topic.title);
-    await user.click(firstView.getByRole("button", { name: "生成完整内容" }));
+    await user.click(await unlockGeneration(firstView, user));
     await waitFor(() => assert.ok(getPartialScriptDraft(ip.id)));
     assert.equal(getPartialScriptDraft(ip.id)?.topicId, topic.id);
 
@@ -835,6 +865,7 @@ test("生成前选题状态失效时不调用接口也不保存脚本", async ()
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   let scriptFactoryCalls = 0;
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") scriptFactoryCalls += 1;
     return new Response(JSON.stringify({ results: [], debug: null }), {
       status: 200,
@@ -856,7 +887,7 @@ test("生成前选题状态失效时不调用接口也不保存脚本", async ()
 
     await view.findByDisplayValue(topic.title);
     updateTopicAssetStatus(topic.id, "已废弃");
-    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    await user.click(await unlockGeneration(view, user));
 
     assert.ok(await view.findByText("只有已评估或已采用且评估结果完整的选题才能生成脚本"));
     assert.equal(scriptFactoryCalls, 0);
