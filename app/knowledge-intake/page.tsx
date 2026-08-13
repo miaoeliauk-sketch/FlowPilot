@@ -95,7 +95,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const isIPMode = searchParams?.scope === "ip";
   const requestedCategory = searchParams?.category ?? "";
   const availableCategories = isIPMode
-    ? IP_CATEGORIES.map(category => category.id)
+    ? IP_CATEGORIES.map(category => category.id).filter(category => category !== "IP原始内容")
     : ALL_CATS;
   const [rawContent, setRawContent] = useState("");
   const [dragging, setDragging] = useState(false);

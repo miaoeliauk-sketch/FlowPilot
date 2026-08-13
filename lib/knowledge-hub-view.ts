@@ -27,7 +27,9 @@ export const KNOWLEDGE_HUB_LEGACY_SECTIONS: ReadonlyArray<{
 export function getKnowledgeHubCorrectionCategories(ipId: string | null): string[] {
   if (ipId !== null && ipId.trim().length === 0) return [];
   const categories = ipId === null ? GLOBAL_CATEGORIES : IP_CATEGORIES;
-  return categories.map(category => category.id);
+  return categories
+    .map(category => category.id)
+    .filter(category => category !== "IP原始内容");
 }
 
 export function isKnowledgeHubCorrectionAllowed(
@@ -45,6 +47,15 @@ export function getKnowledgeHubAddAction(
   if (section === "voice") return "voice-form";
   if (section === "material") return "cover-form";
   return "smart-intake";
+}
+
+export function getKnowledgeHubIntakeHref(
+  section: KnowledgeHubSection,
+  selectedCategory: string | null,
+): string {
+  return section === "ip" && selectedCategory === "IP原始内容"
+    ? "/knowledge-intake/original"
+    : "/knowledge-intake";
 }
 
 export interface KnowledgeHubScopedEntry {

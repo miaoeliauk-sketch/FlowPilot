@@ -128,6 +128,38 @@ test("通用方法分类强制清空AI返回的ipId", async () => {
   }
 });
 
+test("普通智能入库不能绕过专属流程创建IP原始内容", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify({
+      items: [{
+        ...BASE_ITEM,
+        title: "伪原始内容",
+        category: "IP原始内容",
+      }],
+    }));
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: "这段内容没有经过Source可追溯解析。",
+      sourceType: "text",
+      activeIPId: "ip-pengpeng",
+      availableIPs: [{ id: "ip-pengpeng", name: "彭彭说AI" }],
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 500);
+    assert.equal(calls, 2);
+    assert.equal(body.apiMeta.failureCode, "INVALID_CATEGORY");
+    assert.equal(body.items, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("IP专属知识返回未知ID时降级为待确认", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => deepSeekResponse(JSON.stringify({

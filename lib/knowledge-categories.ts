@@ -7,6 +7,7 @@ export const GLOBAL_CATEGORIES = [
 ] as const;
 
 export const IP_CATEGORIES = [
+  { id: "IP原始内容",   desc: "当前IP亲自表达过的直播、课程、文章和语音资料。完整原文只保存一份，观点与表达解析都可回溯原文。" },
   { id: "IP人设资料",   desc: "当前 IP 的身份设定、定位、角色关系、专业背景和内容边界。" },
   { id: "IP表达语料",   desc: "当前 IP 的常用语气、句式、开头方式、表达习惯和口头禅。" },
   { id: "IP历史内容",   desc: "当前 IP 过去发布过的文案、脚本、逐字稿和内容记录。" },

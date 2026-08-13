@@ -65,6 +65,7 @@ ${title ? `标题：${title}\n` : ""}内容：
 ${content}`;
 
 // 类型合法性校验
+// source只能由可追溯原文入口创建，通用分类器不能建议为Source。
 const VALID_TYPES: KnowledgeItemType[] = ["case", "method", "hook", "insight", "persona"];
 const VALID_SCENES: KnowledgeItemScene[] = ["idea", "script", "analysis", "comment", "review"];
 

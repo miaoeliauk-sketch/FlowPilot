@@ -65,6 +65,7 @@ export function entryToItem(entry: KnowledgeEntry): KnowledgeItem {
 export function itemToEntryInput(item: Omit<KnowledgeItem, "id" | "createdAt" | "usageCount" | "lastUsedAt" | "usedByModules">): Omit<KnowledgeEntry, "id" | "createdAt"> {
   // 反向映射 type → category（取第一个匹配的旧分类）
   const categoryMap: Record<string, string> = {
+    source:  "IP原始内容",
     case:    "爆款案例",
     method:  "方法论",
     hook:    "Hook",
@@ -201,7 +202,7 @@ export function deleteKnowledgeItem(id: string): void {
 export function countByType(ipId?: string): Record<KnowledgeItemType, number> {
   const items = getAllKnowledgeItems(ipId);
   const counts: Record<KnowledgeItemType, number> = {
-    case: 0, method: 0, hook: 0, insight: 0, script: 0, persona: 0,
+    source: 0, case: 0, method: 0, hook: 0, insight: 0, script: 0, persona: 0,
   };
   for (const item of items) {
     counts[item.type] = (counts[item.type] ?? 0) + 1;

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { IP_CATEGORIES } from "./knowledge-categories";
+
 import {
   getKnowledgeHubCorrectionCategories,
   getKnowledgeHubAddAction,
+  getKnowledgeHubIntakeHref,
   isKnowledgeHubCorrectionAllowed,
   KNOWLEDGE_HUB_LEGACY_SECTIONS,
   matchesKnowledgeHubSection,
@@ -35,6 +38,14 @@ test("各知识区的新建入口分派到正确流程", () => {
   assert.equal(getKnowledgeHubAddAction("hook"), "hook-form");
   assert.equal(getKnowledgeHubAddAction("voice"), "voice-form");
   assert.equal(getKnowledgeHubAddAction("material"), "cover-form");
+});
+
+test("当前IP知识库展示原始内容分类，并使用专属入库入口", () => {
+  assert.equal(IP_CATEGORIES.some(category => category.id === "IP原始内容"), true);
+  assert.equal(
+    getKnowledgeHubIntakeHref("ip", "IP原始内容"),
+    "/knowledge-intake/original",
+  );
 });
 
 test("原有三个专项知识库入口保持可见", () => {

@@ -21,11 +21,22 @@ import { ALL_NEW_CATS, GLOBAL_CATEGORIES, IP_CATEGORIES, getNormalizedCategory, 
 import {
   getKnowledgeHubCorrectionCategories,
   getKnowledgeHubAddAction,
+  getKnowledgeHubIntakeHref,
   isKnowledgeHubCorrectionAllowed,
   KNOWLEDGE_HUB_LEGACY_SECTIONS,
   matchesKnowledgeHubSection,
   type KnowledgeHubSection,
 } from "@/lib/knowledge-hub-view";
+
+const SOURCE_ANALYSIS_KIND_LABEL: Record<string, string> = {
+  question: "老师在回答什么",
+  claim: "明确观点",
+  reasoning: "推理过程",
+  evidence: "案例／事实／数据",
+  concept: "概念区分",
+  topic: "可延展选题",
+  expression: "表达特征",
+};
 
 type TabId = "爆款案例" | "方法论" | "评论需求" | "选题案例" | "IP语料库" | "复盘经验库" | "IP口播" | "Hook";
 // MVP：5个核心分类，其余数据保留但入口隐藏
@@ -1198,7 +1209,7 @@ export default function KnowledgeHubPage() {
   const [uniTypeFilter, setUniTypeFilter] = useState<KnowledgeItemType[]>([]);
   const [uniSceneFilter, setUniSceneFilter] = useState<KnowledgeItemScene[]>([]);
   const [uniSearch, setUniSearch] = useState("");
-  const [uniTypeCounts, setUniTypeCounts] = useState<Record<KnowledgeItemType, number>>({ case: 0, method: 0, hook: 0, insight: 0, script: 0, persona: 0 });
+  const [uniTypeCounts, setUniTypeCounts] = useState<Record<KnowledgeItemType, number>>({ source: 0, case: 0, method: 0, hook: 0, insight: 0, script: 0, persona: 0 });
 
   // 重建管道状态
   const [rebuildLoading, setRebuildLoading] = useState(false);
@@ -1255,6 +1266,12 @@ export default function KnowledgeHubPage() {
 
   function handleXlsxImport(data: ImportedData) {
     if (data.mode !== "knowledge" || !data.knowledgeRows) return;
+    if (scopeFilter === "ip" && ipCatFilter === "IP原始内容") {
+      setXlsxImportResult(null);
+      setAnalyzeError("IP原始内容必须保存完整原文和可追溯解析，不能从Excel普通条目导入。");
+      setShowXlsx(false);
+      return;
+    }
     let count = 0; let skipped = 0;
     const catDist: Record<string, number> = {};
     const targetIPId = importScope === "ip" ? (activeIP?.id?.trim() ?? "") : null;
@@ -1519,9 +1536,15 @@ export default function KnowledgeHubPage() {
   const filteredHooks = hookEntries.filter(h => !q || h.hookText.toLowerCase().includes(q) || h.title.toLowerCase().includes(q));
   const unanalyzedCount = hookEntries.filter(h => !h.analyzed).length;
   const addAction = getKnowledgeHubAddAction(scopeFilter);
-  const smartIntakeHref = scopeFilter === "ip"
+  const standardIntakeHref = scopeFilter === "ip"
     ? `/knowledge-intake?scope=ip&category=${encodeURIComponent(ipCatFilter)}`
     : `/knowledge-intake?scope=global&category=${encodeURIComponent(globalCatFilter)}`;
+  const smartIntakeHref = getKnowledgeHubIntakeHref(
+    scopeFilter,
+    scopeFilter === "ip" ? ipCatFilter : scopeFilter === "global" ? globalCatFilter : null,
+  ) === "/knowledge-intake/original"
+    ? "/knowledge-intake/original"
+    : standardIntakeHref;
 
   function openSectionAddFlow() {
     if (addAction === "cover-form") {
@@ -1777,7 +1800,7 @@ export default function KnowledgeHubPage() {
               href={smartIntakeHref}
               className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#1C1C1B] px-4 text-[12.5px] font-semibold text-white"
             >
-              <Icon name="plus" size="sm" /> 新增知识
+              <Icon name="plus" size="sm" /> {scopeFilter === "ip" && ipCatFilter === "IP原始内容" ? "新增原始内容" : "新增知识"}
             </a>
           ) : (
             <button
@@ -1788,7 +1811,7 @@ export default function KnowledgeHubPage() {
               <Icon name="plus" size="sm" /> {addAction === "cover-form" ? "添加封面参考" : addAction === "voice-form" ? "添加口播样本" : addAction === "hook-form" ? "添加钩子" : "添加爆款案例"}
             </button>
           )}
-          {(scopeFilter === "global" || scopeFilter === "ip") && (
+          {(scopeFilter === "global" || (scopeFilter === "ip" && ipCatFilter !== "IP原始内容")) && (
             <button onClick={() => { setShowXlsx(v => !v); setXlsxImportResult(null); }}
               className="flex h-[40px] items-center gap-1.5 whitespace-nowrap rounded-[10px] bg-[#EAF3DE] px-4 text-[12.5px] font-semibold text-[#3B6D11]">
               📊 从 Excel 批量导入
@@ -1986,6 +2009,7 @@ export default function KnowledgeHubPage() {
                 "标题方法库": "你可以添加标题公式、爆款标题案例、关键词组合相关资料。",
                 "开头方法库": "你可以添加3秒钩子、冲突开头、问题开头、反常识开头相关资料。",
                 "文案框架方法库": "你可以添加口播结构、故事框架、论证框架、脚本结构相关资料。",
+                "IP原始内容": "你可以添加当前IP亲自表达过的直播、课程、文章或语音资料。完整原文只保存一份。",
                 "IP人设资料": "你可以添加当前 IP 的身份设定、定位和专业背景。",
                 "IP表达语料": "你可以添加当前 IP 的常用语气、句式和口头禅。",
                 "IP历史内容": "你可以添加当前 IP 过去发布过的文案和逐字稿。",
@@ -2001,8 +2025,8 @@ export default function KnowledgeHubPage() {
                     <button onClick={openSectionAddFlow} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 添加爆款案例</button>
                   ) : (
                     <div className="flex gap-2">
-                      <a href={smartIntakeHref} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ 智能入库</a>
-                      <button onClick={() => setShowXlsx(true)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#555]">从Excel导入</button>
+                      <a href={smartIntakeHref} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-semibold text-white">+ {curCat === "IP原始内容" ? "新增原始内容" : "智能入库"}</a>
+                      {curCat !== "IP原始内容" && <button onClick={() => setShowXlsx(true)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#555]">从Excel导入</button>}
                     </div>
                   )}
                 </div>
@@ -2185,6 +2209,27 @@ export default function KnowledgeHubPage() {
 
             {/* 内容原文 */}
             <div className="mb-4">
+              {detail.category === "IP原始内容" && detail.sourceAnalysis && (
+                <div className="mb-3 rounded-[12px] border border-[#D8E9C0] bg-[#FBFEF7] p-4">
+                  <div className="mb-3">
+                    <div className="text-[12.5px] font-bold text-[#3B6D11]">可追溯解析</div>
+                    <p className="mt-0.5 text-[11px] text-[#777]">这些内容可以回到原文，但不等于其中的外部事实已经核实。</p>
+                  </div>
+                  <div className="flex max-h-[320px] flex-col gap-2 overflow-y-auto pr-1">
+                    {detail.sourceAnalysis.items.map(item => (
+                      <div key={item.id} className="rounded-[9px] bg-white px-3 py-2.5">
+                        <div className="mb-1 flex flex-wrap items-center gap-2">
+                          <span className="text-[10.5px] font-bold text-[#1D4ED8]">{SOURCE_ANALYSIS_KIND_LABEL[item.kind] ?? item.kind}</span>
+                          <span className="text-[10px] text-[#AAA]">原文第{item.startPosition + 1}—{item.endPosition}字</span>
+                          <span className="text-[10px] text-[#92400E]">{item.extractionStatus}</span>
+                        </div>
+                        <p className="text-[12px] font-semibold leading-5 text-[#333]">{item.content}</p>
+                        <p className="mt-1 text-[11px] leading-5 text-[#777]">原文：“{item.originalExcerpt}”</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="whitespace-pre-wrap rounded-[12px] bg-[#F7F6F2] p-4 text-[13px] leading-6 text-[#333]">
                 {(() => {
                   const c = cleanRawContent(detail.rawContent);

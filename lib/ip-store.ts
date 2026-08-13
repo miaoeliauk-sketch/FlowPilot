@@ -579,6 +579,9 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
     usageRecords: e.usageRecords ?? [],
     status: e.status ?? "未使用",
     dna: e.dna ?? null,
+    sourceKind: e.sourceKind ?? null,
+    sourceName: e.sourceName ?? "",
+    sourceAnalysis: e.sourceAnalysis ?? null,
   };
 }
 
@@ -593,6 +596,19 @@ export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt"
   const entry: KnowledgeEntry = { ...input, id: genId(), createdAt: new Date().toISOString() };
   writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
   return entry;
+}
+
+export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">): KnowledgeEntry {
+  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []);
+  if (all.some(entry => entry.id === input.id)) {
+    throw new Error("知识条目编号重复，未保存任何内容");
+  }
+  const entry: KnowledgeEntry = { ...input, createdAt: new Date().toISOString() };
+  writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
+  const persisted = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, [])
+    .find(saved => saved.id === entry.id);
+  if (!persisted) throw new Error("IP原始内容写入失败，未保存半成品");
+  return migrateKnowledgeEntry(persisted);
 }
 
 export function updateKnowledgeEntry(id: string, patch: Partial<KnowledgeEntry>): void {

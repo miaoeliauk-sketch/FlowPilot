@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { callDeepSeek } from "@/lib/deepseek";
 import { KnowledgeItemType, KnowledgeItemScene } from "@/lib/types";
 
+// source只能由IP原始内容专属流程创建，通用重建不得把旧资料升级成无出处Source。
 const VALID_TYPES: KnowledgeItemType[] = ["case", "method", "hook", "insight", "script", "persona"];
 const VALID_SCENES: KnowledgeItemScene[] = ["idea", "script", "analysis", "comment", "review"];
 
@@ -130,6 +131,7 @@ function applyStrongConstraint(
 
 function defaultScenesFor(type: KnowledgeItemType): KnowledgeItemScene[] {
   const map: Record<KnowledgeItemType, KnowledgeItemScene[]> = {
+    source: ["idea", "script", "analysis"],
     case: ["idea", "analysis"],
     method: ["idea", "script"],
     hook: ["script"],
@@ -264,6 +266,22 @@ export async function POST(req: NextRequest) {
   let quarantined = 0;
 
   for (const entry of entries) {
+    if (entry.category === "IP原始内容") {
+      results.push({
+        id: entry.id,
+        title: entry.title,
+        status: "success",
+        original: { category: entry.category },
+        rebuilt: {
+          type: "source",
+          scenes: ["idea", "script", "analysis"],
+          confidence: 1,
+        },
+        reason: "IP原始内容保持Source类型，不经过通用AI重分类",
+      });
+      succeeded++;
+      continue;
+    }
     // ── 异常检测：进入 AI 前先扫描 ──
     const anomaly = detectAnomaly(entry);
 

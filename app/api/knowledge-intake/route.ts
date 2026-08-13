@@ -44,6 +44,7 @@ interface IntakeDiagnosticDetails {
 
 const CONFIDENCE_LEVELS = ["高", "中", "低"] as const;
 const INGEST_RECOMMENDATIONS = ["建议入库", "待确认", "不建议入库"] as const;
+const STANDARD_INTAKE_CATEGORIES = ALL_NEW_CATS.filter(category => category !== "IP原始内容");
 
 function intakeValidationError(
   diagnosticCode: string,
@@ -246,7 +247,7 @@ function parseInitialResponse(content: string): IntakeResponse {
     }
     if (
       typeof record.category !== "string" ||
-      !ALL_NEW_CATS.includes(record.category as never)
+      !STANDARD_INTAKE_CATEGORIES.includes(record.category as never)
     ) {
       throw intakeValidationError(
         "INVALID_CATEGORY",

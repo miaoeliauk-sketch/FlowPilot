@@ -126,6 +126,7 @@ export interface ScriptAsset {
 
 /** 知识类型：描述这条知识是什么 */
 export type KnowledgeItemType =
+  | "source"    // IP原始内容——老师真实表达过的完整资料
   | "case"      // 案例——来自爆款案例库/选题案例库
   | "method"    // 方法论——来自方法论库/复盘经验库
   | "hook"      // 钩子——来自Hook库
@@ -170,6 +171,7 @@ export interface KnowledgeItem {
 
 // 旧分类 → 新类型的映射表（供 adapter 层使用）
 export const CATEGORY_TO_TYPE: Record<string, KnowledgeItemType> = {
+  "IP原始内容": "source",
   "爆款案例":   "case",
   "方法论":     "method",
   "评论需求":   "insight",
@@ -182,6 +184,7 @@ export const CATEGORY_TO_TYPE: Record<string, KnowledgeItemType> = {
 
 // 旧分类 → 默认场景的映射表
 export const CATEGORY_TO_SCENE: Record<string, KnowledgeItemScene[]> = {
+  "IP原始内容": ["idea", "script", "analysis"],
   "爆款案例":   ["idea", "script", "analysis"],
   "方法论":     ["idea", "script", "review"],
   "评论需求":   ["idea", "comment"],
@@ -193,6 +196,7 @@ export const CATEGORY_TO_SCENE: Record<string, KnowledgeItemScene[]> = {
 };
 
 export const KNOWLEDGE_ITEM_TYPE_LABEL: Record<KnowledgeItemType, string> = {
+  source: "IP原始内容",
   case: "案例", method: "方法论", hook: "钩子",
   insight: "评论洞察", script: "脚本", persona: "人设",
 };
@@ -203,7 +207,7 @@ export const KNOWLEDGE_ITEM_SCENE_LABEL: Record<KnowledgeItemScene, string> = {
 };
 
 /** 用于 rebuild 管道做合法性校验的常量数组 */
-export const VALID_TYPES: KnowledgeItemType[] = ["case", "method", "hook", "insight", "script", "persona"];
+export const VALID_TYPES: KnowledgeItemType[] = ["source", "case", "method", "hook", "insight", "script", "persona"];
 export const VALID_SCENES: KnowledgeItemScene[] = ["idea", "script", "analysis", "comment", "review"];
 
 // ── 知识库中心：FlowPilot底层数据中心 ──
@@ -223,6 +227,7 @@ export type KnowledgeCategory =
   | "标题方法库"
   | "开头方法库"
   | "文案框架方法库"
+  | "IP原始内容"
   | "IP人设资料"
   | "IP表达语料"
   | "IP历史内容"
@@ -230,6 +235,27 @@ export type KnowledgeCategory =
   | "IP受众反馈"
   | "IP禁用规则";
 export type SourceTier = "高" | "中" | "低";
+
+export type IPOriginalSourceKind = "直播逐字稿" | "课程内容" | "文章" | "语音整理" | "其他";
+export type IPSourceAnalysisKind = "question" | "claim" | "reasoning" | "evidence" | "concept" | "topic" | "expression";
+export type IPSourceExtractionStatus = "AI提取" | "人工确认";
+
+export interface IPSourceAnalysisItem {
+  id: string;
+  kind: IPSourceAnalysisKind;
+  content: string;
+  sourceId: string;
+  startPosition: number;
+  endPosition: number;
+  originalExcerpt: string;
+  extractionStatus: IPSourceExtractionStatus;
+}
+
+export interface IPSourceAnalysis {
+  analyzedAt: string;
+  parserVersion: 1;
+  items: IPSourceAnalysisItem[];
+}
 
 // 调用方模块——故意不用closed union锁死，因为AI内容工厂/内容诊断中心这类还没建出来的
 // 模块以后接入时，不应该需要回头改这个类型定义。已知模块给个集合方便UI下拉，不是类型层面的限制。
@@ -255,6 +281,10 @@ export interface KnowledgeEntry {
   category: KnowledgeCategory;
   title: string;
   rawContent: string;
+  // IP原始内容专用：原文永远保存在rawContent，解析层可以重做但不能覆盖原文。
+  sourceKind?: IPOriginalSourceKind | null;
+  sourceName?: string;
+  sourceAnalysis?: IPSourceAnalysis | null;
   tags: string[];
   keywords: string[];
   ipId: string | null; // 所属IP，方法论/通用评论可能不属于任何IP，允许为空
@@ -502,4 +532,3 @@ export interface VideoReview {
   knowledgeEntryId: string | null;
   createdAt: string;
 }
-
