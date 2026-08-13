@@ -14,16 +14,25 @@ export function toPublicResponse(
   sources: CopyIntegrationSource[],
 ): CopyIntegrationResult {
   const facts = new Map(internal.evidenceTable.facts.map(fact => [fact.id, fact]));
+  const exclusionCandidateIds = new Map(
+    internal.evidenceTable.facts
+      .filter(fact => fact.status === "pending_user_review")
+      .map((fact, index) => [fact.id, `candidate-${index + 1}`]),
+  );
   const sections = internal.synthesis.sections.map(section => ({
     heading: section.heading,
     paragraphs: section.paragraphs.map((text, paragraphIndex) => {
       const ref = section.paragraphRefs.find(item => item.paragraphIndex === paragraphIndex);
+      const paragraphCandidateIds = (ref?.factIds ?? [])
+        .map(factId => exclusionCandidateIds.get(factId))
+        .filter((candidateId): candidateId is string => Boolean(candidateId));
       return {
         text,
         sourceIds: unique((ref?.factIds ?? []).flatMap(factId => {
           const fact = facts.get(factId);
           return fact ? [fact.sourceId] : [];
         })),
+        ...(paragraphCandidateIds.length > 0 ? { exclusionCandidateIds: paragraphCandidateIds } : {}),
       };
     }),
   }));
@@ -59,6 +68,14 @@ export function toPublicResponse(
       reason: "缺乏权威来源支撑，建议使用前核实",
       sourceIds: [fact.sourceId],
     }));
+  const exclusionCandidates = internal.evidenceTable.facts
+    .filter(fact => fact.status === "pending_user_review")
+    .map(fact => ({
+      id: exclusionCandidateIds.get(fact.id)!,
+      summary: fact.originalQuote,
+      reason: "独立复核认为这段疑似口播过渡或结构提示，建议由用户确认是否排除",
+      sourceIds: [fact.sourceId],
+    }));
   const sourceLabels = new Map(sources.map((source, index) => [source.id, `素材${index + 1}`]));
   const decisionItems = conflicts.map((conflict) => {
     const [first, second] = conflict.alternatives;
@@ -68,6 +85,9 @@ export function toPublicResponse(
   });
   if (evidenceGaps.length > 0) {
     decisionItems.push(`另有${evidenceGaps.length}处内容标记为依据不足，详见下文“未采用及依据不足内容”部分。`);
+  }
+  if (exclusionCandidates.length > 0) {
+    decisionItems.push(`另有${exclusionCandidates.length}处疑似口播支架，需确认保留或排除。`);
   }
   if (decisionItems.length === 0) decisionItems.push("当前没有需要老师决策或核实的事项。");
   const fullText = sections
@@ -79,6 +99,7 @@ export function toPublicResponse(
     draft: { sections, fullText },
     decisionSummary: { items: decisionItems },
     conflicts,
+    exclusionCandidates,
     contentReview: { exclusions, evidenceGaps },
   };
 }

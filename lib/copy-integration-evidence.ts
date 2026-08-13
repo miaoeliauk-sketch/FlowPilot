@@ -77,7 +77,7 @@ export function strictMatch(source: string, originalQuote: string) {
 }
 
 const CLASSIFICATIONS = new Set<EvidenceClassification>([
-  "usable", "evidence_gap", "exclude_time_prediction",
+  "usable", "evidence_gap", "exclude_time_prediction", "context_only",
 ]);
 const CONFIDENCES = new Set<EvidenceConfidence>(["high", "medium", "low"]);
 const RELATION_TYPES = new Set<EvidenceRelationType>(["overlap", "complement", "conflict"]);
@@ -197,11 +197,15 @@ export function parseAndValidateEvidenceExtraction(
     if (!source) fail("UNKNOWN_SOURCE_ID", "证据引用了未知素材");
     factIds.add(candidate.id);
     const match = strictMatch(source.content, candidate.originalQuote);
-    const classification: EvidenceClassification = looksLikeUnsupportedTimePrediction(`${candidate.statement}\n${candidate.originalQuote}`)
-      ? "exclude_time_prediction"
-      : candidate.classification;
+    const classification: EvidenceClassification = candidate.classification === "context_only"
+      ? "context_only"
+      : looksLikeUnsupportedTimePrediction(`${candidate.statement}\n${candidate.originalQuote}`)
+        ? "exclude_time_prediction"
+        : candidate.classification;
     const status: EvidenceStatus = classification === "exclude_time_prediction"
       ? "rejected"
+      : classification === "context_only"
+        ? "pending_user_review"
       : classification === "evidence_gap"
         ? "needs_review"
         : "verified";
@@ -401,25 +405,32 @@ export function applyEvidenceReview(content: string, table: EvidenceTable): Evid
       }
       const classification: EvidenceClassification = review.classification === "exclude_time_prediction"
         ? "exclude_time_prediction"
+        : review.classification === "context_only" && review.decision === "needs_review"
+          ? "evidence_gap"
         : review.decision === "needs_review"
           ? "evidence_gap"
           : review.classification;
-      const status: EvidenceStatus = review.decision === "rejected" || classification === "exclude_time_prediction"
-        ? "rejected"
+      const status: EvidenceStatus = classification === "context_only"
+        ? "pending_user_review"
+        : review.decision === "rejected" || classification === "exclude_time_prediction"
+          ? "rejected"
         : review.decision === "needs_review" || classification === "evidence_gap"
           ? "needs_review"
           : "verified";
       return { ...fact, classification, status };
     });
   const acceptedFactIds = new Set(facts.filter(fact => fact.status !== "rejected").map(fact => fact.id));
+  const candidateFactIds = new Set(facts.filter(fact => fact.status === "pending_user_review").map(fact => fact.id));
   const acceptedRelations = table.relations.filter((relation) => {
+    if (relation.factIds.some(factId => candidateFactIds.has(factId))) return false;
     const relationDecision = relationDecisions.get(relation.id)?.decision;
     if (relationDecision === "rejected") return false;
     if (relation.type !== "conflict" && relationDecision !== "passed") return false;
     return relation.factIds.every(factId => acceptedFactIds.has(factId));
   });
   const suggestedRelations = result.suggestedRelations.filter(relation =>
-    relation.factIds.every(factId => acceptedFactIds.has(factId)));
+    relation.factIds.every(factId => acceptedFactIds.has(factId)) &&
+    relation.factIds.every(factId => !candidateFactIds.has(factId)));
   const allRelationIds = [...acceptedRelations, ...suggestedRelations].map(relation => relation.id);
   if (new Set(allRelationIds).size !== allRelationIds.length) {
     fail("DUPLICATE_REVIEW_RELATION", "复核关系编号重复");
@@ -570,6 +581,9 @@ export function parseAndValidateSynthesis(content: string, table: EvidenceTable)
       if (factIds.length === 0 || factIds.some(factId => !usableFacts.has(factId))) {
         fail("UNKNOWN_FACT_REF", "段落计划引用了不可用事实");
       }
+      if (factIds.some(factId => usableFacts.get(factId)?.status === "pending_user_review") && factIds.length !== 1) {
+        fail("EXCLUSION_CANDIDATE_NOT_ISOLATED", "待确认排除候选必须独立成段");
+      }
       if (factIds.some(factId => representedFactIds.has(factId))) {
         fail("FACT_REPEATED", "同一观点不能在多个段落中重复使用");
       }
@@ -581,6 +595,10 @@ export function parseAndValidateSynthesis(content: string, table: EvidenceTable)
       factIds.forEach(factId => representedFactIds.add(factId));
       return { paragraphIndex, factIds };
     });
+    const candidateRefs = paragraphRefs.filter(ref => ref.factIds.some(factId => usableFacts.get(factId)?.status === "pending_user_review"));
+    if (candidateRefs.length > 0 && (paragraphRefs.length !== 1 || candidateRefs.length !== 1)) {
+      fail("EXCLUSION_CANDIDATE_NOT_ISOLATED", "待确认排除候选必须独立成节");
+    }
     const paragraphs = paragraphRefs.map((ref) => {
       const facts = ref.factIds.map(factId => usableFacts.get(factId)).filter((fact): fact is EvidenceFact => Boolean(fact));
       const relations = table.relations.filter(item => item.factIds.every(factId => ref.factIds.includes(factId)));

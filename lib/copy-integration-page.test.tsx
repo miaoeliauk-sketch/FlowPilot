@@ -159,6 +159,63 @@ test("用户提交两份素材后按固定顺序看到四部分整合结果", as
   }
 });
 
+test("排除候选在用户确认前保留在母稿并支持逐条保留或排除", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    draft: {
+      sections: [
+        { heading: "信任观点", paragraphs: [{ text: "信任是成交的前提。", sourceIds: ["source-1"] }] },
+        { heading: "口播过渡", paragraphs: [{ text: "你听懂了吗？", sourceIds: ["source-2"], exclusionCandidateIds: ["candidate-1"] }] },
+      ],
+      fullText: "## 信任观点\n\n信任是成交的前提。\n\n## 口播过渡\n\n你听懂了吗？",
+    },
+    decisionSummary: { items: ["另有1处疑似口播支架，需确认保留或排除。"] },
+    conflicts: [],
+    exclusionCandidates: [{
+      id: "candidate-1",
+      summary: "你听懂了吗？",
+      reason: "疑似口播过渡或结构提示，建议确认是否排除",
+      sourceIds: ["source-2"],
+    }],
+    contentReview: { exclusions: [], evidenceGaps: [] },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const CopyIntegrationPage = (await import("../app/copy-integration/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<CopyIntegrationPage />);
+    const contentInputs = view.getAllByLabelText("素材正文");
+    await user.type(contentInputs[0], "信任是成交的前提。");
+    await user.type(contentInputs[1], "你听懂了吗？");
+    await user.click(view.getByRole("button", { name: "开始整合" }));
+
+    assert.ok(await view.findByRole("heading", { name: "待确认排除候选" }));
+    assert.ok(view.getAllByText("你听懂了吗？").length >= 2);
+    assert.equal(view.queryByRole("button", { name: "保存母稿" }), null);
+    assert.ok(view.getByText("请先处理全部排除候选，再保存母稿。"));
+    await user.click(view.getByRole("button", { name: "保留进母稿" }));
+    assert.equal(view.queryByRole("heading", { name: "待确认排除候选" }), null);
+    assert.ok(view.getByRole("heading", { name: "口播过渡" }));
+    assert.ok(view.getByText("已保留"));
+    assert.ok(view.getByRole("button", { name: "保存母稿" }));
+    assert.equal(view.queryByText("另有1处疑似口播支架，需确认保留或排除。"), null);
+    assert.ok(view.getByText("当前没有需要老师决策或核实的事项。"));
+
+    await user.click(view.getByRole("button", { name: "开始整合" }));
+    await view.findByRole("heading", { name: "待确认排除候选" });
+    assert.equal(view.queryByText("已保留"), null);
+    await user.click(view.getByRole("button", { name: "确认排除" }));
+    assert.equal(view.queryByRole("heading", { name: "待确认排除候选" }), null);
+    assert.equal(view.queryByRole("heading", { name: "口播过渡" }), null);
+    assert.ok(view.getByText("已排除"));
+    assert.ok(view.getByText(/用户确认排除/));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("页面最多允许添加10份素材", async () => {
   const { render } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;

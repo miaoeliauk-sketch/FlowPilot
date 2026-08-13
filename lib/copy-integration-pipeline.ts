@@ -43,11 +43,12 @@ function safeCorrection(error: unknown): string {
   const code = error instanceof CopyIntegrationValidationError ? error.diagnosticCode : "MODEL_REQUEST_FAILED";
   const instructions: Record<string, string> = {
     ORIGINAL_QUOTE_NOT_FOUND: "Original_Quote未在对应素材中逐字找到。请重新逐字复制原文，不得改写或拼接。",
-    SOURCE_CONTENT_OMITTED: "有素材句子未被证据覆盖。请为每个独立观点、案例和故事提取原子事实，并用完整原句作为Original_Quote。",
+    SOURCE_CONTENT_OMITTED: "有素材文字未被证据覆盖。请为每个独立观点、案例和故事提取原子事实；提问过渡、序号、自我表态等不承载观点的文字也要逐字登记，并归类为context_only。Original_Quote必须逐字来自素材。",
     OBVIOUS_RELATION_MISSING: "跨素材中存在明显重复观点但缺少关系。请补充overlap、complement或conflict关系。",
     INVALID_RELATION_FACTS: "关系必须引用至少两个不同且真实存在的Fact_ID；conflict只能并列双方事实。",
     DUPLICATE_FACT_CONTENT: "同一素材中的同一段原文被重复登记。请只保留一次。",
     DUPLICATE_RELATION_CONTENT: "同一组Fact_ID被重复登记为相同关系。请只保留一条关系。",
+    EXCLUSION_CANDIDATE_NOT_ISOLATED: "待用户确认的排除候选必须独占一个section，且该section只能包含这一个Fact_ID的paragraphPlan，不能和正常观点合并。",
     CONFLICTING_RELATION_TYPES: "同一对Fact_ID只能有一种关系类型。请拒绝错误旧关系，再提交正确的新关系。",
     UNSUPPORTED_SPECIFIC_DETAIL: "母稿加入了证据表之外的人物、数字、时间、地点或案例。请删除所有无证据细节，只使用已登记事实。",
     UNSUPPORTED_CLAIM: "母稿存在证据无法支持的普通事实或结论。请逐句核对，只保留证据表能够直接支持的表达。",

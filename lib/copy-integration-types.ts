@@ -28,6 +28,11 @@ export interface CopyIntegrationReviewItem extends CopyIntegrationNote {
 export interface CopyIntegrationParagraph {
   text: string;
   sourceIds: string[];
+  exclusionCandidateIds?: string[];
+}
+
+export interface CopyIntegrationExclusionCandidate extends CopyIntegrationReviewItem {
+  id: string;
 }
 
 export interface CopyIntegrationResult {
@@ -42,6 +47,7 @@ export interface CopyIntegrationResult {
     items: string[];
   };
   conflicts: CopyIntegrationConflict[];
+  exclusionCandidates: CopyIntegrationExclusionCandidate[];
   contentReview: {
     exclusions: CopyIntegrationReviewItem[];
     evidenceGaps: CopyIntegrationReviewItem[];

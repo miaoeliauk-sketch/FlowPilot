@@ -5,9 +5,14 @@ import { apiFetch } from "@/lib/api-fetch";
 import { ContentMasterEditor } from "@/components/ContentMasterEditor";
 import type { ContentMaster } from "@/lib/content-master-types";
 import type {
+  CopyIntegrationExclusionCandidate,
   CopyIntegrationResult,
   CopyIntegrationSource,
 } from "@/lib/copy-integration-types";
+
+type ExclusionDecisionRecord = CopyIntegrationExclusionCandidate & {
+  decision: "kept" | "excluded";
+};
 
 const INITIAL_SOURCES: CopyIntegrationSource[] = [
   { id: "source-1", name: "素材1", content: "" },
@@ -31,6 +36,7 @@ export default function CopyIntegrationPage() {
   const [sources, setSources] = useState<CopyIntegrationSource[]>(INITIAL_SOURCES);
   const [instruction, setInstruction] = useState("");
   const [result, setResult] = useState<CopyIntegrationResult | null>(null);
+  const [exclusionDecisions, setExclusionDecisions] = useState<ExclusionDecisionRecord[]>([]);
   const [savedContentMaster, setSavedContentMaster] = useState<ContentMaster | null>(null);
   const [resultRevision, setResultRevision] = useState(0);
   const [resultSourceNames, setResultSourceNames] = useState<Map<string, string>>(new Map());
@@ -39,6 +45,62 @@ export default function CopyIntegrationPage() {
   const [copied, setCopied] = useState(false);
 
   const sourceNames = resultSourceNames;
+
+  function rebuildFullText(sections: CopyIntegrationResult["draft"]["sections"]): string {
+    return sections
+      .map(section => `## ${section.heading}\n\n${section.paragraphs.map(paragraph => paragraph.text).join("\n\n")}`)
+      .join("\n\n");
+  }
+
+  function updateCandidateDecisionSummary(items: string[], remainingCandidates: number): string[] {
+    const otherItems = items.filter(item =>
+      item !== "当前没有需要老师决策或核实的事项。" &&
+      !/^另有\d+处疑似口播支架，需确认保留或排除。$/.test(item));
+    if (remainingCandidates > 0) {
+      return [...otherItems, `另有${remainingCandidates}处疑似口播支架，需确认保留或排除。`];
+    }
+    return otherItems.length > 0 ? otherItems : ["当前没有需要老师决策或核实的事项。"];
+  }
+
+  function resolveExclusionCandidate(candidate: CopyIntegrationExclusionCandidate, decision: "keep" | "exclude") {
+    setResult((current) => {
+      if (!current) return current;
+      const exclusionCandidates = current.exclusionCandidates.filter(item => item.id !== candidate.id);
+      const sections = decision === "exclude"
+        ? current.draft.sections.filter(section => !section.paragraphs.some(paragraph =>
+          paragraph.exclusionCandidateIds?.includes(candidate.id)))
+        : current.draft.sections.map(section => ({
+          ...section,
+          paragraphs: section.paragraphs.map(paragraph => ({
+            ...paragraph,
+            exclusionCandidateIds: paragraph.exclusionCandidateIds?.filter(id => id !== candidate.id),
+          })),
+        }));
+      const exclusions = decision === "exclude"
+        ? [...current.contentReview.exclusions, {
+          summary: candidate.summary,
+          reason: `用户确认排除：${candidate.reason}`,
+          sourceIds: candidate.sourceIds,
+        }]
+        : current.contentReview.exclusions;
+      return {
+        ...current,
+        exclusionCandidates,
+        draft: { sections, fullText: rebuildFullText(sections) },
+        decisionSummary: {
+          items: updateCandidateDecisionSummary(current.decisionSummary.items, exclusionCandidates.length),
+        },
+        contentReview: { ...current.contentReview, exclusions },
+      };
+    });
+    setExclusionDecisions(current => [
+      ...current.filter(item => item.id !== candidate.id),
+      { ...candidate, decision: decision === "keep" ? "kept" : "excluded" },
+    ]);
+    setSavedContentMaster(null);
+    setCopied(false);
+    setResultRevision(current => current + 1);
+  }
 
   function updateSource(id: string, field: "name" | "content", value: string) {
     setSources((current) => current.map((source) =>
@@ -70,6 +132,7 @@ export default function CopyIntegrationPage() {
 
     setError("");
     setCopied(false);
+    setExclusionDecisions([]);
     setLoading(true);
     try {
       const response = await apiFetch("/api/copy-integration", {
@@ -91,7 +154,8 @@ export default function CopyIntegrationPage() {
         source.name.trim() || "未命名素材",
       ])));
       setSavedContentMaster(null);
-      setResult(body);
+      setExclusionDecisions([]);
+      setResult({ ...body, exclusionCandidates: body.exclusionCandidates ?? [] });
       setResultRevision(current => current + 1);
     } catch (caught) {
       setResult(null);
@@ -197,6 +261,38 @@ export default function CopyIntegrationPage() {
             </div>
           ) : (
             <div className="flex flex-col gap-6">
+              {result.exclusionCandidates.length > 0 && (
+                <section className="rounded-[16px] border border-[#E5B94D] bg-[#FFF8E6] p-4">
+                  <h2 className="text-[16px] font-bold text-[#6E5200]">待确认排除候选</h2>
+                  <p className="mt-1 text-[12px] leading-5 text-[#8A6A16]">这些内容仍保留在母稿中。只有你确认后，系统才会移除。</p>
+                  {result.exclusionCandidates.map(candidate => (
+                    <article key={candidate.id} className="mt-3 rounded-[12px] border border-[#F0DC9A] bg-white p-3.5">
+                      <p className="text-[13px] leading-6 text-[#444]">{candidate.summary}</p>
+                      <p className="mt-1 text-[12px] text-[#888]">系统建议：{candidate.reason}</p>
+                      <NoteSources sourceIds={candidate.sourceIds} names={sourceNames} />
+                      <div className="mt-3 flex gap-2">
+                        <button type="button" onClick={() => resolveExclusionCandidate(candidate, "keep")}
+                          className="rounded-full border border-[#D8D6CE] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#444]">保留进母稿</button>
+                        <button type="button" onClick={() => resolveExclusionCandidate(candidate, "exclude")}
+                          className="rounded-full bg-[#1C1C1B] px-3 py-1.5 text-[12px] font-semibold text-white">确认排除</button>
+                      </div>
+                    </article>
+                  ))}
+                </section>
+              )}
+              {exclusionDecisions.length > 0 && (
+                <section className="rounded-[14px] border border-[#E5E4DE] bg-[#FAFAF8] p-3.5">
+                  <h2 className="text-[13px] font-bold text-[#555]">候选处理记录</h2>
+                  <div className="mt-2 flex flex-col gap-2">
+                    {exclusionDecisions.map(item => (
+                      <div key={item.id} className="flex items-start justify-between gap-3 text-[12px] leading-5 text-[#666]">
+                        <span>{item.summary}</span>
+                        <span className="shrink-0 font-semibold text-[#444]">{item.decision === "kept" ? "已保留" : "已排除"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
               <div>
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="text-[16px] font-bold text-[#1C1C1B]">内容母稿</h2>
@@ -205,12 +301,22 @@ export default function CopyIntegrationPage() {
                     {copied ? "已复制" : "复制母稿"}
                   </button>
                 </div>
-                <ContentMasterEditor
-                  key={resultRevision}
-                  sections={result.draft.sections}
-                  sources={Array.from(sourceNames, ([id, name]) => ({ id, name }))}
-                  onDraftChange={setSavedContentMaster}
-                />
+                {result.exclusionCandidates.length > 0 ? (
+                  <div className="mb-5 rounded-[12px] border border-[#E5B94D] bg-[#FFF8E6] p-3.5 text-[12px] text-[#7A5A0A]">
+                    请先处理全部排除候选，再保存母稿。
+                  </div>
+                ) : result.draft.sections.length === 0 ? (
+                  <div className="mb-5 rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-3.5 text-[12px] text-[#777]">
+                    当前母稿没有可保存的内容。
+                  </div>
+                ) : (
+                  <ContentMasterEditor
+                    key={resultRevision}
+                    sections={result.draft.sections}
+                    sources={Array.from(sourceNames, ([id, name]) => ({ id, name }))}
+                    onDraftChange={setSavedContentMaster}
+                  />
+                )}
                 <div className="flex flex-col gap-5">
                   {displayedDraftSections.map((section, index) => (
                     <article key={`${section.heading}-${index}`}>

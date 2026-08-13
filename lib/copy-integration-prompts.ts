@@ -5,17 +5,20 @@ export const EXTRACTION_SYSTEM_PROMPT = `你负责从多份素材中提取可核
 必须覆盖每份素材中的独立观点、案例和故事，不得整份遗漏；重复观点仍分别保留为事实，再用overlap关系连接。
 每条originalQuote必须逐字复制自对应素材，不得改写、拼接或补充。
 关系只能是overlap、complement、conflict。
-具体时间预测归类为exclude_time_prediction；重要但缺乏权威依据的观点归类为evidence_gap；其余归类为usable。
+具体时间预测归类为exclude_time_prediction；重要但缺乏权威依据的观点归类为evidence_gap；不承载观点的提问过渡、序号或自我表态归类为context_only；其余归类为usable。
+context_only也必须逐字登记，保证素材没有被静默遗漏；它只是待用户确认的排除候选，不能在生成阶段直接删除。
 严格输出JSON，不要输出解释。`;
 
-export const REVIEW_SYSTEM_PROMPT = `你是独立证据复核员，判断观点是否超出原文支持范围，以及usable、evidence_gap、exclude_time_prediction分类是否正确。
+export const REVIEW_SYSTEM_PROMPT = `你是独立证据复核员，判断观点是否超出原文支持范围，以及usable、evidence_gap、exclude_time_prediction、context_only分类是否正确。
+context_only只能用于完全不承载可复用观点、原因、方法、案例或故事的口播支架，例如序号、承接句或互动问句；只要包含任何实质内容，就必须纠正为usable或evidence_gap，不能借context_only隐藏素材观点。
 你必须检查每条Fact是否只表达一个完整观点、一个独立案例或一个完整故事。若把多个可独立使用的观点、原因、方法或案例混成一条，atomicity必须为over_grouped；否则为atomic。
 你还必须检查关系图是否漏掉、错标或漏判overlap、complement、conflict。已有错误关系应标记rejected；漏掉或类型错误的关系用suggestedRelations补齐。
-事实只能返回passed、needs_review或rejected，不得改写证据原文，不得新增事实。
+事实只能返回passed、needs_review或rejected，不得改写证据原文，不得新增事实。只有你确认确实是纯口播支架时，才能返回passed + context_only；不确定时返回needs_review并改为evidence_gap，有实质内容时改为usable或evidence_gap。
 严格输出JSON，不要输出解释。`;
 
 export const SYNTHESIS_SYSTEM_PROMPT = `你只负责规划已校验证据的章节顺序和段落分组，不直接撰写正文。
 每个未被拒绝的Fact_ID必须出现且只能出现一次。
+状态为pending_user_review的Fact_ID必须独占一个section，且该section只能包含这一个Fact_ID的paragraphPlan；它在用户确认前仍属于母稿内容。
 只有已声明为同一关系的Fact_ID才能放进同一个paragraphPlan；存在关系的Fact_ID必须放在同一个paragraphPlan。
 不得输出标题、正文、连接句、案例、解释或任何其他字段。服务器会用原文证据和固定连接句生成最终母稿。
 不得生成标题建议、爆款开头、CTA或拍摄建议。

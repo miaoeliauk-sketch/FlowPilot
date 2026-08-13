@@ -1,7 +1,7 @@
 import type { CopyIntegrationSource } from "./copy-integration-types";
 
-export type EvidenceClassification = "usable" | "evidence_gap" | "exclude_time_prediction";
-export type EvidenceStatus = "verified" | "needs_review" | "rejected" | "human_approved";
+export type EvidenceClassification = "usable" | "evidence_gap" | "exclude_time_prediction" | "context_only";
+export type EvidenceStatus = "verified" | "needs_review" | "pending_user_review" | "rejected" | "human_approved";
 export type EvidenceConfidence = "high" | "medium" | "low";
 export type EvidenceRelationType = "overlap" | "complement" | "conflict";
 

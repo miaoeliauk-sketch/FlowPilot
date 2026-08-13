@@ -76,7 +76,7 @@ test("普通素材通过提取、独立复核和生成三次调用返回段落�
     const body = await response.json() as Record<string, any>;
     assert.equal(response.status, 200);
     assert.equal(model.calls(), 3);
-    assert.deepEqual(Object.keys(body), ["draft", "decisionSummary", "conflicts", "contentReview"]);
+    assert.deepEqual(Object.keys(body), ["draft", "decisionSummary", "conflicts", "exclusionCandidates", "contentReview"]);
     assert.deepEqual(body.draft.sections[0].paragraphs[0], {
       text: "多份素材表达了相近观点。客户不买，往往是因为缺乏信任。",
       sourceIds: ["source-1", "source-2"],
@@ -599,6 +599,223 @@ test("同一份素材中的第二个独立观点不能被提取阶段遗漏", as
   try {
     assert.equal((await POST(request(multiPointSources))).status, 502);
     assert.equal(model.calls(), 2);
+  } finally { model.restore(); }
+});
+
+test("疑似口播支架经复核后作为待确认候选保留在母稿", async () => {
+  const spokenSources = [
+    {
+      id: "source-1",
+      name: "素材1",
+      content: "客户不买，往往是因为缺乏信任。我知道说真话可能会被骂，但我还是要讲出来。",
+    },
+    {
+      id: "source-2",
+      name: "素材2",
+      content: "那怎么办？第一，先通过持续兑现承诺建立信任。",
+    },
+  ];
+  const extraction = {
+    facts: [
+      {
+        id: "F01",
+        statement: "客户不买往往是因为缺乏信任",
+        originalQuote: "客户不买，往往是因为缺乏信任。",
+        sourceId: "source-1",
+        classification: "usable",
+        confidence: "high",
+      },
+      {
+        id: "F02",
+        statement: "持续兑现承诺可以建立信任",
+        originalQuote: "先通过持续兑现承诺建立信任。",
+        sourceId: "source-2",
+        classification: "usable",
+        confidence: "high",
+      },
+      {
+        id: "F03",
+        statement: "口播自我表态",
+        originalQuote: "我知道说真话可能会被骂，但我还是要讲出来。",
+        sourceId: "source-1",
+        classification: "context_only",
+        confidence: "high",
+      },
+      {
+        id: "F04",
+        statement: "提问和序号过渡",
+        originalQuote: "那怎么办？第一，",
+        sourceId: "source-2",
+        classification: "context_only",
+        confidence: "high",
+      },
+    ],
+    relations: [{
+      id: "R01",
+      type: "complement",
+      factIds: ["F01", "F02"],
+      summary: "原因与方法互补",
+    }],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({
+      factId: fact.id,
+      decision: "passed",
+      classification: fact.classification,
+      atomicity: "atomic",
+      reason: "原文支持",
+    })),
+    relationDecisions: [{ relationId: "R01", decision: "passed", reason: "关系成立" }],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01", "F02"] }] },
+    { paragraphPlans: [{ factIds: ["F03"] }] },
+    { paragraphPlans: [{ factIds: ["F04"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const response = await POST(request(spokenSources));
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(model.calls(), 3);
+    assert.match(body.draft.fullText, /说真话可能会被骂/);
+    assert.match(body.draft.fullText, /那怎么办/);
+    assert.deepEqual(body.exclusionCandidates.map((item: { id: string }) => item.id), ["candidate-1", "candidate-2"]);
+    assert.deepEqual(body.draft.sections[1].paragraphs[0].exclusionCandidateIds, ["candidate-1"]);
+    assert.doesNotMatch(JSON.stringify(body), /context_only|pending_user_review|"F03"|"F04"/);
+  } finally { model.restore(); }
+});
+
+test("复核建议拒绝口播支架时仍须等待用户确认", async () => {
+  const sources = [
+    { id: "source-1", name: "素材1", content: "你听懂了吗？" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "互动问句", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
+      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "rejected", classification: "context_only", atomicity: "atomic", reason: "建议排除" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const response = await POST(request(sources));
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.match(body.draft.fullText, /你听懂了吗/);
+    assert.equal(body.exclusionCandidates.length, 1);
+    assert.equal(body.contentReview.exclusions.length, 0);
+  } finally { model.restore(); }
+});
+
+test("复核不确定是否为口播支架时转为依据不足并继续保留", async () => {
+  const sources = [
+    { id: "source-1", name: "素材1", content: "那怎么办？" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "提问过渡", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
+      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const invalidReview = {
+    decisions: [
+      { factId: "F01", decision: "needs_review", classification: "context_only", atomicity: "atomic", reason: "不确定" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" },
+    ],
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+  ] } };
+  const model = installModelSequence([extraction, invalidReview, synthesis]);
+  try {
+    const response = await POST(request(sources));
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(model.calls(), 3);
+    assert.equal(body.exclusionCandidates.length, 0);
+    assert.equal(body.contentReview.evidenceGaps.length, 1);
+    assert.match(body.draft.fullText, /那怎么办/);
+  } finally { model.restore(); }
+});
+
+test("待确认排除候选不参与关系图并独立保留成节", async () => {
+  const sources = [
+    { id: "source-1", name: "素材1", content: "你听懂了吗？" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "互动问句", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
+      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "错误关系" }],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: fact.classification, atomicity: "atomic", reason: "已复核" })),
+    relationDecisions: [{ relationId: "R01", decision: "passed", reason: "模型误保留" }],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const response = await POST(request(sources));
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(body.conflicts.length, 0);
+    assert.deepEqual(body.exclusionCandidates.map((item: { id: string }) => item.id), ["candidate-1"]);
+  } finally { model.restore(); }
+});
+
+test("待确认排除候选与正常观点放在同一节时拒绝生成", async () => {
+  const sources = [
+    { id: "source-1", name: "素材1", content: "你听懂了吗？" },
+    { id: "source-2", name: "素材2", content: "复盘可以帮助团队发现问题。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "互动问句", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
+      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: fact.classification, atomicity: "atomic", reason: "已复核" })),
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const invalidSynthesis = { draft: { sections: [{
+    paragraphPlans: [{ factIds: ["F02"] }, { factIds: ["F01"] }],
+  }] } };
+  const model = installModelSequence([extraction, review, invalidSynthesis, invalidSynthesis]);
+  try {
+    const response = await POST(request(sources));
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 502);
+    assert.equal(model.calls(), 4);
+    assert.deepEqual(body, { error: "文案整合失败，请重试" });
   } finally { model.restore(); }
 });
 
