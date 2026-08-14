@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { IPProfile } from "./types";
+import type { IPProfile, IPStyleProfile } from "./types";
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
+  private readonly writeFailureKeys = new Set<string>();
 
   get length() {
     return this.values.size;
@@ -11,6 +12,7 @@ class MemoryStorage implements Storage {
 
   clear() {
     this.values.clear();
+    this.writeFailureKeys.clear();
   }
 
   getItem(key: string) {
@@ -26,7 +28,13 @@ class MemoryStorage implements Storage {
   }
 
   setItem(key: string, value: string) {
+    if (this.writeFailureKeys.has(key)) throw new Error("模拟画像写入失败");
     this.values.set(key, value);
+  }
+
+  setWriteFailure(key: string, shouldFail: boolean) {
+    if (shouldFail) this.writeFailureKeys.add(key);
+    else this.writeFailureKeys.delete(key);
   }
 }
 
@@ -72,6 +80,22 @@ const sameNameIPs = () => [
   makeIP("ip-original-a1b2c3", "同名IP", "2026-07-28T00:00:00.000Z"),
   makeIP("ip-newer-d4e5f6", "同名IP", "2026-07-29T00:00:00.000Z"),
 ];
+
+const styleProfile = (ipId: string): IPStyleProfile => ({
+  ipId,
+  openingHabits: ["先抛判断", "用问题引入", "从场景切入"],
+  viewpointStyle: "先给结论，再解释原因。",
+  sentenceLength: "长短句结合",
+  emotionalTone: ["犀利", "克制"],
+  commonPhrases: ["真正的问题是", "换句话说", "仔细想想", "所以", "你会发现"],
+  closingHabits: ["回到行动", "用判断收束", "留下反问"],
+  forbiddenExpressions: ["空洞口号", "过度书面语", "绝对化承诺"],
+  styleSummary: "先用判断切入，再通过具体场景推进。",
+  sourceSampleIds: ["sample-1"],
+  sourceSampleTitles: ["样本一"],
+  extractedAt: "2026-08-14T00:00:00.000Z",
+  model: "deepseek-v4-flash",
+});
 
 const seed = (ips = sameNameIPs(), activeIPId: string | null = null) => {
   storage.clear();
@@ -224,4 +248,42 @@ test("激活其中一个同名IP时仍展示其他同名记录", async () => {
   seed(sameNameIPs(), "ip-original-a1b2c3");
 
   assert.equal(getAllIPs().length, 2);
+});
+
+test("语气画像写入失败时明确报错且不伪装保存成功", async () => {
+  const { saveStyleProfile } = await import("./ip-store");
+  storage.clear();
+  storage.setWriteFailure("ipwr:ipStyleProfiles", true);
+
+  assert.throws(
+    () => saveStyleProfile(styleProfile("ip-a")),
+    /语气画像保存失败/,
+  );
+  assert.equal(storage.getItem("ipwr:ipStyleProfiles"), null);
+});
+
+test("损坏的旧语气画像数据不会被当成空数组覆盖", async () => {
+  const { saveStyleProfile } = await import("./ip-store");
+  storage.clear();
+  const corrupted = "{not-valid-json";
+  storage.setItem("ipwr:ipStyleProfiles", corrupted);
+
+  assert.throws(
+    () => saveStyleProfile(styleProfile("ip-a")),
+    /语气画像数据已损坏/,
+  );
+  assert.equal(storage.getItem("ipwr:ipStyleProfiles"), corrupted);
+});
+
+test("结构残缺的旧语气画像也会明确报错并保留原数据", async () => {
+  const { saveStyleProfile } = await import("./ip-store");
+  storage.clear();
+  const structurallyCorrupted = JSON.stringify([null]);
+  storage.setItem("ipwr:ipStyleProfiles", structurallyCorrupted);
+
+  assert.throws(
+    () => saveStyleProfile(styleProfile("ip-a")),
+    /语气画像数据已损坏/,
+  );
+  assert.equal(storage.getItem("ipwr:ipStyleProfiles"), structurallyCorrupted);
 });

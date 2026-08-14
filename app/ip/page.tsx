@@ -6,6 +6,7 @@ import { getIPDisplayLabel } from "@/lib/ip-display";
 import { IPProfile, VoiceSample, IPStyleProfile } from "@/lib/types";
 import { getTopicAssets, getCommentAssets, getScriptAssets, getVoiceSamples, addVoiceSample, deleteVoiceSample, getStyleProfile, saveStyleProfile } from "@/lib/ip-store";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
+import { buildVoiceStyleProfileForSave, getDefaultVoiceStyleSampleIds } from "@/lib/voice-style-profile";
 import { Icon } from "@/components/ui/icon";
 import { Select } from "@/components/ui/select";
 import { SCRIPT_DIRECTOR_PROFILE_OPTIONS, type ScriptDirectorProfileId } from "@/lib/script-director-profile";
@@ -245,7 +246,7 @@ function ConfirmDeleteModal({ ip, onClose, onConfirm }: { ip: IPProfile; onClose
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-5" onClick={onClose}>
       <div className="card w-full max-w-[380px] p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-2 text-[15px] font-bold text-[#1A1A1A]">删除「{ip.name}」？</div>
-        <p className="mb-5 text-[13px] leading-6 text-[#888]">删除后该IP的基础信息将无法恢复，已归档的选题/脚本/评论资产暂不会被删除。</p>
+        <p className="mb-5 text-[13px] leading-6 text-[#888]">删除后该IP的基础信息将无法恢复，已归档的选题、脚本、评论、语料和语气画像暂不会被删除。</p>
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="rounded-[12px] px-4 py-2 text-[13px] font-medium text-[#888] hover:bg-[#F2F1ED]">取消</button>
           <button onClick={onConfirm} className="rounded-[12px] px-4 py-2 text-[13px] font-bold" style={{ background: "#E0608E", color: "#fff" }}>确认删除</button>
@@ -325,6 +326,7 @@ interface ExtractApiMeta { apiCalled: boolean; calledAt: string; model: string |
 
 function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void }) {
   const [samples, setSamples] = useState<VoiceSample[]>([]);
+  const [selectedSampleIds, setSelectedSampleIds] = useState<string[]>([]);
   const [profile, setProfile] = useState<IPStyleProfile | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [title, setTitle] = useState("");
@@ -335,48 +337,56 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
   const [extractMeta, setExtractMeta] = useState<ExtractApiMeta | null>(null);
 
   useEffect(() => {
-    setSamples(getVoiceSamples(ip.id));
+    const storedSamples = getVoiceSamples(ip.id);
+    setSamples(storedSamples);
+    setSelectedSampleIds(getDefaultVoiceStyleSampleIds(storedSamples));
     setProfile(getStyleProfile(ip.id));
   }, [ip.id]);
 
   const handleAdd = () => {
     if (!rawText.trim()) return;
-    addVoiceSample({ ipId: ip.id, title: title.trim() || `未命名样本${samples.length + 1}`, type, rawText: rawText.trim(), note: "" });
+    const added = addVoiceSample({ ipId: ip.id, title: title.trim() || `未命名样本${samples.length + 1}`, type, rawText: rawText.trim(), note: "" });
     setSamples(getVoiceSamples(ip.id));
+    setSelectedSampleIds((current) => current.length < 5 ? [...current, added.id] : current);
     setTitle(""); setRawText(""); setType("口播逐字稿"); setShowAddForm(false);
   };
 
   const handleDelete = (id: string) => {
     deleteVoiceSample(id);
     setSamples(getVoiceSamples(ip.id));
+    setSelectedSampleIds((current) => current.filter((sampleId) => sampleId !== id));
+  };
+
+  const toggleSample = (id: string) => {
+    setSelectedSampleIds((current) => {
+      if (current.includes(id)) return current.filter((sampleId) => sampleId !== id);
+      if (current.length >= 5) {
+        setExtractError("一次最多选择5篇样本");
+        return current;
+      }
+      setExtractError(null);
+      return [...current, id];
+    });
   };
 
   const handleExtract = async () => {
-    if (samples.length === 0) { setExtractError("请先至少添加1篇样本，建议3-5篇效果更稳定"); return; }
+    const selectedSamples = samples.filter((sample) => selectedSampleIds.includes(sample.id));
+    if (selectedSamples.length === 0) { setExtractError("请先选择至少1篇样本，建议3-5篇效果更稳定"); return; }
+    setShowAddForm(false);
     setExtracting(true); setExtractError(null);
     try {
       const res = await apiFetch("/api/voice-style-extract", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ipName: ip.name, samples: samples.map(s => ({ id: s.id, title: s.title, rawText: s.rawText })) }),
+        body: JSON.stringify({ ipName: ip.name, samples: selectedSamples.map(s => ({ id: s.id, title: s.title, rawText: s.rawText })) }),
       });
       const data = await res.json();
       if (data.apiMeta) setExtractMeta(data.apiMeta);
-      if (!res.ok) { setExtractError(data.error ?? `HTTP ${res.status}`); setExtracting(false); return; }
-      const newProfile: IPStyleProfile = {
-        ipId: ip.id,
-        openingHabits: data.openingHabits ?? [],
-        viewpointStyle: data.viewpointStyle ?? "",
-        sentenceLength: data.sentenceLength ?? "长短句结合",
-        emotionalTone: data.emotionalTone ?? [],
-        commonPhrases: data.commonPhrases ?? [],
-        closingHabits: data.closingHabits ?? [],
-        forbiddenExpressions: data.forbiddenExpressions ?? [],
-        styleSummary: data.styleSummary ?? "",
-        sourceSampleIds: data.sourceSampleIds ?? [],
-        sourceSampleTitles: data.sourceSampleTitles ?? [],
-        extractedAt: data.extractedAt ?? new Date().toISOString(),
-        model: data.model ?? "deepseek-v4-flash",
-      };
+      if (!res.ok) { setExtractError(data.error ?? `HTTP ${res.status}`); return; }
+      const newProfile = buildVoiceStyleProfileForSave(data, ip.id);
+      if (!newProfile) {
+        setExtractError("AI返回的风格画像不完整，本次结果未保存，请重试");
+        return;
+      }
       saveStyleProfile(newProfile);
       setProfile(newProfile);
     } catch (err) {
@@ -436,16 +446,19 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
 
           <button
             onClick={handleExtract}
-            disabled={extracting || samples.length === 0}
+            disabled={extracting || selectedSampleIds.length === 0}
             className="mb-5 flex w-full items-center justify-center gap-2 rounded-[12px] bg-[#1C1C1B] px-4 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40"
           >
-            <Icon name="sparkle" /> {extracting ? "学习中…" : profile ? "重新学习风格" : "学习风格"}
+            <Icon name="sparkle" /> {extracting ? "学习中，请稍候，请勿重复点击" : profile ? "重新学习风格" : "学习风格"}
           </button>
 
           {/* 样本列表 */}
           <div className="mb-2 flex items-center justify-between">
-            <div className="text-[12px] font-bold text-[#888]">样本列表（{samples.length}篇）</div>
-            <button onClick={() => setShowAddForm(v => !v)} className="flex items-center gap-1 rounded-[8px] bg-[#F2F1ED] px-2.5 py-1.5 text-[11.5px] font-semibold text-[#555]">
+            <div>
+              <div className="text-[12px] font-bold text-[#888]">样本列表（{samples.length}篇）</div>
+              <div className="mt-0.5 text-[10.5px] text-[#AAA]">本次已选{selectedSampleIds.length}/5篇，默认选择前5篇</div>
+            </div>
+            <button disabled={extracting} onClick={() => setShowAddForm(v => !v)} className="flex items-center gap-1 rounded-[8px] bg-[#F2F1ED] px-2.5 py-1.5 text-[11.5px] font-semibold text-[#555] disabled:opacity-40">
               <Icon name="plus" /> 添加样本
             </button>
           </div>
@@ -477,6 +490,15 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
             )}
             {samples.map(s => (
               <div key={s.id} className="flex items-start justify-between gap-3 rounded-[10px] border border-[#F0EFE9] p-3">
+                <button
+                  type="button"
+                  onClick={() => toggleSample(s.id)}
+                  disabled={extracting}
+                  className={`mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border text-[11px] ${selectedSampleIds.includes(s.id) ? "border-[#639922] bg-[#C8F04A] text-[#1A1A1A]" : "border-[#D7D6D0] bg-white text-transparent"}`}
+                  aria-label={`${selectedSampleIds.includes(s.id) ? "取消选择" : "选择"}${s.title}`}
+                >
+                  ✓
+                </button>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="text-[12.5px] font-semibold text-[#1C1C1B]">{s.title}</span>
@@ -485,7 +507,12 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
                   <p className="mt-1 line-clamp-2 text-[11.5px] leading-5 text-[#999]">{s.rawText.slice(0, 100)}…</p>
                   <div className="mt-1 text-[10.5px] text-[#BBB]">{s.rawText.trim().length}字 · {new Date(s.createdAt).toLocaleDateString()}</div>
                 </div>
-                <button onClick={() => handleDelete(s.id)} className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[8px] text-[#999] hover:bg-[#FCEBEB] hover:text-[#A32D2D]">
+                <button
+                  disabled={extracting}
+                  onClick={() => handleDelete(s.id)}
+                  aria-label={`删除${s.title}`}
+                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[8px] text-[#999] hover:bg-[#FCEBEB] hover:text-[#A32D2D] disabled:opacity-40"
+                >
                   <Icon name="trash" />
                 </button>
               </div>

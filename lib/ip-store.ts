@@ -6,6 +6,7 @@ import {
   parseTopicBoardResult,
   TopicBoardContractError,
 } from "./topic-board-contract";
+import { buildVoiceStyleProfileForSave } from "./voice-style-profile";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -55,6 +56,21 @@ export class CoverRefStoreError extends Error {
   ) {
     super(message);
     this.name = "CoverRefStoreError";
+  }
+}
+
+export type IPStyleProfileStoreErrorCode =
+  | "STYLE_PROFILE_STORAGE_READ_FAILED"
+  | "STYLE_PROFILE_DATA_CORRUPTED"
+  | "STYLE_PROFILE_STORAGE_WRITE_FAILED";
+
+export class IPStyleProfileStoreError extends Error {
+  constructor(
+    public readonly code: IPStyleProfileStoreErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "IPStyleProfileStoreError";
   }
 }
 
@@ -314,11 +330,60 @@ export function getStyleProfile(ipId: string): IPStyleProfile | null {
   return all.find((p) => p.ipId === ipId) ?? null;
 }
 
+function readStyleProfilesForWrite(): IPStyleProfile[] {
+  if (typeof window === "undefined") {
+    throw new IPStyleProfileStoreError(
+      "STYLE_PROFILE_STORAGE_READ_FAILED",
+      "语气画像保存失败：当前环境无法访问本地存储",
+    );
+  }
+
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(KEY_STYLE_PROFILES);
+  } catch {
+    throw new IPStyleProfileStoreError(
+      "STYLE_PROFILE_STORAGE_READ_FAILED",
+      "语气画像保存失败：无法读取原有数据",
+    );
+  }
+  if (raw === null) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !Array.isArray(parsed)
+      || !parsed.every((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const ipId = (item as { ipId?: unknown }).ipId;
+        return typeof ipId === "string"
+          && ipId.trim().length > 0
+          && buildVoiceStyleProfileForSave(item, ipId) !== null;
+      })
+    ) {
+      throw new Error("invalid style profile collection");
+    }
+    return parsed as IPStyleProfile[];
+  } catch {
+    throw new IPStyleProfileStoreError(
+      "STYLE_PROFILE_DATA_CORRUPTED",
+      "语气画像数据已损坏，本次结果没有保存，请先备份并修复原数据",
+    );
+  }
+}
+
 export function saveStyleProfile(profile: IPStyleProfile): void {
-  const all = readJSON<IPStyleProfile[]>(KEY_STYLE_PROFILES, []);
+  const all = readStyleProfilesForWrite();
   const idx = all.findIndex((p) => p.ipId === profile.ipId);
   if (idx >= 0) all[idx] = profile; else all.push(profile);
-  writeJSON(KEY_STYLE_PROFILES, all);
+  try {
+    localStorage.setItem(KEY_STYLE_PROFILES, JSON.stringify(all));
+  } catch {
+    throw new IPStyleProfileStoreError(
+      "STYLE_PROFILE_STORAGE_WRITE_FAILED",
+      "语气画像保存失败，本次结果没有写入，请检查浏览器存储空间后重试",
+    );
+  }
 }
 
 export function deleteStyleProfile(ipId: string): void {
