@@ -9,12 +9,12 @@ import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
 import { CitationSummary } from "@/components/ui/citation-summary";
 import { isCopyOptimizationTaskNotExecuted } from "@/lib/copy-optimization-result-state";
+import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 
 // ── Types ──
 interface CoreElements { viewpoint: string; cases: string[]; logic: string; conclusion: string; }
 interface ExpressionAnalysis { openingHook: string; narrativeRhythm: string; emotionalTone: string; rhetoricDevices: string[]; closingStyle: string; }
-interface ApiMeta { apiCalled: boolean; calledAt: string; model: string | null; ipUsed: string | null; mockHit: boolean; error?: string; }
-interface BreakdownResult { coreElements: CoreElements; expressionAnalysis: ExpressionAnalysis; boundaryNote: string; apiMeta: ApiMeta; }
+interface BreakdownResult { coreElements: CoreElements; expressionAnalysis: ExpressionAnalysis; boundaryNote: string; }
 
 interface Segment { original: string; rewritten: string; reason: string; changeType: string[]; }
 interface Constraints { keepStructure: boolean; keepCases: boolean; keepTitle: boolean; keepViewpoint: boolean; keepQuotes: boolean; keepData: boolean; }
@@ -30,7 +30,8 @@ interface RewriteResult {
   optimizedText?: string | null; impactAnalysis?: string | null;
   deviationScore: number; deviationWarning: boolean; deviationThreshold: number; deviationReason: string;
   styleMatchScore: number; referencedSamples: string[];
-  ipStyleExplanation: string; goalImpact: GoalImpact; apiMeta: ApiMeta;
+  knowledgeReferenceIds: string[];
+  ipStyleExplanation: string; goalImpact: GoalImpact;
 }
 
 type InputMethod = "paste" | "file" | "link" | "media";
@@ -144,23 +145,6 @@ function IPContextModal({ ip, styleProfile, onClose }: { ip: IPProfile; stylePro
           <button onClick={onClose} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[13px] font-semibold text-white">关闭</button>
         </div>
       </div>
-    </div>
-  );
-}
-
-function ApiStatusPanel({ meta }: { meta: ApiMeta | null }) {
-  if (!meta) return null;
-  return (
-    <div className="mb-6 rounded-[14px] border border-[#E5E4DE] bg-[#FAFAF8] p-4 font-mono text-[12px]">
-      <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#888]">API调用状态（调试）</div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        <div><span className="text-[#999]">apiCalled: </span><span className={meta.apiCalled ? "font-bold text-[#3B6D11]" : "font-bold text-[#A32D2D]"}>{String(meta.apiCalled)}</span></div>
-        <div><span className="text-[#999]">mockHit: </span><span className="font-bold text-[#3B6D11]">{String(meta.mockHit)}</span></div>
-        <div><span className="text-[#999]">model: </span><span className="text-[#333]">{meta.model ?? "-"}</span></div>
-        <div><span className="text-[#999]">ipUsed: </span><span className="text-[#333]">{meta.ipUsed ?? "-"}</span></div>
-        <div className="col-span-2 sm:col-span-1"><span className="text-[#999]">calledAt: </span><span className="text-[#333]">{meta.calledAt}</span></div>
-      </div>
-      {meta.error && <div className="mt-2 rounded-[8px] bg-[#FCEBEB] px-2.5 py-1.5 text-[#A32D2D]">error: {meta.error}</div>}
     </div>
   );
 }
@@ -369,8 +353,8 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
   return (
     <div className="mb-4 rounded-[16px] border border-[#E5E4DE] bg-white p-4">
       <div className="mb-2.5 flex items-center gap-2">
-        <span className="text-[13px] font-bold text-[#1C1C1B]">【参考知识】</span>
-        <span className="text-[11px] text-[#999]">系统自动检索知识库，定性相关度档位，不编造精确相似度数字</span>
+        <span className="text-[13px] font-bold text-[#1C1C1B]">【候选参考知识】</span>
+        <span className="text-[11px] text-[#999]">这里只展示准备参与优化的候选知识，生成成功后才会记为已参考</span>
       </div>
       {loading && <div className="text-[12.5px] text-[#888]">检索中…</div>}
       {!loading && refs.length === 0 && <div className="text-[12.5px] text-[#999]">知识库里没有找到强相关的参考。</div>}
@@ -405,46 +389,16 @@ export default function CopyOptimizationPage() {
   const [sourceText, setSourceText] = useState("");
 
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
+  const [confirmedKnowledgeRefs, setConfirmedKnowledgeRefs] = useState<KnowledgeRef[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (sourceText.trim().length < 10) { setKnowledgeSearched(false); setKnowledgeRefs([]); return; }
-    debounceRef.current = setTimeout(() => { searchKnowledge(sourceText); }, 800);
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceText]);
-
-  async function searchKnowledge(query: string) {
-    const allEntries = [
-      ...getKnowledgeEntries("爆款案例"), ...getKnowledgeEntries("方法论"),
-      ...getKnowledgeEntries("评论需求"), ...getKnowledgeEntries("选题案例"),
-    ];
-    if (allEntries.length === 0) { setKnowledgeSearched(true); setKnowledgeRefs([]); return; }
-    setKnowledgeLoading(true); setKnowledgeSearched(true);
-    try {
-      const res = await apiFetch("/api/knowledge-search", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: query.slice(0, 2000), entries: allEntries.map(e => ({ id: e.id, category: e.category, title: e.title, tags: e.tags, keywords: e.keywords })) }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setKnowledgeRefs([]); return; }
-      const entryMap = new Map(allEntries.map(e => [e.id, e]));
-      const refs: KnowledgeRef[] = (data.results ?? [])
-        .map((r: { id: string; reason: string; relevanceTier: string; relevanceReason: string }) => { const entry = entryMap.get(r.id); return entry ? { ...r, entry } : null; })
-        .filter((r: KnowledgeRef | null): r is KnowledgeRef => r !== null);
-      setKnowledgeRefs(refs);
-      refs.forEach(r => {
-        recordKnowledgeUsage(r.id, {
-          module: "文案优化", usedAt: new Date().toISOString(),
-          reason: r.reason, relevanceTier: r.relevanceTier as "高度相关" | "中度相关" | "低度相关",
-          relevanceReason: r.relevanceReason, context: query.slice(0, 200),
-        }, "已用于分析");
-      });
-    } catch { setKnowledgeRefs([]); } finally { setKnowledgeLoading(false); }
-  }
+  const knowledgeRequestRef = useRef(0);
+  const knowledgeContextRef = useRef<{
+    query: string;
+    targetIPId: string | null;
+    ready: boolean;
+  }>({ query: "", targetIPId: null, ready: true });
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [fileParseError, setFileParseError] = useState<string | null>(null);
   const [fileParsing, setFileParsing] = useState(false);
@@ -470,10 +424,95 @@ export default function CopyOptimizationPage() {
   const [loading, setLoading] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [result, setResult] = useState<RewriteResult | null>(null);
-  const [apiMeta, setApiMeta] = useState<ApiMeta | null>(null);
   const [showContext, setShowContext] = useState(false);
+  const optimizeRequestRef = useRef(0);
+  const targetIPIdRef = useRef<string | null>(null);
+  const previousTargetIPIdRef = useRef<string | null>(null);
+  const loadingRef = useRef(false);
 
   const targetIP = ips.find(i => i.id === targetIpId) ?? activeIP ?? null;
+  targetIPIdRef.current = targetIP?.id ?? null;
+  loadingRef.current = loading;
+
+  useEffect(() => {
+    const currentTargetIPId = targetIP?.id ?? null;
+    const previousTargetIPId = previousTargetIPIdRef.current;
+    previousTargetIPIdRef.current = currentTargetIPId;
+    if (previousTargetIPId === null || previousTargetIPId === currentTargetIPId) return;
+
+    optimizeRequestRef.current += 1;
+    setResult(null);
+    setConfirmedKnowledgeRefs([]);
+    if (loadingRef.current) {
+      setLoading(false);
+      setGenError("目标IP已切换，本次旧结果未保存，请重新生成");
+    }
+  }, [targetIP?.id]);
+
+  useEffect(() => {
+    const requestId = ++knowledgeRequestRef.current;
+    const query = sourceText.trim();
+    const currentTargetIPId = targetIP?.id ?? null;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    setKnowledgeRefs([]);
+    setConfirmedKnowledgeRefs([]);
+    if (query.length < 10) {
+      knowledgeContextRef.current = { query, targetIPId: currentTargetIPId, ready: true };
+      setKnowledgeLoading(false);
+      setKnowledgeSearched(false);
+      return;
+    }
+    knowledgeContextRef.current = { query, targetIPId: currentTargetIPId, ready: false };
+    setKnowledgeLoading(true);
+    setKnowledgeSearched(true);
+    debounceRef.current = setTimeout(() => {
+      void searchKnowledge(query, currentTargetIPId, requestId);
+    }, 800);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (knowledgeRequestRef.current === requestId) knowledgeRequestRef.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceText, targetIP?.id]);
+
+  async function searchKnowledge(query: string, targetIPId: string | null, requestId: number) {
+    const allEntries = filterKnowledgeVisibleToIP([
+      ...getKnowledgeEntries("爆款案例"), ...getKnowledgeEntries("方法论"),
+      ...getKnowledgeEntries("评论需求"), ...getKnowledgeEntries("选题案例"),
+    ], targetIPId);
+    if (allEntries.length === 0) {
+      if (knowledgeRequestRef.current !== requestId) return;
+      knowledgeContextRef.current = { query, targetIPId, ready: true };
+      setKnowledgeSearched(true);
+      setKnowledgeRefs([]);
+      setKnowledgeLoading(false);
+      return;
+    }
+    if (knowledgeRequestRef.current !== requestId) return;
+    setKnowledgeLoading(true);
+    setKnowledgeSearched(true);
+    try {
+      const res = await apiFetch("/api/knowledge-search", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query.slice(0, 2000), entries: allEntries.map(e => ({ id: e.id, category: e.category, title: e.title, tags: e.tags, keywords: e.keywords })) }),
+      });
+      const data = await res.json();
+      if (knowledgeRequestRef.current !== requestId) return;
+      if (!res.ok) { setKnowledgeRefs([]); return; }
+      const entryMap = new Map(allEntries.map(e => [e.id, e]));
+      const refs: KnowledgeRef[] = (data.results ?? [])
+        .map((r: { id: string; reason: string; relevanceTier: string; relevanceReason: string }) => { const entry = entryMap.get(r.id); return entry ? { ...r, entry } : null; })
+        .filter((r: KnowledgeRef | null): r is KnowledgeRef => r !== null);
+      setKnowledgeRefs(refs);
+    } catch {
+      if (knowledgeRequestRef.current === requestId) setKnowledgeRefs([]);
+    } finally {
+      if (knowledgeRequestRef.current === requestId) {
+        knowledgeContextRef.current = { query, targetIPId, ready: true };
+        setKnowledgeLoading(false);
+      }
+    }
+  }
 
   useEffect(() => {
     if (!targetIP) { setStyleProfile(null); return; }
@@ -558,8 +597,24 @@ export default function CopyOptimizationPage() {
     if (!breakdown) { setGenError("请先完成拆解"); return; }
     const text = sourceText.trim();
     const ip = targetIP as IPProfile;
+    const knowledgeContext = knowledgeContextRef.current;
+    if (
+      knowledgeLoading
+      || !knowledgeContext.ready
+      || knowledgeContext.query !== text
+      || knowledgeContext.targetIPId !== ip.id
+    ) {
+      setGenError("知识正在更新，请稍候");
+      return;
+    }
+    const submittedKnowledgeRefs = knowledgeRefs;
+    const requestId = ++optimizeRequestRef.current;
+    const isCurrentRequest = () => (
+      optimizeRequestRef.current === requestId
+      && targetIPIdRef.current === ip.id
+    );
 
-    setGenError(null); setLoading(true); setResult(null); setStep(4);
+    setGenError(null); setLoading(true); setResult(null); setConfirmedKnowledgeRefs([]); setStep(4);
     let res: Response;
     try {
       res = await apiFetch("/api/copy-optimization", {
@@ -567,24 +622,33 @@ export default function CopyOptimizationPage() {
         body: JSON.stringify({
           ipProfile: ip, sourceText: text, mode, goal, constraints, styleProfile,
           breakdown: { coreElements: breakdown.coreElements },
+          knowledgeReferences: submittedKnowledgeRefs.map(ref => ({
+            id: ref.id,
+            category: ref.entry.category,
+            title: ref.entry.title,
+            content: ref.entry.rawContent.slice(0, 4000),
+            ipId: ref.entry.ipId,
+          })),
         }),
       });
     } catch (networkErr) {
+      if (!isCurrentRequest()) return;
       const msg = `AI请求失败：无法连接到服务，请保留当前内容后重试（${networkErr instanceof Error ? networkErr.message : String(networkErr)}）`;
-      setApiMeta({ apiCalled: false, calledAt: new Date().toISOString(), model: null, ipUsed: ip.name, mockHit: false, error: msg });
       setGenError(msg); setLoading(false); return;
     }
 
-    let data: (RewriteResult & { error?: string }) | { error: string; apiMeta?: ApiMeta };
+    if (!isCurrentRequest()) return;
+
+    let data: (RewriteResult & { error?: string }) | { error: string };
     try {
       data = await res.json();
     } catch {
+      if (!isCurrentRequest()) return;
       const msg = `服务器响应格式异常（HTTP ${res.status}），请保留当前内容后重试`;
-      setApiMeta({ apiCalled: true, calledAt: new Date().toISOString(), model: null, ipUsed: ip.name, mockHit: false, error: msg });
       setGenError(msg); setLoading(false); return;
     }
 
-    if ("apiMeta" in data && data.apiMeta) setApiMeta(data.apiMeta);
+    if (!isCurrentRequest()) return;
 
     if (!res.ok) {
       const errMsg = "error" in data && data.error ? data.error : `HTTP ${res.status}`;
@@ -596,13 +660,37 @@ export default function CopyOptimizationPage() {
     const rr = data as RewriteResult;
     if (isCopyOptimizationTaskNotExecuted(rr)) {
       const msg = "分析结果字段不完整：未生成有效的优化全文";
-      setApiMeta({ ...rr.apiMeta, error: msg });
       setGenError(msg);
       setLoading(false);
       return;
     }
 
+    const submittedIds = new Set(submittedKnowledgeRefs.map(ref => ref.id));
+    if (
+      rr.ipId !== ip.id
+      || !Array.isArray(rr.knowledgeReferenceIds)
+      || rr.knowledgeReferenceIds.some(id => !submittedIds.has(id))
+    ) {
+      setGenError("返回结果与当前IP或参考知识不一致，请重新生成");
+      setLoading(false);
+      return;
+    }
+
+    const usedIds = new Set(rr.knowledgeReferenceIds);
+    const usedKnowledgeRefs = submittedKnowledgeRefs.filter(ref => usedIds.has(ref.id));
+
     setResult(rr);
+    setConfirmedKnowledgeRefs(usedKnowledgeRefs);
+    usedKnowledgeRefs.forEach(ref => {
+      recordKnowledgeUsage(ref.id, {
+        module: "文案优化",
+        usedAt: new Date().toISOString(),
+        reason: ref.reason,
+        relevanceTier: ref.relevanceTier as "高度相关" | "中度相关" | "低度相关",
+        relevanceReason: ref.relevanceReason,
+        context: text.slice(0, 200),
+      }, "已用于分析");
+    });
     addScriptAsset({
       ipId: ip.id,
       title: materialTitle || rr.coreElements.viewpoint.slice(0, 30) || "改写内容",
@@ -907,7 +995,6 @@ export default function CopyOptimizationPage() {
       {/* ───────── Step 4：结果 ───────── */}
       {step === 4 && (
         <>
-          <ApiStatusPanel meta={apiMeta} />
           {genError && (
             <div className="mb-6 rounded-[14px] border border-[#F2C6C6] bg-[#FCEBEB] px-5 py-4 text-[#A32D2D]">
               <div className="text-[14px] font-semibold">{genError}</div>
@@ -943,12 +1030,12 @@ export default function CopyOptimizationPage() {
             <div className="flex flex-col gap-3">
               {/* 知识引用统计 + 可信度分层说明 */}
               <CitationSummary
-                refs={knowledgeRefs}
-                loading={knowledgeLoading}
-                searched={knowledgeSearched}
+                refs={confirmedKnowledgeRefs}
+                loading={false}
+                searched
                 label="本次优化参考了"
               />
-              {knowledgeSearched && (
+              {confirmedKnowledgeRefs.length > 0 && (
                 <div className="flex flex-wrap gap-2 rounded-[12px] bg-[#F7F6F2] px-4 py-3">
                   <span className="text-[12px] font-semibold text-[#555]">参考依据：</span>
                   <span className="flex items-center gap-1 text-[12px]">

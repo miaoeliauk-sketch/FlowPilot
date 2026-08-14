@@ -1,8 +1,88 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callDeepSeek, parseDeepSeekJSON as parseJSON, parseDeepSeekJSONArray, splitSentences, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import {
+  callStructuredDeepSeek,
+  StructuredDeepSeekError,
+} from "@/lib/structured-deepseek";
 
 // 这是固定的边界声明，不依赖AI生成——保证这条边界100%出现，不会因为AI某次输出漏掉而消失
 const BOUNDARY_NOTE = "以上拆解只分析原文「怎么说」（结构、节奏、修辞、情绪基调），不对原文「说的是什么」做对错、价值观或专业性判断。如果原文观点本身有问题，这个工具不会发现也不会指出，需要你自己判断。";
+const BREAKDOWN_MAX_TOKENS = 1_800;
+
+interface BreakdownResponse {
+  coreElements: {
+    viewpoint: string;
+    cases: string[];
+    logic: string;
+    conclusion: string;
+  };
+  expressionAnalysis: {
+    openingHook: string;
+    narrativeRhythm: string;
+    emotionalTone: string;
+    rhetoricDevices: string[];
+    closingStyle: string;
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireExactKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+  field: string,
+) {
+  const actualKeys = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (actualKeys.length !== expected.length || actualKeys.some((key, index) => key !== expected[index])) {
+    throw new Error(`${field}字段不完整或包含额外内容`);
+  }
+}
+
+function requireNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${field}必须是非空字符串`);
+  }
+  return value.trim();
+}
+
+function requireStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${field}必须是数组`);
+  return value.map((item, index) => requireNonEmptyString(item, `${field}[${index}]`));
+}
+
+function parseBreakdownResponse(content: string): BreakdownResponse {
+  const parsed: unknown = JSON.parse(content);
+  if (!isRecord(parsed)) throw new Error("拆解响应必须是JSON对象");
+  requireExactKeys(parsed, ["coreElements", "expressionAnalysis"], "拆解响应");
+
+  if (!isRecord(parsed.coreElements)) throw new Error("coreElements必须是对象");
+  requireExactKeys(parsed.coreElements, ["viewpoint", "cases", "logic", "conclusion"], "coreElements");
+
+  if (!isRecord(parsed.expressionAnalysis)) throw new Error("expressionAnalysis必须是对象");
+  requireExactKeys(
+    parsed.expressionAnalysis,
+    ["openingHook", "narrativeRhythm", "emotionalTone", "rhetoricDevices", "closingStyle"],
+    "expressionAnalysis",
+  );
+
+  return {
+    coreElements: {
+      viewpoint: requireNonEmptyString(parsed.coreElements.viewpoint, "coreElements.viewpoint"),
+      cases: requireStringArray(parsed.coreElements.cases, "coreElements.cases"),
+      logic: requireNonEmptyString(parsed.coreElements.logic, "coreElements.logic"),
+      conclusion: requireNonEmptyString(parsed.coreElements.conclusion, "coreElements.conclusion"),
+    },
+    expressionAnalysis: {
+      openingHook: requireNonEmptyString(parsed.expressionAnalysis.openingHook, "expressionAnalysis.openingHook"),
+      narrativeRhythm: requireNonEmptyString(parsed.expressionAnalysis.narrativeRhythm, "expressionAnalysis.narrativeRhythm"),
+      emotionalTone: requireNonEmptyString(parsed.expressionAnalysis.emotionalTone, "expressionAnalysis.emotionalTone"),
+      rhetoricDevices: requireStringArray(parsed.expressionAnalysis.rhetoricDevices, "expressionAnalysis.rhetoricDevices"),
+      closingStyle: requireNonEmptyString(parsed.expressionAnalysis.closingStyle, "expressionAnalysis.closingStyle"),
+    },
+  };
+}
 
 const BREAKDOWN_SYSTEM = `你是一位内容结构分析师，任务是拆解一段口播文案/逐字稿的内部结构，为后续的"风格化改写"提供锁定基准。
 
@@ -37,41 +117,68 @@ ${text}
 
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
-  let body: { sourceText?: string };
+  let body: unknown;
   try { body = await req.json(); }
   catch {
+    return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
+  }
+
+  if (!isRecord(body) || (body.sourceText !== undefined && typeof body.sourceText !== "string")) {
     return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
   }
 
   const text = (body.sourceText ?? "").trim();
   if (!text) {
     return NextResponse.json(
-      { error: "请提供要拆解的原始内容", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } },
+      { error: "请提供要拆解的原始内容" },
       { status: 400 }
     );
   }
 
   const calledAt = new Date().toISOString();
-  const apiMeta = { apiCalled: true, calledAt, model: MODEL, ipUsed: null as string | null, mockHit: false };
+  const diagnosticId = crypto.randomUUID();
 
   try {
-    const raw = await callDeepSeek(BREAKDOWN_SYSTEM, BREAKDOWN_PROMPT(text), 1800, 0.3, apiKey);
-    const parsed = parseJSON(raw, {
-      coreElements: { viewpoint: "（AI返回内容解析失败，请重试）", cases: [] as string[], logic: "", conclusion: "" },
-      expressionAnalysis: {
-        openingHook: "", narrativeRhythm: "", emotionalTone: "",
-        rhetoricDevices: [] as string[], closingStyle: "",
-      },
+    const result = await callStructuredDeepSeek({
+      systemPrompt: BREAKDOWN_SYSTEM,
+      userPrompt: BREAKDOWN_PROMPT(text),
+      parse: parseBreakdownResponse,
+      buildParseRetryInstruction: () => "上次输出不是完整合法的JSON对象。请严格按指定结构重新输出，不要添加解释、代码块或额外字段。",
+      apiKey,
+      maxTokens: BREAKDOWN_MAX_TOKENS,
+      temperature: 0.3,
     });
 
     return NextResponse.json({
-      coreElements: parsed.coreElements,
-      expressionAnalysis: parsed.expressionAnalysis,
+      coreElements: result.data.coreElements,
+      expressionAnalysis: result.data.expressionAnalysis,
       boundaryNote: BOUNDARY_NOTE,
-      apiMeta,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "拆解失败，请重试";
-    return NextResponse.json({ error: message, apiMeta: { ...apiMeta, error: message } }, { status: 500 });
+    const structuredError = err instanceof StructuredDeepSeekError ? err : null;
+    const attempts = structuredError?.attemptDiagnostics.map(attempt => ({
+      attempt: attempt.attempt,
+      stage: attempt.stage,
+      failureCode: attempt.failureCode ?? "PROCESSING_FAILED",
+      finishReason: attempt.finishReason,
+      completionTokens: attempt.completionTokens,
+      responseChars: attempt.responseChars,
+      hasReasoningContent: attempt.hasReasoningContent ?? false,
+      reasoningChars: attempt.reasoningChars ?? 0,
+    })) ?? [];
+    const failureCode = attempts.at(-1)?.failureCode ?? "PROCESSING_FAILED";
+    console.warn("[copy-optimization-breakdown]", JSON.stringify({
+      diagnosticId,
+      calledAt,
+      phase: "breakdown",
+      inputChars: text.length,
+      maxTokens: BREAKDOWN_MAX_TOKENS,
+      failureCode,
+      attempts,
+    }));
+    return NextResponse.json(
+      { error: "内容拆解失败，请重试" },
+      { status: 502 },
+    );
   }
 }

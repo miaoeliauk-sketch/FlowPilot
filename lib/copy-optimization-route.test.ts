@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/copy-optimization/route";
+import { createTopicBoardIPProfile } from "./topic-board-contract.fixture";
 
 const validRewrite = {
   lockedItemsCheck: [
@@ -75,6 +76,95 @@ function optimizationRequest(sourceText = "原文第一段。") {
     }),
   });
 }
+
+function optimizationRequestWithKnowledge(knowledgeReferences = [
+  {
+    id: "knowledge-global",
+    category: "方法论",
+    title: "通用方法",
+    content: "SENSITIVE_GLOBAL_KNOWLEDGE_CONTENT",
+    ipId: null,
+  },
+  {
+    id: "knowledge-ip-a",
+    category: "选题案例",
+    title: "IP A案例",
+    content: "SENSITIVE_IP_A_KNOWLEDGE_CONTENT",
+    ipId: "ip-a",
+  },
+]) {
+  const ip = createTopicBoardIPProfile({ id: "ip-a", name: "IP A" });
+  return new NextRequest("http://localhost/api/copy-optimization", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-DeepSeek-Key": "test-key",
+    },
+    body: JSON.stringify({
+      ipProfile: ip,
+      sourceText: "原文第一段。",
+      breakdown: {
+        coreElements: {
+          viewpoint: "原观点",
+          cases: ["原案例"],
+          logic: "原逻辑",
+          conclusion: "原结论",
+        },
+      },
+      knowledgeReferences,
+    }),
+  });
+}
+
+test("正式优化把通用和目标IP知识传给AI并返回实际参与的知识编号", async () => {
+  const originalFetch = globalThis.fetch;
+  let prompt = "";
+  globalThis.fetch = async (_input, init) => {
+    const requestBody = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    prompt = requestBody.messages.find(message => message.role === "user")?.content ?? "";
+    return deepSeekResponse(JSON.stringify(validRewrite), "stop", 500);
+  };
+
+  try {
+    const response = await POST(optimizationRequestWithKnowledge());
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.match(prompt, /SENSITIVE_GLOBAL_KNOWLEDGE_CONTENT/);
+    assert.match(prompt, /SENSITIVE_IP_A_KNOWLEDGE_CONTENT/);
+    assert.deepEqual(body.knowledgeReferenceIds, ["knowledge-global", "knowledge-ip-a"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("正式优化拒绝其他IP知识且不调用AI", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify(validRewrite), "stop", 500);
+  };
+
+  try {
+    const response = await POST(optimizationRequestWithKnowledge([{
+      id: "knowledge-ip-b",
+      category: "选题案例",
+      title: "IP B案例",
+      content: "不应进入IP A提示词",
+      ipId: "ip-b",
+    }]));
+    const body = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(body.error, "知识引用范围错误");
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("recovers when the first copy optimization response is truncated", async () => {
   const originalFetch = globalThis.fetch;
