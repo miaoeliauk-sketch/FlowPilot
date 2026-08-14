@@ -13,6 +13,7 @@ import {
 } from "./live-clips-complete-plan-contract";
 import {
   COMPLETE_VIDEO_SECTION_ROLES,
+  type CompletePlanValidationCode,
   type ClipRemovalSuggestion,
   type CompleteVideoPlan,
   type CompleteVideoPlanSection,
@@ -43,34 +44,66 @@ interface CompletePlanResponseContext {
   now?: () => string;
 }
 
-function fail(message: string, reasonCode = "FIELD_INVALID"): never {
-  throw new LiveClipResponseError("SCHEMA_FAIL", message, { reasonCode });
+function fail(
+  message: string,
+  reasonCode = "FIELD_INVALID",
+  validationCode?: CompletePlanValidationCode,
+): never {
+  throw new LiveClipResponseError("SCHEMA_FAIL", message, {
+    reasonCode,
+    ...(validationCode ? { validationCode } : {}),
+  });
 }
 
 function strictJSON(content: string): unknown {
   return strictJsonObject(content, message => { throw new LiveClipResponseError("JSON_PARSE_FAIL", message); });
 }
 
-function record(value: unknown, label: string): Record<string, unknown> {
-  return contractObject(value, label, message => fail(message));
+function record(
+  value: unknown,
+  label: string,
+  validationCode: CompletePlanValidationCode,
+): Record<string, unknown> {
+  return contractObject(value, label, message => fail(message, "FIELD_INVALID", validationCode));
 }
 
-function stringValue(value: unknown, label: string, max = 1000) {
-  return contractString(value, label, max, message => fail(message));
+function stringValue(
+  value: unknown,
+  label: string,
+  max = 1000,
+  validationCode: CompletePlanValidationCode = "SECTION_FIELD_INVALID",
+) {
+  return contractString(value, label, max, message => fail(message, "FIELD_INVALID", validationCode));
 }
 
-function nullableString(value: unknown, label: string, max = 1000) {
-  return value === null ? null : stringValue(value, label, max);
+function nullableString(
+  value: unknown,
+  label: string,
+  max = 1000,
+  validationCode: CompletePlanValidationCode = "SECTION_FIELD_INVALID",
+) {
+  return value === null ? null : stringValue(value, label, max, validationCode);
 }
 
-function nullableInteger(value: unknown, label: string) {
+function nullableInteger(
+  value: unknown,
+  label: string,
+  validationCode: CompletePlanValidationCode = "SOURCE_RANGE_INVALID",
+) {
   if (value === null) return null;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) fail(`${label}必须是正整数或null`);
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    fail(`${label}必须是正整数或null`, "FIELD_INVALID", validationCode);
+  }
   return value;
 }
 
-function enumValue<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
-  return contractEnum(value, allowed, label, message => fail(message));
+function enumValue<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  label: string,
+  validationCode: CompletePlanValidationCode = "SECTION_FIELD_INVALID",
+): T {
+  return contractEnum(value, allowed, label, message => fail(message, "FIELD_INVALID", validationCode));
 }
 
 function parseSourceSection(
@@ -81,21 +114,31 @@ function parseSourceSection(
 ): CompleteVideoPlanSection {
   const candidateId = object.candidateId === null || object.candidateId === undefined
     ? null
-    : stringValue(object.candidateId, `${role}.candidateId`, 160);
+    : stringValue(object.candidateId, `${role}.candidateId`, 160, "SOURCE_REFERENCE_INVALID");
   const candidate = candidateId ? candidatesById.get(candidateId) : null;
-  if (candidateId && (!candidate || candidate.liveTranscriptId !== context.liveTranscriptId)) fail(`${role}引用的候选不存在或归属不匹配`);
-  if (role === "body" && candidateId !== context.coreCandidateId) fail("主体必须来自当前核心候选");
+  if (candidateId && (!candidate || candidate.liveTranscriptId !== context.liveTranscriptId)) {
+    fail(`${role}引用的候选不存在或归属不匹配`, "FIELD_INVALID", "SOURCE_REFERENCE_INVALID");
+  }
+  if (role === "body" && candidateId !== context.coreCandidateId) {
+    fail("主体必须来自当前核心候选", "FIELD_INVALID", "BODY_SOURCE_INVALID");
+  }
   const startParagraph = nullableInteger(object.startParagraph, `${role}.startParagraph`);
   const endParagraph = nullableInteger(object.endParagraph, `${role}.endParagraph`);
-  if (startParagraph === null || endParagraph === null || endParagraph < startParagraph) fail(`${role}段落范围无效`);
-  if (candidate && (startParagraph < candidate.startParagraph || endParagraph > candidate.endParagraph)) {
-    fail(`${role}超出所引用候选的原文范围`);
+  if (startParagraph === null || endParagraph === null || endParagraph < startParagraph) {
+    fail(`${role}段落范围无效`, "FIELD_INVALID", "SOURCE_RANGE_INVALID");
   }
-  const startQuote = nullableString(object.startQuote, `${role}.startQuote`, 500);
-  const endQuote = nullableString(object.endQuote, `${role}.endQuote`, 500);
-  if (!startQuote || !endQuote) fail(`${role}缺少原文开始句或结束句`);
-  if (object.supplementalSuggestion !== null && object.supplementalSuggestion !== undefined) fail(`${role}原片段落不得夹带补录内容`);
-  if (object.supplementalKind !== null && object.supplementalKind !== undefined) fail(`${role}原片段落不得带补录类型`);
+  if (candidate && (startParagraph < candidate.startParagraph || endParagraph > candidate.endParagraph)) {
+    fail(`${role}超出所引用候选的原文范围`, "FIELD_INVALID", "SOURCE_RANGE_INVALID");
+  }
+  const startQuote = nullableString(object.startQuote, `${role}.startQuote`, 500, "SOURCE_QUOTE_MISSING");
+  const endQuote = nullableString(object.endQuote, `${role}.endQuote`, 500, "SOURCE_QUOTE_MISSING");
+  if (!startQuote || !endQuote) fail(`${role}缺少原文开始句或结束句`, "FIELD_INVALID", "SOURCE_QUOTE_MISSING");
+  if (object.supplementalSuggestion !== null && object.supplementalSuggestion !== undefined) {
+    fail(`${role}原片段落不得夹带补录内容`, "FIELD_INVALID", "SECTION_FIELD_INVALID");
+  }
+  if (object.supplementalKind !== null && object.supplementalKind !== undefined) {
+    fail(`${role}原片段落不得带补录类型`, "FIELD_INVALID", "SECTION_FIELD_INVALID");
+  }
   const input = { startParagraph, endParagraph, startQuote, endQuote };
   let rawText: string;
   let cleanedText: string;
@@ -136,7 +179,9 @@ function parseSupplementalSection(
   object: Record<string, unknown>,
   role: CompleteVideoSectionRole,
 ): CompleteVideoPlanSection {
-  if (role !== "opening" && role !== "ending") fail("只有开头或结尾缺失时可以提供补录建议");
+  if (role !== "opening" && role !== "ending") {
+    fail("只有开头或结尾缺失时可以提供补录建议", "FIELD_INVALID", "SUPPLEMENTAL_SECTION_INVALID");
+  }
   const sourceClaims = [
     object.candidateId,
     object.startParagraph,
@@ -145,14 +190,18 @@ function parseSupplementalSection(
     object.endQuote,
   ];
   if (sourceClaims.some(value => value !== null && value !== undefined)) {
-    fail(`${role}补录建议不得伪造原文位置`);
+    fail(`${role}补录建议不得伪造原文位置`, "FIELD_INVALID", "SUPPLEMENTAL_SECTION_INVALID");
   }
   if (object.supplementalSuggestion !== null && object.supplementalSuggestion !== undefined) {
-    fail("补录内容只能由程序固定生成，AI不得自由编写");
+    fail("补录内容只能由程序固定生成，AI不得自由编写", "FIELD_INVALID", "SUPPLEMENTAL_SECTION_INVALID");
   }
-  if (!isCompleteVideoSupplementalKind(object.supplementalKind)) fail(`${role}补录类型无效`);
+  if (!isCompleteVideoSupplementalKind(object.supplementalKind)) {
+    fail(`${role}补录类型无效`, "FIELD_INVALID", "SUPPLEMENTAL_SECTION_INVALID");
+  }
   const kind = object.supplementalKind;
-  if (!isSupplementalKindAllowedForRole(role, kind)) fail(`${role}补录类型无效`);
+  if (!isSupplementalKindAllowedForRole(role, kind)) {
+    fail(`${role}补录类型无效`, "FIELD_INVALID", "SUPPLEMENTAL_SECTION_INVALID");
+  }
   return {
     role,
     sourceType: "supplemental",
@@ -170,21 +219,23 @@ function parseSupplementalSection(
 }
 
 export function parseCompleteVideoPlanResponse(content: string, context: CompletePlanResponseContext) {
-  const root = record(strictJSON(content), "返回结果");
-  if (!Array.isArray(root.plans) || root.plans.length < 1 || root.plans.length > 3) fail("plans数量必须在1到3之间");
+  const root = record(strictJSON(content), "返回结果", "PLAN_FIELD_INVALID");
+  if (!Array.isArray(root.plans) || root.plans.length < 1 || root.plans.length > 3) {
+    fail("plans数量必须在1到3之间", "FIELD_INVALID", "PLAN_COUNT_INVALID");
+  }
   const candidatesById = new Map(context.candidates.map(candidate => [candidate.id, candidate]));
   if (candidatesById.size !== context.candidates.length || !candidatesById.has(context.coreCandidateId)) {
-    fail("候选编号重复或核心候选不存在");
+    fail("候选编号重复或核心候选不存在", "FIELD_INVALID", "SOURCE_REFERENCE_INVALID");
   }
   const createId = context.createId ?? (() => crypto.randomUUID());
   const now = context.now ?? (() => new Date().toISOString());
   const plans = root.plans.map((value, planIndex): CompleteVideoPlan => {
-    const object = record(value, `plans[${planIndex}]`);
+    const object = record(value, `plans[${planIndex}]`, "PLAN_FIELD_INVALID");
     if (!Array.isArray(object.sections) || object.sections.length < 3 || object.sections.length > 5) {
-      fail(`plans[${planIndex}].sections数量必须在3到5之间`);
+      fail(`plans[${planIndex}].sections数量必须在3到5之间`, "FIELD_INVALID", "SECTION_COUNT_INVALID");
     }
     const sections = object.sections.map((sectionValue, sectionIndex) => {
-      const section = record(sectionValue, `plans[${planIndex}].sections[${sectionIndex}]`);
+      const section = record(sectionValue, `plans[${planIndex}].sections[${sectionIndex}]`, "SECTION_FIELD_INVALID");
       const role = enumValue(section.role, COMPLETE_VIDEO_SECTION_ROLES, `sections[${sectionIndex}].role`);
       const sourceType = enumValue(section.sourceType, ["transcript", "supplemental"] as const, `sections[${sectionIndex}].sourceType`) as CompleteVideoSectionSource;
       return sourceType === "transcript"
@@ -192,7 +243,7 @@ export function parseCompleteVideoPlanResponse(content: string, context: Complet
         : parseSupplementalSection(section, role);
     });
     const sectionsError = completeVideoSectionsError(sections);
-    if (sectionsError) fail(sectionsError);
+    if (sectionsError) fail(sectionsError, "FIELD_INVALID", "SECTION_STRUCTURE_INVALID");
     const sourceLocations = sections.filter(section => section.sourceType === "transcript").map(section => (
       deriveSourceLocation(context.paragraphs, section.startParagraph!, section.endParagraph!)
     ));
@@ -200,12 +251,12 @@ export function parseCompleteVideoPlanResponse(content: string, context: Complet
       id: createId(),
       liveTranscriptId: context.liveTranscriptId,
       coreCandidateId: context.coreCandidateId,
-      title: stringValue(object.title, `plans[${planIndex}].title`, 160),
-      recommendReason: stringValue(object.recommendReason, `plans[${planIndex}].recommendReason`, 800),
+      title: stringValue(object.title, `plans[${planIndex}].title`, 160, "PLAN_FIELD_INVALID"),
+      recommendReason: stringValue(object.recommendReason, `plans[${planIndex}].recommendReason`, 800, "PLAN_FIELD_INVALID"),
       sections,
       editingNotes: Array.isArray(object.editingNotes)
-        ? object.editingNotes.map((note, index) => stringValue(note, `editingNotes[${index}]`, 300)).slice(0, 5)
-        : fail(`plans[${planIndex}].editingNotes必须是数组`),
+        ? object.editingNotes.map((note, index) => stringValue(note, `editingNotes[${index}]`, 300, "PLAN_FIELD_INVALID")).slice(0, 5)
+        : fail(`plans[${planIndex}].editingNotes必须是数组`, "FIELD_INVALID", "PLAN_FIELD_INVALID"),
       sourceDurationSeconds: sourceLocations.reduce((sum, location) => sum + location.estimatedDurationSeconds, 0),
       durationBasis: sourceLocations.every(location => location.durationBasis === "actual") && sections.every(section => section.sourceType === "transcript")
         ? "actual"

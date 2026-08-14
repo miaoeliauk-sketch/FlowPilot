@@ -187,6 +187,58 @@ test("完整成片接口可以从整场直播补齐候选之外的原片，并�
   }
 });
 
+test("完整成片接口只返回安全的主体来源诊断码，不泄露逐字稿", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed, candidates } = fixture();
+  globalThis.fetch = async () => aiResponse(JSON.stringify({
+    plans: [{
+      title: "无效方案",
+      recommendReason: "主体引用了错误候选。",
+      sections: [{
+        role: "opening", sourceType: "supplemental", supplementalKind: "problem_hook",
+        transitionNote: "补录开头。",
+      }, {
+        role: "body", sourceType: "transcript", candidateId: "opening-1",
+        startParagraph: 1, endParagraph: 1, startQuote: "很多人以为", endQuote: "越好卖。",
+        transitionNote: "错误主体。",
+      }, {
+        role: "ending", sourceType: "supplemental", supplementalKind: "summary_closure",
+        transitionNote: "补录结尾。",
+      }],
+      editingNotes: [],
+    }],
+  }));
+  try {
+    const requestCandidates = candidates.map((candidate, index) => ({
+      ...candidate,
+      topic: ["误区开头", "核心方法", "传播金句", "课程承接"][index],
+      corePoint: ["指出误区", "用户购买解决问题的能力", "强调改变", "自然承接课程"][index],
+      structureRole: ["opening", "golden_quote", "golden_quote", "marketing"][index],
+      recommendation: "强烈建议切",
+    }));
+    const response = await postCompletePlans(new Request("http://localhost/api/live-clips/complete-plans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        liveTranscriptId: "live-1",
+        coreCandidateId: "core-1",
+        candidates: requestCandidates,
+        paragraphs: parsed.paragraphs,
+        platform: "抖音",
+        targetDuration: "1—3分钟",
+      }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.reasonCode, "FIELD_INVALID");
+    assert.equal(body.validationCode, "BODY_SOURCE_INVALID");
+    assert.equal(body.error, "完整成片方案生成失败：主体没有正确引用当前核心候选");
+    assert.equal(JSON.stringify(body).includes("用户买的不是知识数量"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("完整成片方案拒绝换核心主体、重复原文、伪造原话和营销补录", () => {
   const { parsed, candidates } = fixture();
   const opening = {
@@ -235,6 +287,66 @@ test("完整成片方案拒绝换核心主体、重复原文、伪造原话和�
         liveTranscriptId: "live-1", coreCandidateId: "core-1", candidates, paragraphs: parsed.paragraphs,
       }),
       (error: unknown) => error instanceof LiveClipResponseError && error.code === "SCHEMA_FAIL",
+    );
+  }
+});
+
+test("完整成片解析器为常见字段失败保留安全诊断类别", () => {
+  const { parsed, candidates } = fixture();
+  const validPlan = {
+    title: "知识付费真正卖的是什么",
+    recommendReason: "从误区讲到解决方法。",
+    sections: [{
+      role: "opening", sourceType: "supplemental", supplementalKind: "problem_hook",
+      transitionNote: "补录开头。",
+    }, {
+      role: "body", sourceType: "transcript", candidateId: "core-1",
+      startParagraph: 2, endParagraph: 3, startQuote: "但用户买的不是", endQuote: "证明你能解决。",
+      transitionNote: "保留完整论证。",
+    }, {
+      role: "ending", sourceType: "supplemental", supplementalKind: "summary_closure",
+      transitionNote: "补录结尾。",
+    }],
+    editingNotes: [],
+  };
+  const cases: Array<{ expected: string; payload: unknown }> = [
+    { expected: "PLAN_COUNT_INVALID", payload: { plans: [] } },
+    { expected: "PLAN_FIELD_INVALID", payload: { plans: [{ ...validPlan, title: null }] } },
+    { expected: "SECTION_COUNT_INVALID", payload: { plans: [{ ...validPlan, sections: validPlan.sections.slice(0, 2) }] } },
+    {
+      expected: "SECTION_FIELD_INVALID",
+      payload: { plans: [{ ...validPlan, sections: [{ ...validPlan.sections[0], role: "unknown" }, ...validPlan.sections.slice(1)] }] },
+    },
+    {
+      expected: "SOURCE_REFERENCE_INVALID",
+      payload: { plans: [{ ...validPlan, sections: [validPlan.sections[0], { ...validPlan.sections[1], candidateId: "missing" }, validPlan.sections[2]] }] },
+    },
+    {
+      expected: "SOURCE_RANGE_INVALID",
+      payload: { plans: [{ ...validPlan, sections: [validPlan.sections[0], { ...validPlan.sections[1], endParagraph: 6 }, validPlan.sections[2]] }] },
+    },
+    {
+      expected: "SOURCE_QUOTE_MISSING",
+      payload: { plans: [{ ...validPlan, sections: [validPlan.sections[0], { ...validPlan.sections[1], startQuote: null }, validPlan.sections[2]] }] },
+    },
+    {
+      expected: "SUPPLEMENTAL_SECTION_INVALID",
+      payload: { plans: [{ ...validPlan, sections: [{ ...validPlan.sections[0], supplementalSuggestion: "AI自由补写" }, ...validPlan.sections.slice(1)] }] },
+    },
+    {
+      expected: "SECTION_STRUCTURE_INVALID",
+      payload: { plans: [{ ...validPlan, sections: [validPlan.sections[2], validPlan.sections[1], validPlan.sections[0]] }] },
+    },
+  ];
+
+  for (const item of cases) {
+    assert.throws(
+      () => parseCompleteVideoPlanResponse(JSON.stringify(item.payload), {
+        liveTranscriptId: "live-1", coreCandidateId: "core-1", candidates, paragraphs: parsed.paragraphs,
+      }),
+      (error: unknown) => error instanceof LiveClipResponseError
+        && error.diagnosticDetails.validationCode === item.expected,
+      item.expected,
     );
   }
 });

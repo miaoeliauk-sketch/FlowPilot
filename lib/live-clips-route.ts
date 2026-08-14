@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { StructuredDeepSeekError } from "./structured-deepseek";
-import { LIVE_CLIP_FAILURE_REASON_LABELS, isLiveClipFailureReason } from "./live-clips-types";
+import {
+  COMPLETE_PLAN_VALIDATION_LABELS,
+  LIVE_CLIP_FAILURE_REASON_LABELS,
+  isCompletePlanValidationCode,
+  isLiveClipFailureReason,
+} from "./live-clips-types";
 import type {
+  CompletePlanValidationCode,
   LiveClipFailureCause,
   LiveClipFailureReason,
   LiveClipStageCode,
@@ -68,6 +74,14 @@ function lastReasonCode(error: StructuredDeepSeekError): LiveClipFailureReason |
   return null;
 }
 
+function lastValidationCode(error: StructuredDeepSeekError): CompletePlanValidationCode | null {
+  for (let index = error.attemptDiagnostics.length - 1; index >= 0; index -= 1) {
+    const code = error.attemptDiagnostics[index].validationCode;
+    if (isCompletePlanValidationCode(code)) return code;
+  }
+  return null;
+}
+
 export function failureCause(error: unknown): LiveClipFailureCause {
   if (error instanceof StructuredDeepSeekError) {
     const code = lastFailureCode(error);
@@ -94,6 +108,9 @@ export function liveClipErrorResponse(
     : error instanceof StructuredDeepSeekError
       ? lastReasonCode(error)
       : causeCode === "SCHEMA_FAIL" ? "FIELD_INVALID" : null;
+  const validationCode = stageCode === "COMPLETE_PLAN_ANALYSIS_FAIL" && error instanceof StructuredDeepSeekError
+    ? lastValidationCode(error)
+    : null;
   const stageLabel = stageCode === "TOPIC_ANALYSIS_FAIL"
     ? "主题识别"
     : stageCode === "COMPLETE_PLAN_ANALYSIS_FAIL"
@@ -114,10 +131,11 @@ export function liveClipErrorResponse(
       ? 504
       : 502;
   return NextResponse.json({
-    error: `${stageLabel}失败：${reasonCode ? LIVE_CLIP_FAILURE_REASON_LABELS[reasonCode] : causeLabel[causeCode]}`,
+    error: `${stageLabel}失败：${validationCode ? COMPLETE_PLAN_VALIDATION_LABELS[validationCode] : reasonCode ? LIVE_CLIP_FAILURE_REASON_LABELS[reasonCode] : causeLabel[causeCode]}`,
     stageCode,
     causeCode,
     reasonCode,
+    validationCode,
     diagnosticId,
   }, { status });
 }

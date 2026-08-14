@@ -87,6 +87,38 @@ export function isLiveClipFailureReason(value: unknown): value is LiveClipFailur
   return typeof value === "string" && LIVE_CLIP_FAILURE_REASONS.includes(value as LiveClipFailureReason);
 }
 
+export const COMPLETE_PLAN_VALIDATION_CODES = [
+  "PLAN_COUNT_INVALID",
+  "PLAN_FIELD_INVALID",
+  "SECTION_COUNT_INVALID",
+  "SECTION_FIELD_INVALID",
+  "BODY_SOURCE_INVALID",
+  "SOURCE_REFERENCE_INVALID",
+  "SOURCE_RANGE_INVALID",
+  "SOURCE_QUOTE_MISSING",
+  "SUPPLEMENTAL_SECTION_INVALID",
+  "SECTION_STRUCTURE_INVALID",
+] as const;
+
+export type CompletePlanValidationCode = typeof COMPLETE_PLAN_VALIDATION_CODES[number];
+
+export const COMPLETE_PLAN_VALIDATION_LABELS: Record<CompletePlanValidationCode, string> = {
+  PLAN_COUNT_INVALID: "方案数量不是1至3套",
+  PLAN_FIELD_INVALID: "方案标题、推荐理由或剪辑建议字段不合法",
+  SECTION_COUNT_INVALID: "成片段落数量不是3至5段",
+  SECTION_FIELD_INVALID: "成片段落角色、来源类型或衔接说明不合法",
+  BODY_SOURCE_INVALID: "主体没有正确引用当前核心候选",
+  SOURCE_REFERENCE_INVALID: "原片引用的候选不存在或归属不匹配",
+  SOURCE_RANGE_INVALID: "原片段落范围不合法或超出候选范围",
+  SOURCE_QUOTE_MISSING: "原片缺少开始句或结束句",
+  SUPPLEMENTAL_SECTION_INVALID: "补录段落的角色、类型或来源字段不合法",
+  SECTION_STRUCTURE_INVALID: "开头、主体、结尾的顺序、数量或原文范围存在冲突",
+};
+
+export function isCompletePlanValidationCode(value: unknown): value is CompletePlanValidationCode {
+  return typeof value === "string" && COMPLETE_PLAN_VALIDATION_CODES.includes(value as CompletePlanValidationCode);
+}
+
 export interface TranscriptParagraph {
   paragraphNumber: number;
   text: string;

@@ -30,6 +30,7 @@ export interface StructuredDeepSeekAttemptDiagnostic {
   stage: StructuredDeepSeekErrorStage | "success";
   failureCode?: string;
   reasonCode?: string;
+  validationCode?: string;
   responseChars: number | null;
   finishReason: string | null;
   promptTokens?: number;
@@ -118,7 +119,7 @@ function safeDiagnosticNumber(value: unknown): number | undefined {
 function parseFailureDiagnostic(
   error: unknown,
 ): Pick<StructuredDeepSeekAttemptDiagnostic,
-  "failureCode" | "reasonCode" | "itemCount" | "itemIndex" | "fieldCount"> {
+  "failureCode" | "reasonCode" | "validationCode" | "itemCount" | "itemIndex" | "fieldCount"> {
   const source = error && typeof error === "object"
     ? error as StructuredParseDiagnosticSource
     : {};
@@ -126,11 +127,13 @@ function parseFailureDiagnostic(
     ? source.diagnosticDetails as Record<string, unknown>
     : {};
   const diagnostic: Pick<StructuredDeepSeekAttemptDiagnostic,
-    "failureCode" | "reasonCode" | "itemCount" | "itemIndex" | "fieldCount"> = {
+    "failureCode" | "reasonCode" | "validationCode" | "itemCount" | "itemIndex" | "fieldCount"> = {
     failureCode: safeFailureCode(source.diagnosticCode, "PARSE_FAILED"),
   };
   const reasonCode = safeFailureCode(details.reasonCode, "");
   if (reasonCode) diagnostic.reasonCode = reasonCode;
+  const validationCode = safeFailureCode(details.validationCode, "");
+  if (validationCode) diagnostic.validationCode = validationCode;
   const itemCount = safeDiagnosticNumber(details.itemCount);
   const itemIndex = safeDiagnosticNumber(details.itemIndex);
   const fieldCount = safeDiagnosticNumber(details.fieldCount);
