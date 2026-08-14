@@ -239,6 +239,169 @@ test("完整成片接口只返回安全的主体来源诊断码，不泄露逐�
   }
 });
 
+test("完整成片接口在候选超过30条时返回实际数量且不调用AI", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed, candidates } = fixture();
+  let aiCalled = false;
+  globalThis.fetch = async () => {
+    aiCalled = true;
+    throw new Error("不应调用AI");
+  };
+  try {
+    const requestCandidates = Array.from({ length: 31 }, (_, index) => ({
+      ...candidates[index % candidates.length],
+      id: `candidate-${index + 1}`,
+      topic: "安全测试主题",
+      corePoint: "安全测试观点",
+      structureRole: "golden_quote",
+      recommendation: "强烈建议切",
+    }));
+    const response = await postCompletePlans(new Request("http://localhost/api/live-clips/complete-plans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        liveTranscriptId: "live-1",
+        coreCandidateId: "candidate-1",
+        candidates: requestCandidates,
+        paragraphs: parsed.paragraphs,
+      }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(body.validationCode, "CANDIDATE_COUNT_EXCEEDED");
+    assert.deepEqual(body.validationDetails, { actualCount: 31, maxCount: 30 });
+    assert.equal(body.error, "完整成片方案生成失败：共提交31条候选，最多支持30条");
+    assert.equal(aiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("完整成片接口指出历史候选缺失字段且不返回候选内容", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed, candidates } = fixture();
+  let aiCalled = false;
+  globalThis.fetch = async () => {
+    aiCalled = true;
+    throw new Error("不应调用AI");
+  };
+  try {
+    const requestCandidates = candidates.slice(0, 2).map((candidate, index) => ({
+      ...candidate,
+      topic: index === 0 ? "安全测试主题" : "不得出现在响应里的候选主题",
+      corePoint: "安全测试观点",
+      structureRole: "golden_quote",
+      recommendation: "强烈建议切",
+    }));
+    delete (requestCandidates[1] as { corePoint?: string }).corePoint;
+    const response = await postCompletePlans(new Request("http://localhost/api/live-clips/complete-plans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        liveTranscriptId: "live-1",
+        coreCandidateId: requestCandidates[0].id,
+        candidates: requestCandidates,
+        paragraphs: parsed.paragraphs,
+      }),
+    }) as never);
+    const body = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(body.validationCode, "HISTORICAL_CANDIDATE_MISSING_FIELD");
+    assert.deepEqual(body.validationDetails, { candidateIndex: 2, fieldName: "corePoint" });
+    assert.equal(body.error, "完整成片方案生成失败：第2条历史候选缺少或无法识别“核心观点”");
+    assert.equal(JSON.stringify(body).includes("不得出现在响应里的候选主题"), false);
+    assert.equal(aiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("完整成片接口为其余请求校验返回固定安全诊断码", async () => {
+  const originalFetch = globalThis.fetch;
+  const { parsed, candidates } = fixture();
+  let aiCalled = false;
+  globalThis.fetch = async () => {
+    aiCalled = true;
+    throw new Error("不应调用AI");
+  };
+  const validCandidate = {
+    ...candidates[0],
+    topic: "安全测试主题",
+    corePoint: "安全测试观点",
+    structureRole: "opening",
+    recommendation: "强烈建议切",
+  };
+  const validBody = {
+    liveTranscriptId: "live-1",
+    coreCandidateId: validCandidate.id,
+    candidates: [validCandidate],
+    paragraphs: parsed.paragraphs,
+  };
+  const cases: Array<{ expected: string; expectedError: string; body: unknown }> = [
+    { expected: "REQUEST_FORMAT_INVALID", expectedError: "请求格式不正确", body: [] },
+    {
+      expected: "REQUEST_FIELD_INVALID",
+      expectedError: "请求缺少或无法识别“直播逐字稿编号”",
+      body: { ...validBody, liveTranscriptId: null },
+    },
+    { expected: "CANDIDATE_LIST_INVALID", expectedError: "候选列表为空或格式不正确", body: { ...validBody, candidates: [] } },
+    { expected: "CANDIDATE_FORMAT_INVALID", expectedError: "第1条候选格式不正确", body: { ...validBody, candidates: ["invalid"] } },
+    {
+      expected: "CANDIDATE_OWNERSHIP_MISMATCH",
+      expectedError: "第1条候选不属于当前直播",
+      body: { ...validBody, candidates: [{ ...validCandidate, liveTranscriptId: "other-live" }] },
+    },
+    {
+      expected: "CANDIDATE_RANGE_INVALID",
+      expectedError: "第1条候选的段落范围不正确",
+      body: { ...validBody, candidates: [{ ...validCandidate, startParagraph: 2, endParagraph: 1 }] },
+    },
+    {
+      expected: "CANDIDATE_REMOVAL_INVALID",
+      expectedError: "第1条候选的第1条删除建议格式不正确",
+      body: { ...validBody, candidates: [{ ...validCandidate, removeSuggestions: [{}] }] },
+    },
+    {
+      expected: "CANDIDATE_ID_DUPLICATED",
+      expectedError: "候选编号重复",
+      body: { ...validBody, candidates: [validCandidate, { ...validCandidate }] },
+    },
+    {
+      expected: "CORE_CANDIDATE_NOT_FOUND",
+      expectedError: "核心候选不存在于本次候选列表",
+      body: { ...validBody, coreCandidateId: "missing-core" },
+    },
+    {
+      expected: "TRANSCRIPT_PARAGRAPHS_INVALID",
+      expectedError: "逐字稿段落为空或格式不正确",
+      body: { ...validBody, paragraphs: [] },
+    },
+    {
+      expected: "CANDIDATE_SOURCE_RANGE_MISSING",
+      expectedError: "第1条候选的原文范围在逐字稿中不存在",
+      body: { ...validBody, candidates: [{ ...validCandidate, startParagraph: 99, endParagraph: 99 }] },
+    },
+  ];
+
+  try {
+    for (const item of cases) {
+      const response = await postCompletePlans(new Request("http://localhost/api/live-clips/complete-plans", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+        body: JSON.stringify(item.body),
+      }) as never);
+      const body = await response.json();
+      assert.equal(response.status, 400, item.expected);
+      assert.equal(body.validationCode, item.expected, item.expected);
+      assert.equal(body.error, `完整成片方案生成失败：${item.expectedError}`, item.expected);
+      assert.equal(JSON.stringify(body).includes("很多人以为知识越多"), false, item.expected);
+    }
+    assert.equal(aiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("完整成片方案拒绝换核心主体、重复原文、伪造原话和营销补录", () => {
   const { parsed, candidates } = fixture();
   const opening = {

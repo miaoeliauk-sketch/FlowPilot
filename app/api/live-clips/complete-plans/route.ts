@@ -10,7 +10,12 @@ import {
   parseTranscriptParagraphs,
 } from "@/lib/live-clips-route";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
-import type { ClipRemovalSuggestion, TranscriptParagraph } from "@/lib/live-clips-types";
+import type {
+  ClipRemovalSuggestion,
+  CompletePlanCandidateFieldName,
+  CompletePlanRequestFieldName,
+  TranscriptParagraph,
+} from "@/lib/live-clips-types";
 
 const SYSTEM_PROMPT = `你是直播短视频成片策划。你要围绕一条核心切片候选，把同一场直播中已经识别出的相关候选组织成一套从开头到结尾的完整成片方案。
 
@@ -36,24 +41,88 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function requiredString(value: unknown, label: string, max = 1000) {
-  if (typeof value !== "string" || !value.trim() || value.length > max) throw new LiveClipRequestError(`${label}无效`);
+function requestFieldString(value: unknown, fieldName: CompletePlanRequestFieldName, max: number) {
+  if (typeof value !== "string" || !value.trim() || value.length > max) {
+    throw new LiveClipRequestError("请求字段无效", {
+      validationCode: "REQUEST_FIELD_INVALID",
+      fieldName,
+    });
+  }
   return value.trim();
 }
 
-function positiveInteger(value: unknown, label: string) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new LiveClipRequestError(`${label}无效`);
+function historicalCandidateString(
+  value: unknown,
+  fieldName: CompletePlanCandidateFieldName,
+  candidateIndex: number,
+  max: number,
+) {
+  if (typeof value !== "string" || !value.trim() || value.length > max) {
+    throw new LiveClipRequestError("历史候选缺少必填字段", {
+      validationCode: "HISTORICAL_CANDIDATE_MISSING_FIELD",
+      candidateIndex,
+      fieldName,
+    });
+  }
+  return value.trim();
+}
+
+function historicalCandidateInteger(
+  value: unknown,
+  fieldName: CompletePlanCandidateFieldName,
+  candidateIndex: number,
+) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new LiveClipRequestError("历史候选缺少必填字段", {
+      validationCode: "HISTORICAL_CANDIDATE_MISSING_FIELD",
+      candidateIndex,
+      fieldName,
+    });
+  }
   return value;
 }
 
-function parseRemovalSuggestions(value: unknown): ClipRemovalSuggestion[] {
-  if (!Array.isArray(value)) throw new LiveClipRequestError("候选删除建议格式无效");
+function parseRemovalSuggestions(value: unknown, candidateIndex: number): ClipRemovalSuggestion[] {
+  if (!Array.isArray(value)) {
+    throw new LiveClipRequestError("历史候选缺少删除建议字段", {
+      validationCode: "HISTORICAL_CANDIDATE_MISSING_FIELD",
+      candidateIndex,
+      fieldName: "removeSuggestions",
+    });
+  }
   return value.map((item, index) => {
-    if (!isRecord(item)) throw new LiveClipRequestError(`第${index + 1}条删除建议格式无效`);
+    const removalIndex = index + 1;
+    if (!isRecord(item)) {
+      throw new LiveClipRequestError("候选删除建议格式无效", {
+        validationCode: "CANDIDATE_REMOVAL_INVALID",
+        candidateIndex,
+        removalIndex,
+      });
+    }
+    const paragraphNumber = item.paragraphNumber;
+    const quote = item.quote;
+    const reason = item.reason;
+    if (
+      typeof paragraphNumber !== "number"
+      || !Number.isInteger(paragraphNumber)
+      || paragraphNumber < 1
+      || typeof quote !== "string"
+      || !quote.trim()
+      || quote.length > 500
+      || typeof reason !== "string"
+      || !reason.trim()
+      || reason.length > 300
+    ) {
+      throw new LiveClipRequestError("候选删除建议格式无效", {
+        validationCode: "CANDIDATE_REMOVAL_INVALID",
+        candidateIndex,
+        removalIndex,
+      });
+    }
     return {
-      paragraphNumber: positiveInteger(item.paragraphNumber, "删除建议段落"),
-      quote: requiredString(item.quote, "删除建议原话", 500),
-      reason: requiredString(item.reason, "删除原因", 300),
+      paragraphNumber,
+      quote: quote.trim(),
+      reason: reason.trim(),
       startTime: typeof item.startTime === "string" ? item.startTime : null,
       endTime: typeof item.endTime === "string" ? item.endTime : null,
     };
@@ -61,36 +130,68 @@ function parseRemovalSuggestions(value: unknown): ClipRemovalSuggestion[] {
 }
 
 function parseCandidates(value: unknown, liveTranscriptId: string): PromptCandidate[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 30) throw new LiveClipRequestError("候选数量必须在1到30之间");
+  if (Array.isArray(value) && value.length > 30) {
+    throw new LiveClipRequestError("候选数量超过30条", {
+      validationCode: "CANDIDATE_COUNT_EXCEEDED",
+      actualCount: value.length,
+      maxCount: 30,
+    });
+  }
+  if (!Array.isArray(value) || value.length < 1) {
+    throw new LiveClipRequestError("候选列表为空或格式无效", { validationCode: "CANDIDATE_LIST_INVALID" });
+  }
   const candidates = value.map((item, index): PromptCandidate => {
-    if (!isRecord(item)) throw new LiveClipRequestError(`第${index + 1}条候选格式无效`);
-    const candidateLiveId = requiredString(item.liveTranscriptId, "候选直播ID", 160);
-    if (candidateLiveId !== liveTranscriptId) throw new LiveClipRequestError("候选归属不匹配");
-    const startParagraph = positiveInteger(item.startParagraph, "候选开始段落");
-    const endParagraph = positiveInteger(item.endParagraph, "候选结束段落");
-    if (endParagraph < startParagraph) throw new LiveClipRequestError("候选段落范围无效");
+    const candidateIndex = index + 1;
+    if (!isRecord(item)) {
+      throw new LiveClipRequestError("候选格式无效", {
+        validationCode: "CANDIDATE_FORMAT_INVALID",
+        candidateIndex,
+      });
+    }
+    const candidateLiveId = historicalCandidateString(item.liveTranscriptId, "liveTranscriptId", candidateIndex, 160);
+    if (candidateLiveId !== liveTranscriptId) {
+      throw new LiveClipRequestError("候选归属不匹配", {
+        validationCode: "CANDIDATE_OWNERSHIP_MISMATCH",
+        candidateIndex,
+      });
+    }
+    const startParagraph = historicalCandidateInteger(item.startParagraph, "startParagraph", candidateIndex);
+    const endParagraph = historicalCandidateInteger(item.endParagraph, "endParagraph", candidateIndex);
+    if (endParagraph < startParagraph) {
+      throw new LiveClipRequestError("候选段落范围无效", {
+        validationCode: "CANDIDATE_RANGE_INVALID",
+        candidateIndex,
+      });
+    }
     return {
-      id: requiredString(item.id, "候选ID", 160),
+      id: historicalCandidateString(item.id, "id", candidateIndex, 160),
       liveTranscriptId: candidateLiveId,
       startParagraph,
       endParagraph,
-      removeSuggestions: parseRemovalSuggestions(item.removeSuggestions),
-      topic: requiredString(item.topic, "候选主题", 200),
-      corePoint: requiredString(item.corePoint, "候选核心观点", 500),
+      removeSuggestions: parseRemovalSuggestions(item.removeSuggestions, candidateIndex),
+      topic: historicalCandidateString(item.topic, "topic", candidateIndex, 200),
+      corePoint: historicalCandidateString(item.corePoint, "corePoint", candidateIndex, 500),
       structureRole: typeof item.structureRole === "string" ? item.structureRole : null,
-      recommendation: requiredString(item.recommendation, "候选推荐程度", 30),
+      recommendation: historicalCandidateString(item.recommendation, "recommendation", candidateIndex, 30),
     };
   });
-  if (new Set(candidates.map(candidate => candidate.id)).size !== candidates.length) throw new LiveClipRequestError("候选ID重复");
+  if (new Set(candidates.map(candidate => candidate.id)).size !== candidates.length) {
+    throw new LiveClipRequestError("候选ID重复", { validationCode: "CANDIDATE_ID_DUPLICATED" });
+  }
   return candidates;
 }
 
 function sourceParagraphs(candidates: PromptCandidate[], paragraphs: TranscriptParagraph[]) {
-  for (const candidate of candidates) {
+  for (const [index, candidate] of candidates.entries()) {
     if (
       !paragraphs.some(paragraph => paragraph.paragraphNumber === candidate.startParagraph)
       || !paragraphs.some(paragraph => paragraph.paragraphNumber === candidate.endParagraph)
-    ) throw new LiveClipRequestError(`候选${candidate.id}的原文范围不存在`);
+    ) {
+      throw new LiveClipRequestError("候选原文范围不存在", {
+        validationCode: "CANDIDATE_SOURCE_RANGE_MISSING",
+        candidateIndex: index + 1,
+      });
+    }
   }
   return paragraphs;
 }
@@ -146,14 +247,21 @@ export async function POST(request: NextRequest) {
   try {
     let body: unknown;
     try { body = await request.json(); }
-    catch { throw new LiveClipRequestError("请求格式错误"); }
-    if (!isRecord(body)) throw new LiveClipRequestError("请求格式错误");
-    const liveTranscriptId = requiredString(body.liveTranscriptId, "直播逐字稿ID", 160);
-    const coreCandidateId = requiredString(body.coreCandidateId, "核心候选ID", 160);
+    catch { throw new LiveClipRequestError("请求格式错误", { validationCode: "REQUEST_FORMAT_INVALID" }); }
+    if (!isRecord(body)) throw new LiveClipRequestError("请求格式错误", { validationCode: "REQUEST_FORMAT_INVALID" });
+    const liveTranscriptId = requestFieldString(body.liveTranscriptId, "liveTranscriptId", 160);
+    const coreCandidateId = requestFieldString(body.coreCandidateId, "coreCandidateId", 160);
     const candidates = parseCandidates(body.candidates, liveTranscriptId);
     const coreCandidate = candidates.find(candidate => candidate.id === coreCandidateId);
-    if (!coreCandidate) throw new LiveClipRequestError("核心候选不存在");
-    const paragraphs = parseTranscriptParagraphs(body.paragraphs);
+    if (!coreCandidate) {
+      throw new LiveClipRequestError("核心候选不存在", { validationCode: "CORE_CANDIDATE_NOT_FOUND" });
+    }
+    let paragraphs: TranscriptParagraph[];
+    try {
+      paragraphs = parseTranscriptParagraphs(body.paragraphs);
+    } catch {
+      throw new LiveClipRequestError("逐字稿段落格式无效", { validationCode: "TRANSCRIPT_PARAGRAPHS_INVALID" });
+    }
     const availableParagraphs = sourceParagraphs(candidates, paragraphs);
     const result = await callStructuredDeepSeek({
       systemPrompt: SYSTEM_PROMPT,

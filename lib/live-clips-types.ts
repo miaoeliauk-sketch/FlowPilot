@@ -88,6 +88,19 @@ export function isLiveClipFailureReason(value: unknown): value is LiveClipFailur
 }
 
 export const COMPLETE_PLAN_VALIDATION_CODES = [
+  "REQUEST_FORMAT_INVALID",
+  "REQUEST_FIELD_INVALID",
+  "CANDIDATE_COUNT_EXCEEDED",
+  "CANDIDATE_LIST_INVALID",
+  "CANDIDATE_FORMAT_INVALID",
+  "HISTORICAL_CANDIDATE_MISSING_FIELD",
+  "CANDIDATE_OWNERSHIP_MISMATCH",
+  "CANDIDATE_RANGE_INVALID",
+  "CANDIDATE_REMOVAL_INVALID",
+  "CANDIDATE_ID_DUPLICATED",
+  "CORE_CANDIDATE_NOT_FOUND",
+  "TRANSCRIPT_PARAGRAPHS_INVALID",
+  "CANDIDATE_SOURCE_RANGE_MISSING",
   "PLAN_COUNT_INVALID",
   "PLAN_FIELD_INVALID",
   "SECTION_COUNT_INVALID",
@@ -103,6 +116,19 @@ export const COMPLETE_PLAN_VALIDATION_CODES = [
 export type CompletePlanValidationCode = typeof COMPLETE_PLAN_VALIDATION_CODES[number];
 
 export const COMPLETE_PLAN_VALIDATION_LABELS: Record<CompletePlanValidationCode, string> = {
+  REQUEST_FORMAT_INVALID: "请求格式不正确",
+  REQUEST_FIELD_INVALID: "请求字段不完整",
+  CANDIDATE_COUNT_EXCEEDED: "候选数量超过30条",
+  CANDIDATE_LIST_INVALID: "候选列表为空或格式不正确",
+  CANDIDATE_FORMAT_INVALID: "候选格式不正确",
+  HISTORICAL_CANDIDATE_MISSING_FIELD: "历史候选缺少必填字段",
+  CANDIDATE_OWNERSHIP_MISMATCH: "候选不属于当前直播",
+  CANDIDATE_RANGE_INVALID: "候选段落范围不正确",
+  CANDIDATE_REMOVAL_INVALID: "候选删除建议格式不正确",
+  CANDIDATE_ID_DUPLICATED: "候选编号重复",
+  CORE_CANDIDATE_NOT_FOUND: "核心候选不存在于本次候选列表",
+  TRANSCRIPT_PARAGRAPHS_INVALID: "逐字稿段落为空或格式不正确",
+  CANDIDATE_SOURCE_RANGE_MISSING: "候选的原文范围在逐字稿中不存在",
   PLAN_COUNT_INVALID: "方案数量不是1至3套",
   PLAN_FIELD_INVALID: "方案标题、推荐理由或剪辑建议字段不合法",
   SECTION_COUNT_INVALID: "成片段落数量不是3至5段",
@@ -117,6 +143,36 @@ export const COMPLETE_PLAN_VALIDATION_LABELS: Record<CompletePlanValidationCode,
 
 export function isCompletePlanValidationCode(value: unknown): value is CompletePlanValidationCode {
   return typeof value === "string" && COMPLETE_PLAN_VALIDATION_CODES.includes(value as CompletePlanValidationCode);
+}
+
+export const COMPLETE_PLAN_CANDIDATE_FIELD_LABELS = {
+  id: "候选编号",
+  liveTranscriptId: "直播归属",
+  startParagraph: "开始段落",
+  endParagraph: "结束段落",
+  removeSuggestions: "删除建议",
+  topic: "主题",
+  corePoint: "核心观点",
+  recommendation: "推荐程度",
+} as const;
+
+export type CompletePlanCandidateFieldName = keyof typeof COMPLETE_PLAN_CANDIDATE_FIELD_LABELS;
+
+export function isCompletePlanCandidateFieldName(value: unknown): value is CompletePlanCandidateFieldName {
+  return typeof value === "string"
+    && Object.prototype.hasOwnProperty.call(COMPLETE_PLAN_CANDIDATE_FIELD_LABELS, value);
+}
+
+export const COMPLETE_PLAN_REQUEST_FIELD_LABELS = {
+  liveTranscriptId: "直播逐字稿编号",
+  coreCandidateId: "核心候选编号",
+} as const;
+
+export type CompletePlanRequestFieldName = keyof typeof COMPLETE_PLAN_REQUEST_FIELD_LABELS;
+
+export function isCompletePlanRequestFieldName(value: unknown): value is CompletePlanRequestFieldName {
+  return typeof value === "string"
+    && Object.prototype.hasOwnProperty.call(COMPLETE_PLAN_REQUEST_FIELD_LABELS, value);
 }
 
 export interface TranscriptParagraph {

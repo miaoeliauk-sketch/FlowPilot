@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import { StructuredDeepSeekError } from "./structured-deepseek";
 import {
+  COMPLETE_PLAN_CANDIDATE_FIELD_LABELS,
+  COMPLETE_PLAN_REQUEST_FIELD_LABELS,
   COMPLETE_PLAN_VALIDATION_LABELS,
   LIVE_CLIP_FAILURE_REASON_LABELS,
+  isCompletePlanCandidateFieldName,
+  isCompletePlanRequestFieldName,
   isCompletePlanValidationCode,
   isLiveClipFailureReason,
 } from "./live-clips-types";
@@ -15,7 +19,15 @@ import type {
   TranscriptParagraph,
 } from "./live-clips-types";
 
-export class LiveClipRequestError extends Error {}
+export class LiveClipRequestError extends Error {
+  readonly diagnosticDetails: Record<string, unknown>;
+
+  constructor(message: string, diagnosticDetails: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "LiveClipRequestError";
+    this.diagnosticDetails = diagnosticDetails;
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -82,6 +94,81 @@ function lastValidationCode(error: StructuredDeepSeekError): CompletePlanValidat
   return null;
 }
 
+function requestValidationCode(error: LiveClipRequestError): CompletePlanValidationCode | null {
+  const code = error.diagnosticDetails.validationCode;
+  return isCompletePlanValidationCode(code) ? code : null;
+}
+
+function safePositiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function requestValidationDetails(
+  error: LiveClipRequestError,
+  validationCode: CompletePlanValidationCode | null,
+): Record<string, number | string> | null {
+  if (validationCode === "CANDIDATE_COUNT_EXCEEDED") {
+    const actualCount = safePositiveInteger(error.diagnosticDetails.actualCount);
+    const maxCount = safePositiveInteger(error.diagnosticDetails.maxCount);
+    return actualCount !== null && maxCount !== null ? { actualCount, maxCount } : null;
+  }
+  if (validationCode === "HISTORICAL_CANDIDATE_MISSING_FIELD") {
+    const candidateIndex = safePositiveInteger(error.diagnosticDetails.candidateIndex);
+    const fieldName = error.diagnosticDetails.fieldName;
+    return candidateIndex !== null && isCompletePlanCandidateFieldName(fieldName)
+      ? { candidateIndex, fieldName }
+      : null;
+  }
+  if (validationCode === "REQUEST_FIELD_INVALID") {
+    const fieldName = error.diagnosticDetails.fieldName;
+    return isCompletePlanRequestFieldName(fieldName) ? { fieldName } : null;
+  }
+  if (
+    validationCode === "CANDIDATE_FORMAT_INVALID"
+    || validationCode === "CANDIDATE_OWNERSHIP_MISMATCH"
+    || validationCode === "CANDIDATE_RANGE_INVALID"
+    || validationCode === "CANDIDATE_SOURCE_RANGE_MISSING"
+  ) {
+    const candidateIndex = safePositiveInteger(error.diagnosticDetails.candidateIndex);
+    return candidateIndex !== null ? { candidateIndex } : null;
+  }
+  if (validationCode === "CANDIDATE_REMOVAL_INVALID") {
+    const candidateIndex = safePositiveInteger(error.diagnosticDetails.candidateIndex);
+    const removalIndex = safePositiveInteger(error.diagnosticDetails.removalIndex);
+    return candidateIndex !== null && removalIndex !== null ? { candidateIndex, removalIndex } : null;
+  }
+  return null;
+}
+
+function completePlanValidationMessage(
+  validationCode: CompletePlanValidationCode | null,
+  details: Record<string, number | string> | null,
+) {
+  if (validationCode === "CANDIDATE_COUNT_EXCEEDED" && details) {
+    return `共提交${details.actualCount}条候选，最多支持${details.maxCount}条`;
+  }
+  if (validationCode === "HISTORICAL_CANDIDATE_MISSING_FIELD" && details) {
+    const fieldName = details.fieldName;
+    return typeof fieldName === "string" && isCompletePlanCandidateFieldName(fieldName)
+      ? `第${details.candidateIndex}条历史候选缺少或无法识别“${COMPLETE_PLAN_CANDIDATE_FIELD_LABELS[fieldName]}”`
+      : COMPLETE_PLAN_VALIDATION_LABELS[validationCode];
+  }
+  if (validationCode === "REQUEST_FIELD_INVALID" && details) {
+    const fieldName = details.fieldName;
+    return typeof fieldName === "string" && isCompletePlanRequestFieldName(fieldName)
+      ? `请求缺少或无法识别“${COMPLETE_PLAN_REQUEST_FIELD_LABELS[fieldName]}”`
+      : COMPLETE_PLAN_VALIDATION_LABELS[validationCode];
+  }
+  if (validationCode === "CANDIDATE_FORMAT_INVALID" && details) return `第${details.candidateIndex}条候选格式不正确`;
+  if (validationCode === "CANDIDATE_OWNERSHIP_MISMATCH" && details) return `第${details.candidateIndex}条候选不属于当前直播`;
+  if (validationCode === "CANDIDATE_RANGE_INVALID" && details) return `第${details.candidateIndex}条候选的段落范围不正确`;
+  if (validationCode === "CANDIDATE_SOURCE_RANGE_MISSING" && details) return `第${details.candidateIndex}条候选的原文范围在逐字稿中不存在`;
+  if (validationCode === "CANDIDATE_REMOVAL_INVALID" && details) {
+    return `第${details.candidateIndex}条候选的第${details.removalIndex}条删除建议格式不正确`;
+  }
+  return validationCode ? COMPLETE_PLAN_VALIDATION_LABELS[validationCode] : null;
+}
+
 export function failureCause(error: unknown): LiveClipFailureCause {
   if (error instanceof StructuredDeepSeekError) {
     const code = lastFailureCode(error);
@@ -108,8 +195,15 @@ export function liveClipErrorResponse(
     : error instanceof StructuredDeepSeekError
       ? lastReasonCode(error)
       : causeCode === "SCHEMA_FAIL" ? "FIELD_INVALID" : null;
-  const validationCode = stageCode === "COMPLETE_PLAN_ANALYSIS_FAIL" && error instanceof StructuredDeepSeekError
-    ? lastValidationCode(error)
+  const validationCode = stageCode === "COMPLETE_PLAN_ANALYSIS_FAIL"
+    ? error instanceof StructuredDeepSeekError
+      ? lastValidationCode(error)
+      : error instanceof LiveClipRequestError
+        ? requestValidationCode(error)
+        : null
+    : null;
+  const validationDetails = error instanceof LiveClipRequestError
+    ? requestValidationDetails(error, validationCode)
     : null;
   const stageLabel = stageCode === "TOPIC_ANALYSIS_FAIL"
     ? "主题识别"
@@ -130,12 +224,14 @@ export function liveClipErrorResponse(
     : causeCode === "TIMEOUT"
       ? 504
       : 502;
+  const validationMessage = completePlanValidationMessage(validationCode, validationDetails);
   return NextResponse.json({
-    error: `${stageLabel}失败：${validationCode ? COMPLETE_PLAN_VALIDATION_LABELS[validationCode] : reasonCode ? LIVE_CLIP_FAILURE_REASON_LABELS[reasonCode] : causeLabel[causeCode]}`,
+    error: `${stageLabel}失败：${validationMessage ?? (reasonCode ? LIVE_CLIP_FAILURE_REASON_LABELS[reasonCode] : causeLabel[causeCode])}`,
     stageCode,
     causeCode,
     reasonCode,
     validationCode,
+    validationDetails,
     diagnosticId,
   }, { status });
 }
