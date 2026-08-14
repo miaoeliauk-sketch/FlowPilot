@@ -170,6 +170,7 @@ export default function LiveClipsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [planFeedback, setPlanFeedback] = useState<string | null>(null);
   const [generatingCompletePlanFor, setGeneratingCompletePlanFor] = useState<string | null>(null);
+  const [completePlanFeedback, setCompletePlanFeedback] = useState<Record<string, { tone: "success" | "error"; message: string }>>({});
 
   useEffect(() => {
     try {
@@ -492,6 +493,11 @@ export default function LiveClipsPage() {
   async function generateCompletePlan(candidate: ClipCandidate) {
     if (!currentTranscript || generatingCompletePlanFor || storageBlocked) return;
     setGeneratingCompletePlanFor(candidate.id);
+    setCompletePlanFeedback(current => {
+      const next = { ...current };
+      delete next[candidate.id];
+      return next;
+    });
     setError(null);
     setNotice(null);
     try {
@@ -522,12 +528,21 @@ export default function LiveClipsPage() {
       const plans = (data as { plans?: CompleteVideoPlan[] }).plans;
       if (!Array.isArray(plans) || plans.length === 0) throw new Error("AI没有返回可用的完整成片方案");
       const next = replaceCompleteVideoPlans(workspaceRef.current, currentTranscript.id, candidate.id, plans);
-      if (!commit(next)) return;
+      if (!commit(next)) {
+        setCompletePlanFeedback(current => ({
+          ...current,
+          [candidate.id]: { tone: "error", message: "完整成片方案保存失败，已停止生成" },
+        }));
+        return;
+      }
+      const message = `已生成${plans.length}套完整成片方案`;
+      setCompletePlanFeedback(current => ({ ...current, [candidate.id]: { tone: "success", message } }));
       setNotice(`已为“${candidate.topic}”生成${plans.length}套完整成片方案`);
     } catch (failure) {
       const message = failure && typeof failure === "object" && "error" in failure && typeof failure.error === "string"
         ? failure.error
         : failure instanceof Error ? failure.message : "完整成片方案生成失败";
+      setCompletePlanFeedback(current => ({ ...current, [candidate.id]: { tone: "error", message } }));
       setError(message);
     } finally {
       setGeneratingCompletePlanFor(null);
@@ -694,30 +709,34 @@ export default function LiveClipsPage() {
 
           {visibleCandidates.length === 0 ? (
             <Card className="py-12 text-center text-[13px] text-[#999]">当前筛选条件下没有切片候选。</Card>
-          ) : visibleCandidates.map(candidate => (
-            <ClipCandidateCard
-              key={candidate.id}
-              candidate={candidate}
-              selected={selectedIds.has(candidate.id)}
-              onToggle={() => toggleSelected(candidate.id)}
-              onCopy={copyText}
-              onGenerateCompletePlan={() => void generateCompletePlan(candidate)}
-              generatingCompletePlan={generatingCompletePlanFor === candidate.id}
-              completePlanGenerationDisabled={generatingCompletePlanFor !== null || storageBlocked}
-            />
-          ))}
-
-          {currentCompletePlans.length > 0 && (
-            <section aria-label="完整成片方案" className="rounded-[16px] border border-[#C9DDAE] bg-white p-5 shadow-sm">
-              <div>
-                <h2 className="text-[15px] font-bold text-[#1C1C1B]">完整成片方案（{currentCompletePlans.length}）</h2>
-                <p className="mt-1 text-[11.5px] text-[#888]">原片内容全部可追溯；补录建议会单独标记，不会混入主播原话。</p>
-              </div>
-              <div className="mt-4 flex flex-col gap-3">
-                {currentCompletePlans.map(plan => <CompleteVideoPlanCard key={plan.id} plan={plan} onCopy={copyText} />)}
-              </div>
-            </section>
-          )}
+          ) : visibleCandidates.map(candidate => {
+            const candidateCompletePlans = currentCompletePlans.filter(plan => plan.coreCandidateId === candidate.id);
+            return (
+              <section key={candidate.id} role="group" aria-label={`切片候选及完整方案：${candidate.topic}`} className="flex flex-col gap-3">
+                <ClipCandidateCard
+                  candidate={candidate}
+                  selected={selectedIds.has(candidate.id)}
+                  onToggle={() => toggleSelected(candidate.id)}
+                  onCopy={copyText}
+                  onGenerateCompletePlan={() => void generateCompletePlan(candidate)}
+                  generatingCompletePlan={generatingCompletePlanFor === candidate.id}
+                  completePlanGenerationDisabled={generatingCompletePlanFor !== null || storageBlocked}
+                  completePlanFeedback={completePlanFeedback[candidate.id] ?? null}
+                />
+                {candidateCompletePlans.length > 0 && (
+                  <section aria-label="完整成片方案" className="rounded-[16px] border border-[#C9DDAE] bg-white p-5 shadow-sm">
+                    <div>
+                      <h2 className="text-[15px] font-bold text-[#1C1C1B]">完整成片方案（{candidateCompletePlans.length}）</h2>
+                      <p className="mt-1 text-[11.5px] text-[#888]">原片内容全部可追溯；补录建议会单独标记，不会混入主播原话。</p>
+                    </div>
+                    <div className="mt-4 flex flex-col gap-3">
+                      {candidateCompletePlans.map(plan => <CompleteVideoPlanCard key={plan.id} plan={plan} onCopy={copyText} />)}
+                    </div>
+                  </section>
+                )}
+              </section>
+            );
+          })}
 
           {currentPlans.length > 0 && (
             <section aria-label="正式切片方案" className="rounded-[16px] border border-[#DAD9D4] bg-white p-5 shadow-sm">

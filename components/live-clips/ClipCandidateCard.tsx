@@ -74,6 +74,7 @@ export default function ClipCandidateCard({
   onGenerateCompletePlan,
   generatingCompletePlan,
   completePlanGenerationDisabled,
+  completePlanFeedback,
 }: {
   candidate: ClipCandidate;
   selected: boolean;
@@ -82,6 +83,7 @@ export default function ClipCandidateCard({
   onGenerateCompletePlan: () => void;
   generatingCompletePlan: boolean;
   completePlanGenerationDisabled: boolean;
+  completePlanFeedback: { tone: "success" | "error"; message: string } | null;
 }) {
   return (
     <article className={`rounded-[18px] border bg-white p-5 shadow-sm transition ${selected ? "border-[#639922] ring-2 ring-[#EAF3DE]" : "border-[#E5E4DE]"}`}>
@@ -213,6 +215,14 @@ export default function ClipCandidateCard({
         </button>
         <button type="button" onClick={() => onCopy(formatClipCardForCopy(candidate), "完整切片卡")} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12px] font-semibold text-white">复制完整切片卡</button>
       </div>
+      {completePlanFeedback && (
+        <div
+          role={completePlanFeedback.tone === "error" ? "alert" : "status"}
+          className={`mt-3 rounded-[10px] px-3 py-2 text-[11.5px] ${completePlanFeedback.tone === "error" ? "bg-[#FCEBEB] text-[#A32D2D]" : "bg-[#EAF3DE] text-[#3B6D11]"}`}
+        >
+          {completePlanFeedback.message}
+        </div>
+      )}
     </article>
   );
 }

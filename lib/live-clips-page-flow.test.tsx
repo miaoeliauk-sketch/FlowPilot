@@ -85,6 +85,7 @@ test("用户导入无时间逐字稿后先保存原文，再进入AI分析且不
 test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方案", async () => {
   const restore = installBrowserEnvironment();
   const originalFetch = globalThis.fetch;
+  let completePlanRequestCount = 0;
   let cleanupPage: (() => void) | undefined;
   try {
     localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
@@ -127,6 +128,14 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
         }] });
       }
       if (url.includes("/api/live-clips/complete-plans")) {
+        completePlanRequestCount += 1;
+        if (completePlanRequestCount > 1) {
+          return Response.json({
+            error: "完整成片方案生成失败：AI返回字段不完整或原话无法追溯",
+            stageCode: "COMPLETE_PLAN_ANALYSIS_FAIL",
+            causeCode: "SCHEMA_FAIL",
+          }, { status: 502 });
+        }
         return Response.json({ plans: [{
           id: "complete-plan-1", liveTranscriptId: requestBody.liveTranscriptId,
           coreCandidateId: requestBody.coreCandidateId, title: "知识付费完整成片",
@@ -186,12 +195,16 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     assert.ok(view.getByText(/信任建立：第4段/));
     assert.ok(view.getByText("00:01:08 → 00:01:38"));
     fireEvent.click(view.getByRole("button", { name: "生成完整成片方案：为什么知识付费不能只证明懂得多" }));
-    const completePlansRegion = await view.findByRole("region", { name: "完整成片方案" });
+    const candidatePlanGroup = await view.findByRole("group", { name: "切片候选及完整方案：为什么知识付费不能只证明懂得多" });
+    const completePlansRegion = await within(candidatePlanGroup).findByRole("region", { name: "完整成片方案" });
     assert.ok(within(completePlansRegion).getByText("完整成片方案（1）"));
     assert.ok(within(completePlansRegion).getByText("知识付费完整成片"));
     assert.equal(within(completePlansRegion).getAllByText("补录建议").length, 2);
     assert.ok(within(completePlansRegion).getByText(/00:01:08 → 00:01:38/));
     assert.ok(within(completePlansRegion).getByRole("button", { name: "复制完整成片方案" }));
+    fireEvent.click(within(candidatePlanGroup).getByRole("button", { name: "生成完整成片方案：为什么知识付费不能只证明懂得多" }));
+    const localGenerationError = await within(candidatePlanGroup).findByRole("alert");
+    assert.equal(localGenerationError.textContent, "完整成片方案生成失败：AI返回字段不完整或原话无法追溯");
     fireEvent.click(view.getByRole("checkbox", { name: "选择切片：为什么知识付费不能只证明懂得多" }));
     fireEvent.click(view.getByRole("button", { name: "生成切片方案" }));
     const actionBar = view.getByRole("button", { name: "生成切片方案" }).parentElement as HTMLElement;
