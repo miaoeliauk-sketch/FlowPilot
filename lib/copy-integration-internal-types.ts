@@ -19,6 +19,7 @@ export interface EvidenceFact extends EvidenceFactCandidate {
   quoteEnd: number;
   sourceHash: string;
   status: EvidenceStatus;
+  statementCompleteness?: "complete" | "incomplete";
 }
 
 export interface EvidenceRelation {
@@ -40,6 +41,7 @@ export interface EvidenceReviewDecision {
   reason: string;
   classification: EvidenceClassification;
   atomicity: "atomic" | "over_grouped";
+  statementCompleteness: "complete" | "incomplete";
 }
 
 export interface EvidenceReviewResult {

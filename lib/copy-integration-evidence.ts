@@ -12,6 +12,7 @@ import type {
   SynthesisResult,
 } from "./copy-integration-internal-types";
 import type { CopyIntegrationSource } from "./copy-integration-types";
+import { getContentWeight, normalizeContentShares } from "./copy-integration-weights";
 
 export class CopyIntegrationValidationError extends Error {
   readonly diagnosticCode: string;
@@ -225,6 +226,11 @@ export function parseAndValidateEvidenceExtraction(
   if (new Set(factContentKeys).size !== factContentKeys.length) {
     fail("DUPLICATE_FACT_CONTENT", "同一素材中的同一段原文不能重复登记为多个事实");
   }
+  if (facts.some(fact =>
+    (fact.classification === "usable" || fact.classification === "evidence_gap") &&
+    !isStatementExtractive(fact.statement, fact.originalQuote))) {
+    fail("NON_EXTRACTIVE_STATEMENT", "观点摘要必须逐字来自原文");
+  }
   validateSourceCoverage(sources, facts);
   const relationIds = new Set<string>();
   const relations = parsed.relations.map((rawRelation, index): EvidenceRelation => {
@@ -336,12 +342,19 @@ export function applyEvidenceReview(content: string, table: EvidenceTable): Evid
       if (!decisionValues.has(decision)) {
         fail("INVALID_REVIEW_DECISION", "证据复核结论无效");
       }
+      const statementCompleteness = rawDecision.statementCompleteness === undefined
+        ? "incomplete"
+        : requiredString(rawDecision.statementCompleteness, `decisions[${index}].statementCompleteness`);
+      if (statementCompleteness !== "complete" && statementCompleteness !== "incomplete") {
+        fail("INVALID_REVIEW", "观点核心原句完整性结论无效");
+      }
       return {
         factId: requiredString(rawDecision.factId, `decisions[${index}].factId`),
         decision: decision as EvidenceReviewResult["decisions"][number]["decision"],
         reason: requiredString(rawDecision.reason, `decisions[${index}].reason`),
         classification: requiredString(rawDecision.classification, `decisions[${index}].classification`) as EvidenceClassification,
         atomicity: requiredString(rawDecision.atomicity, `decisions[${index}].atomicity`) as EvidenceReviewResult["decisions"][number]["atomicity"],
+        statementCompleteness,
       };
     }),
     relationDecisions: parsed.relationDecisions.map((rawDecision, index) => {
@@ -417,7 +430,7 @@ export function applyEvidenceReview(content: string, table: EvidenceTable): Evid
         : review.decision === "needs_review" || classification === "evidence_gap"
           ? "needs_review"
           : "verified";
-      return { ...fact, classification, status };
+      return { ...fact, classification, status, statementCompleteness: review.statementCompleteness };
     });
   const acceptedFactIds = new Set(facts.filter(fact => fact.status !== "rejected").map(fact => fact.id));
   const candidateFactIds = new Set(facts.filter(fact => fact.status === "pending_user_review").map(fact => fact.id));
@@ -470,11 +483,28 @@ function endWithChinesePunctuation(text: string): string {
   return /[。！？；]$/u.test(clean) ? clean : `${clean}。`;
 }
 
-function orderFactsByRelations(facts: EvidenceFact[], relations: EvidenceRelation[]): EvidenceFact[] {
+function normalizeComparableContent(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function orderFactsByRelations(
+  facts: EvidenceFact[],
+  relations: EvidenceRelation[],
+  sourceWeights: Map<string, number>,
+  renderTexts: Map<string, string>,
+): EvidenceFact[] {
   if (facts.length <= 1) return facts;
   const remaining = new Map(facts.map(fact => [fact.id, fact]));
   const ordered: EvidenceFact[] = [];
-  const first = facts[0];
+  const overlapCoverage = (fact: EvidenceFact) => {
+    const text = normalizeComparableContent(renderTexts.get(fact.id) ?? fact.originalQuote);
+    return facts.filter(other => other.id !== fact.id && relations.some(relation =>
+      relation.type === "overlap" && relation.factIds.includes(fact.id) && relation.factIds.includes(other.id)) &&
+      text.includes(normalizeComparableContent(renderTexts.get(other.id) ?? other.originalQuote))).length;
+  };
+  const first = [...facts].sort((firstFact, secondFact) =>
+    overlapCoverage(secondFact) - overlapCoverage(firstFact) ||
+    (sourceWeights.get(secondFact.sourceId) ?? 1) - (sourceWeights.get(firstFact.sourceId) ?? 1))[0];
   ordered.push(first);
   remaining.delete(first.id);
   while (remaining.size > 0) {
@@ -487,27 +517,120 @@ function orderFactsByRelations(facts: EvidenceFact[], relations: EvidenceRelatio
   return ordered;
 }
 
-function buildGroundedParagraph(facts: EvidenceFact[], relations: EvidenceRelation[]): string {
+function buildFactRenderTexts(table: EvidenceTable): Map<string, string> {
+  const rendered = new Map(table.facts.map(fact => [fact.id, fact.originalQuote]));
+
+  const targetShares = new Map(normalizeContentShares(table.sources).map(item => [item.sourceId, item.share]));
+  const conflictFactIds = new Set(table.relations
+    .filter(relation => relation.type === "conflict")
+    .flatMap(relation => relation.factIds));
+  const overlapFactIdsWithAddedEvidence = new Set(table.relations
+    .filter(relation => relation.type === "overlap" && new Set(relation.factIds.map(factId => {
+      const fact = table.facts.find(item => item.id === factId);
+      return fact ? normalizedWithRawIndexes(fact.originalQuote).normalized : "";
+    })).size > 1)
+    .flatMap(relation => relation.factIds));
+
+  const activeFacts = table.facts.filter(fact => fact.status !== "rejected");
+  const textLength = (text: string) => normalizedWithRawIndexes(text).normalized.length;
+  const sourceLengths = new Map(table.sources.map(source => [
+    source.id,
+    activeFacts.filter(fact => fact.sourceId === source.id)
+      .reduce((sum, fact) => sum + textLength(fact.originalQuote), 0),
+  ]));
+  const loss = (lengths: Map<string, number>) => {
+    const total = [...lengths.values()].reduce((sum, length) => sum + length, 0);
+    return table.sources.reduce((sum, source) => {
+      const actualShare = total > 0 ? (lengths.get(source.id) ?? 0) / total : 0;
+      const targetShare = targetShares.get(source.id) ?? 0;
+      return sum + ((actualShare - targetShare) ** 2);
+    }, 0);
+  };
+  const candidates = activeFacts
+    .filter(fact => !conflictFactIds.has(fact.id) &&
+      !overlapFactIdsWithAddedEvidence.has(fact.id) &&
+      fact.status !== "pending_user_review" &&
+      fact.classification !== "evidence_gap" &&
+      fact.statementCompleteness === "complete" &&
+      isStatementExtractive(fact.statement, fact.originalQuote) &&
+      textLength(fact.statement) >= 6 &&
+      textLength(fact.statement) / Math.max(textLength(fact.originalQuote), 1) >= 0.2 &&
+      textLength(fact.statement) < textLength(fact.originalQuote))
+    .sort((first, second) => first.id.localeCompare(second.id));
+  const MAX_OPTIMIZATION_STATES = 4096;
+  type OptimizationState = {
+    lengths: Map<string, number>;
+    compressedFactIds: string[];
+    loss: number;
+  };
+  let states: OptimizationState[] = [{
+    lengths: sourceLengths,
+    compressedFactIds: [],
+    loss: loss(sourceLengths),
+  }];
+  for (const fact of candidates) {
+    const nextStates = new Map<string, OptimizationState>();
+    for (const state of states) {
+      const alternatives = [state];
+      const compressedLengths = new Map(state.lengths);
+      compressedLengths.set(
+        fact.sourceId,
+        (compressedLengths.get(fact.sourceId) ?? 0) - textLength(fact.originalQuote) + textLength(fact.statement),
+      );
+      alternatives.push({
+        lengths: compressedLengths,
+        compressedFactIds: [...state.compressedFactIds, fact.id],
+        loss: loss(compressedLengths),
+      });
+      for (const alternative of alternatives) {
+        const key = table.sources.map(source => alternative.lengths.get(source.id) ?? 0).join(":");
+        const existing = nextStates.get(key);
+        if (!existing || alternative.loss < existing.loss - 1e-9 ||
+          (Math.abs(alternative.loss - existing.loss) <= 1e-9 && alternative.compressedFactIds.length < existing.compressedFactIds.length)) {
+          nextStates.set(key, alternative);
+        }
+      }
+    }
+    states = [...nextStates.values()]
+      .sort((first, second) => first.loss - second.loss || first.compressedFactIds.length - second.compressedFactIds.length)
+      .slice(0, MAX_OPTIMIZATION_STATES);
+  }
+  const best = states[0];
+  for (const factId of best.compressedFactIds) {
+    const fact = activeFacts.find(item => item.id === factId);
+    if (fact) rendered.set(fact.id, fact.statement);
+  }
+  return rendered;
+}
+
+function buildGroundedParagraph(
+  facts: EvidenceFact[],
+  relations: EvidenceRelation[],
+  renderTexts: Map<string, string>,
+  sourceWeights: Map<string, number>,
+): string {
   let paragraph: string;
   if (relations.length === 0) {
-    paragraph = endWithChinesePunctuation(facts[0].originalQuote);
+    paragraph = endWithChinesePunctuation(renderTexts.get(facts[0].id) ?? facts[0].originalQuote);
   } else {
-    const ordered = orderFactsByRelations(facts, relations);
-    paragraph = `${relations.some(relation => relation.type === "overlap") ? "多份素材表达了相近观点。" : ""}${endWithChinesePunctuation(ordered[0].originalQuote)}`;
-    const renderedQuotes = new Set([normalizedWithRawIndexes(ordered[0].originalQuote).normalized]);
+    const ordered = orderFactsByRelations(facts, relations, sourceWeights, renderTexts);
+    const firstText = renderTexts.get(ordered[0].id) ?? ordered[0].originalQuote;
+    paragraph = `${relations.some(relation => relation.type === "overlap") ? "多份素材表达了相近观点。" : ""}${endWithChinesePunctuation(firstText)}`;
+    const renderedQuotes = new Set([normalizeComparableContent(firstText)]);
     for (let index = 1; index < ordered.length; index += 1) {
       const fact = ordered[index];
       const relation = relations.find(item =>
         item.factIds.includes(fact.id) && ordered.slice(0, index).some(previous => item.factIds.includes(previous.id)));
       if (!relation) fail("DISCONNECTED_PARAGRAPH_PLAN", "段落计划关系断裂");
-      const normalizedQuote = normalizedWithRawIndexes(fact.originalQuote).normalized;
-      if (relation.type === "overlap" && renderedQuotes.has(normalizedQuote)) continue;
+      const factText = renderTexts.get(fact.id) ?? fact.originalQuote;
+      const normalizedQuote = normalizeComparableContent(factText);
+      if (relation.type === "overlap" && [...renderedQuotes].some(renderedQuote => renderedQuote.includes(normalizedQuote))) continue;
       const prefix = relation.type === "conflict"
         ? "另一份素材提出了不同说法："
         : relation.type === "overlap"
           ? "另一份素材表达了相近观点，并保留了不同证据或细节："
           : "在此基础上，另一份素材补充：";
-      paragraph += `${prefix}${endWithChinesePunctuation(fact.originalQuote)}`;
+      paragraph += `${prefix}${endWithChinesePunctuation(factText)}`;
       renderedQuotes.add(normalizedQuote);
     }
     if (relations.some(relation => relation.type === "conflict")) {
@@ -520,8 +643,9 @@ function buildGroundedParagraph(facts: EvidenceFact[], relations: EvidenceRelati
   return paragraph;
 }
 
-function buildGroundedHeading(facts: EvidenceFact[], index: number): string {
-  const raw = facts[0]?.originalQuote ?? `内容主题${index + 1}`;
+function buildGroundedHeading(facts: EvidenceFact[], index: number, renderTexts: Map<string, string>): string {
+  const firstFact = facts[0];
+  const raw = firstFact ? (renderTexts.get(firstFact.id) ?? firstFact.originalQuote) : `内容主题${index + 1}`;
   return raw.replace(/[。！？；]/gu, "").slice(0, 28) || `内容主题${index + 1}`;
 }
 
@@ -566,6 +690,8 @@ export function parseAndValidateSynthesis(content: string, table: EvidenceTable)
   const usableFacts = new Map(table.facts.filter(fact => fact.status !== "rejected").map(fact => [fact.id, fact]));
   const representedFactIds = new Set<string>();
   const components = relationComponents(table.relations);
+  const renderTexts = buildFactRenderTexts(table);
+  const sourceWeights = new Map(table.sources.map(source => [source.id, getContentWeight(source)]));
   const sections = parsed.draft.sections.map((rawSection, sectionIndex) => {
     if (!isRecord(rawSection) || Object.keys(rawSection).some(key => key !== "paragraphPlans") || !Array.isArray(rawSection.paragraphPlans) || rawSection.paragraphPlans.length === 0) {
       fail("INVALID_SYNTHESIS_SECTION", `sections[${sectionIndex}]无效`);
@@ -602,12 +728,12 @@ export function parseAndValidateSynthesis(content: string, table: EvidenceTable)
     const paragraphs = paragraphRefs.map((ref) => {
       const facts = ref.factIds.map(factId => usableFacts.get(factId)).filter((fact): fact is EvidenceFact => Boolean(fact));
       const relations = table.relations.filter(item => item.factIds.every(factId => ref.factIds.includes(factId)));
-      return buildGroundedParagraph(facts, relations);
+      return buildGroundedParagraph(facts, relations, renderTexts, sourceWeights);
     });
     const firstRef = paragraphRefs[0];
     const firstFacts = firstRef.factIds.map(factId => usableFacts.get(factId)).filter((fact): fact is EvidenceFact => Boolean(fact));
     return {
-      heading: buildGroundedHeading(firstFacts, sectionIndex),
+      heading: buildGroundedHeading(firstFacts, sectionIndex, renderTexts),
       paragraphs,
       paragraphRefs,
     };

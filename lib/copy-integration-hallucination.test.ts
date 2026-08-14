@@ -33,7 +33,7 @@ test("拒绝母稿中没有原文证据的小韩接机案例", async () => {
         facts: [
           {
             id: "F01",
-            statement: "有些追星者会担心过度关注影响生活",
+            statement: "有些追星者会把大量注意力放在偶像身上，也会担心这种状态影响自己的生活。",
             originalQuote: "有些追星者会把大量注意力放在偶像身上，也会担心这种状态影响自己的生活。",
             sourceId: "source-1",
             classification: "usable",
@@ -41,7 +41,7 @@ test("拒绝母稿中没有原文证据的小韩接机案例", async () => {
           },
           {
             id: "F02",
-            statement: "过度关注外界可能消耗注意力并扰乱情绪节奏",
+            statement: "过度关注外界可能消耗注意力、扰乱情绪节奏。",
             originalQuote: "过度关注外界可能消耗注意力、扰乱情绪节奏。",
             sourceId: "source-2",
             classification: "usable",

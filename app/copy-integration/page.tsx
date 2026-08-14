@@ -9,14 +9,15 @@ import type {
   CopyIntegrationResult,
   CopyIntegrationSource,
 } from "@/lib/copy-integration-types";
+import { formatContentShare, normalizeContentShares } from "@/lib/copy-integration-weights";
 
 type ExclusionDecisionRecord = CopyIntegrationExclusionCandidate & {
   decision: "kept" | "excluded";
 };
 
 const INITIAL_SOURCES: CopyIntegrationSource[] = [
-  { id: "source-1", name: "素材1", content: "" },
-  { id: "source-2", name: "素材2", content: "" },
+  { id: "source-1", name: "素材1", content: "", contentWeight: 1 },
+  { id: "source-2", name: "素材2", content: "", contentWeight: 1 },
 ];
 
 function NoteSources({ sourceIds, names }: { sourceIds: string[]; names: Map<string, string> }) {
@@ -45,6 +46,8 @@ export default function CopyIntegrationPage() {
   const [copied, setCopied] = useState(false);
 
   const sourceNames = resultSourceNames;
+  const sourcesWithContent = sources.filter(source => source.content.trim().length > 0);
+  const sourceShares = new Map(normalizeContentShares(sourcesWithContent).map(item => [item.sourceId, item]));
 
   function rebuildFullText(sections: CopyIntegrationResult["draft"]["sections"]): string {
     return sections
@@ -107,13 +110,18 @@ export default function CopyIntegrationPage() {
       source.id === id ? { ...source, [field]: value } : source));
   }
 
+  function updateSourceWeight(id: string, value: number) {
+    setSources(current => current.map(source =>
+      source.id === id ? { ...source, contentWeight: value } : source));
+  }
+
   function addSource() {
     if (sources.length >= 10) return;
     const number = nextSourceNumber.current;
     nextSourceNumber.current += 1;
     setSources((current) => [
       ...current,
-      { id: `source-${number}`, name: `素材${number}`, content: "" },
+      { id: `source-${number}`, name: `素材${number}`, content: "", contentWeight: 1 },
     ]);
   }
 
@@ -127,6 +135,10 @@ export default function CopyIntegrationPage() {
     const validSources = sources.filter((source) => source.content.trim());
     if (validSources.length < 2) {
       setError("请至少填写2份素材正文");
+      return;
+    }
+    if (validSources.some(source => !Number.isFinite(source.contentWeight) || (source.contentWeight ?? 0) <= 0)) {
+      setError("每篇文案的内容份额必须大于0");
       return;
     }
 
@@ -200,7 +212,8 @@ export default function CopyIntegrationPage() {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <h2 className="text-[15px] font-bold text-[#1C1C1B]">原始素材</h2>
-              <p className="mt-1 text-[12px] text-[#999]">每份素材独立填写，便于追踪来源和识别冲突。</p>
+              <p className="mt-1 text-[12px] text-[#999]">每篇文案独立填写，并设置它在母稿中的目标内容份额。</p>
+              <p className="mt-1 text-[11px] text-[#AAA]">比例用于调节详略，不会删除关键观点；实际占比可能因重复和冲突略有浮动。</p>
             </div>
             <button type="button" onClick={addSource} disabled={sources.length >= 10}
               className="rounded-full bg-[#F2F1ED] px-3 py-1.5 text-[12px] font-semibold text-[#444] hover:bg-[#E8E6DF] disabled:cursor-not-allowed disabled:opacity-50">
@@ -232,6 +245,25 @@ export default function CopyIntegrationPage() {
                     aria-label="素材正文" rows={7} placeholder="粘贴逐字稿、笔记、参考文案或知识库内容……"
                     className="w-full resize-y rounded-[10px] border border-[#E5E4DE] bg-white p-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
                 </label>
+                <div className="mt-2 flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-[11px] font-semibold text-[#666]">
+                    <span>内容份额</span>
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      aria-label={`文案${index + 1}内容份额`}
+                      value={source.contentWeight ?? 1}
+                      onChange={event => updateSourceWeight(source.id, Number(event.target.value))}
+                      className="w-20 rounded-[7px] border border-[#DDDCD6] bg-white px-2 py-1 text-[12px] outline-none focus:border-[#639922]"
+                    />
+                  </label>
+                  <span className="text-[11px] text-[#888]">
+                    {sourceShares.has(source.id)
+                      ? `约${formatContentShare(sourceShares.get(source.id)?.sharePercent ?? 0)}`
+                      : "填写正文后参与计算"}
+                  </span>
+                </div>
               </div>
             ))}
           </div>

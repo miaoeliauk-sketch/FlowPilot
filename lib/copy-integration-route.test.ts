@@ -239,6 +239,370 @@ test("补充要求类型错误时返回400且不调用模型", async () => {
   } finally { model.restore(); }
 });
 
+test("内容份额必须是大于0的有限数字且不会调用模型", async () => {
+  const model = installModelSequence([EXTRACTION]);
+  try {
+    const invalidSources = [
+      { ...SOURCES[0], contentWeight: 0 },
+      { ...SOURCES[1], contentWeight: 7 },
+    ];
+    const response = await POST(request(invalidSources));
+    assert.equal(response.status, 400);
+    assert.equal(model.calls(), 0);
+    assert.deepEqual(await response.json(), { error: "文案内容份额必须大于0" });
+  } finally { model.restore(); }
+});
+
+test("3比7内容份额会压缩第一篇细节并保留第二篇完整内容", async () => {
+  const weightedSources = [
+    {
+      id: "source-1",
+      name: "文案1",
+      content: "第一篇的核心观点值得保留，这里还有用于解释背景的补充细节。",
+      contentWeight: 3,
+    },
+    {
+      id: "source-2",
+      name: "文案2",
+      content: "第二篇的核心方法需要展开说明，因为它包含完整的执行步骤与判断依据。",
+      contentWeight: 7,
+    },
+  ];
+  const extraction = {
+    facts: [
+      {
+        id: "F01",
+        statement: "第一篇的核心观点值得保留",
+        originalQuote: weightedSources[0].content,
+        sourceId: "source-1",
+        classification: "usable",
+        confidence: "high",
+      },
+      {
+        id: "F02",
+        statement: "第二篇的核心方法需要展开说明",
+        originalQuote: weightedSources[1].content,
+        sourceId: "source-2",
+        classification: "usable",
+        confidence: "high",
+      },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({
+      factId: fact.id,
+      decision: "passed",
+      classification: "usable",
+      atomicity: "atomic",
+      statementCompleteness: "complete",
+      reason: "原文支持",
+    })),
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+  ] } };
+  const prompts: string[] = [];
+  const model = installModelSequence([extraction, review, synthesis], prompts);
+  try {
+    const response = await POST(request(weightedSources));
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(body.draft.sections[0].paragraphs[0].text, "第一篇的核心观点值得保留。");
+    assert.equal(body.draft.sections[1].paragraphs[0].text, weightedSources[1].content);
+    assert.match(prompts[0], /文案1[\s\S]*30%/);
+    assert.match(prompts[0], /文案2[\s\S]*70%/);
+    assert.match(prompts[2], /目标内容占比/);
+  } finally { model.restore(); }
+});
+
+test("份额相等或近似相等时核心短句都必须逐字来自原文", async () => {
+  const baseSources = [
+    { id: "source-1", name: "文案1", content: "第一篇的核心观点值得保留，这里还有补充细节。" },
+    { id: "source-2", name: "文案2", content: "第二篇的核心方法需要完整展开。" },
+  ];
+  const invalidExtraction = {
+    facts: [
+      { id: "F01", statement: "第一篇强调了一个重要观点", originalQuote: baseSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: baseSources[1].content, originalQuote: baseSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const prompts: string[] = [];
+  const model = installModelSequence([invalidExtraction, invalidExtraction, invalidExtraction, invalidExtraction], prompts);
+  try {
+    const equalResponse = await POST(request(baseSources.map(source => ({ ...source, contentWeight: 1 }))));
+    const nearResponse = await POST(request(baseSources.map((source, index) => ({ ...source, contentWeight: index === 0 ? 1 : 1.0001 }))));
+    assert.equal(equalResponse.status, 502);
+    assert.equal(nearResponse.status, 502);
+    assert.equal(model.calls(), 4);
+    assert.deepEqual(await equalResponse.json(), { error: "文案整合失败，请重试" });
+    assert.deepEqual(await nearResponse.json(), { error: "文案整合失败，请重试" });
+    assert.match(prompts[1], /完整表达核心意思/);
+  } finally { model.restore(); }
+});
+
+test("独立复核认为摘要不完整时保留全文而不是只剩单个词", async () => {
+  const weightedSources = [
+    { id: "source-1", name: "文案1", content: "客户愿意购买的关键是信任，这是成交的核心观点。", contentWeight: 3 },
+    { id: "source-2", name: "文案2", content: "持续兑现承诺能够逐步建立客户信任。", contentWeight: 7 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "信任", originalQuote: weightedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: weightedSources[1].content, originalQuote: weightedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({
+      factId: fact.id,
+      decision: "passed",
+      classification: "usable",
+      atomicity: "atomic",
+      statementCompleteness: fact.id === "F01" ? "incomplete" : "complete",
+      reason: fact.id === "F01" ? "摘要只是单个词" : "摘要完整",
+    })),
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([
+    extraction,
+    review,
+    { draft: { sections: [
+      { paragraphPlans: [{ factIds: ["F01"] }] },
+      { paragraphPlans: [{ factIds: ["F02"] }] },
+    ] } },
+  ]);
+  try {
+    const response = await POST(request(weightedSources));
+    assert.equal(response.status, 200);
+    const body = await response.json() as Record<string, any>;
+    assert.match(body.draft.fullText, new RegExp(weightedSources[0].content));
+    assert.doesNotMatch(body.draft.fullText, /\n信任。(?:\n|$)/);
+  } finally { model.restore(); }
+});
+
+test("相等与接近相等的份额使用同一套软比例算法", async () => {
+  const baseSources = [
+    { id: "source-1", name: "文案1", content: "第一篇的核心观点值得保留，这里还有很长的背景说明用于解释前因后果与适用边界。" },
+    { id: "source-2", name: "文案2", content: "第二篇的核心方法需要展开说明。" },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "第一篇的核心观点值得保留", originalQuote: baseSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: baseSources[1].content, originalQuote: baseSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "complete", reason: "原文支持" })),
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [
+    { paragraphPlans: [{ factIds: ["F01"] }] },
+    { paragraphPlans: [{ factIds: ["F02"] }] },
+  ] } };
+  const model = installModelSequence([extraction, review, synthesis, extraction, review, synthesis]);
+  try {
+    const equal = await (await POST(request(baseSources.map(source => ({ ...source, contentWeight: 1 }))))).json() as Record<string, any>;
+    const nearlyEqual = await (await POST(request(baseSources.map((source, index) => ({ ...source, contentWeight: index === 0 ? 1 : 1.0001 }))))).json() as Record<string, any>;
+    assert.equal(equal.draft.fullText, nearlyEqual.draft.fullText);
+  } finally { model.restore(); }
+});
+
+test("两处需要一起压缩时仍能找到更接近目标份额的组合", async () => {
+  const weightedSources = [
+    { id: "source-1", name: "文案1", content: "甲".repeat(50), contentWeight: 4 },
+    { id: "source-2", name: "文案2", content: "乙".repeat(50), contentWeight: 6 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "甲".repeat(20), originalQuote: weightedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "乙".repeat(40), originalQuote: weightedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "complete", reason: "完整核心内容" })),
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([
+    extraction,
+    review,
+    { draft: { sections: [
+      { paragraphPlans: [{ factIds: ["F01"] }] },
+      { paragraphPlans: [{ factIds: ["F02"] }] },
+    ] } },
+  ]);
+  try {
+    const body = await (await POST(request(weightedSources))).json() as Record<string, any>;
+    assert.equal(body.draft.sections[0].paragraphs[0].text, `${"甲".repeat(20)}。`);
+    assert.equal(body.draft.sections[1].paragraphs[0].text, `${"乙".repeat(40)}。`);
+  } finally { model.restore(); }
+});
+
+test("条件片段不能用于压缩，完整原句可以安全缩短说明细节", async () => {
+  const weightedSources = [
+    { id: "source-1", name: "文案1", content: "如果客户信任品牌，就更容易成交。这里还有背景说明。", contentWeight: 1 },
+    { id: "source-2", name: "文案2", content: "持续复盘能够发现问题。这里还有执行层面的补充说明。", contentWeight: 9 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "如果客户信任品牌", originalQuote: weightedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "持续复盘能够发现问题。", originalQuote: weightedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [],
+  };
+  const review = {
+    decisions: [
+      { factId: "F01", decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "incomplete", reason: "条件片段不能独立表达结论" },
+      { factId: "F02", decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "complete", reason: "完整原句" },
+    ],
+    relationDecisions: [],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([
+    extraction,
+    review,
+    { draft: { sections: [
+      { paragraphPlans: [{ factIds: ["F01"] }] },
+      { paragraphPlans: [{ factIds: ["F02"] }] },
+    ] } },
+  ]);
+  try {
+    const body = await (await POST(request(weightedSources))).json() as Record<string, any>;
+    assert.match(body.draft.fullText, new RegExp(weightedSources[0].content));
+    assert.doesNotMatch(body.draft.fullText, /\n如果客户信任品牌。(?:\n|$)/);
+  } finally { model.restore(); }
+});
+
+test("相等内容份额下重叠观点仍保留新增证据", async () => {
+  const equalSources = [
+    { id: "source-1", name: "文案1", content: "信任影响成交。", contentWeight: 1 },
+    { id: "source-2", name: "文案2", content: "信任影响成交，尤其在高客单价服务中更明显。", contentWeight: 1 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: equalSources[0].content, originalQuote: equalSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: equalSources[1].content, originalQuote: equalSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "信任影响成交" }],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "complete", reason: "原文支持" })),
+    relationDecisions: [{ relationId: "R01", decision: "passed", reason: "观点重叠但有新增证据" }],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([
+    extraction,
+    review,
+    { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } },
+  ]);
+  try {
+    const body = await (await POST(request(equalSources))).json() as Record<string, any>;
+    assert.equal((body.draft.sections[0].paragraphs[0].text.match(/信任影响成交/gu) ?? []).length, 1);
+    assert.match(body.draft.fullText, /尤其在高客单价服务中更明显/);
+  } finally { model.restore(); }
+});
+
+test("加权后的重叠观点只保留一次并优先保留新增证据", async () => {
+  const weightedSources = [
+    { id: "source-1", name: "文案1", content: "信任影响成交。", contentWeight: 3 },
+    { id: "source-2", name: "文案2", content: "信任影响成交，尤其在高客单价服务中更明显。", contentWeight: 7 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "信任影响成交", originalQuote: weightedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "信任影响成交，尤其在高客单价服务中更明显", originalQuote: weightedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "信任影响成交" }],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "complete", reason: "完整原句" })),
+    relationDecisions: [{ relationId: "R01", decision: "passed", reason: "观点重叠且第二篇有新增证据" }],
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([
+    extraction,
+    review,
+    { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } },
+  ]);
+  try {
+    const body = await (await POST(request(weightedSources))).json() as Record<string, any>;
+    assert.equal((body.draft.sections[0].paragraphs[0].text.match(/信任影响成交/gu) ?? []).length, 1);
+    assert.match(body.draft.fullText, /尤其在高客单价服务中更明显/);
+  } finally { model.restore(); }
+});
+
+test("重叠与补充混合关系中仍优先保留能覆盖短句的完整证据", async () => {
+  const sources = [
+    { id: "source-1", name: "文案1", content: "信任影响成交。", contentWeight: 9 },
+    { id: "source-2", name: "文案2", content: "信任影响成交，尤其在高客单价服务中更明显。", contentWeight: 3 },
+    { id: "source-3", name: "文案3", content: "持续兑现承诺可以逐步建立客户信任。", contentWeight: 1 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: sources[0].content, originalQuote: sources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: sources[1].content, originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F03", statement: sources[2].content, originalQuote: sources[2].content, sourceId: "source-3", classification: "usable", confidence: "high" },
+    ],
+    relations: [
+      { id: "R01", type: "overlap", factIds: ["F01", "F02"], summary: "成交观点重叠" },
+      { id: "R02", type: "complement", factIds: ["F02", "F03"], summary: "补充建立信任的方法" },
+    ],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: "usable", atomicity: "atomic", statementCompleteness: "complete", reason: "完整原句" })),
+    relationDecisions: extraction.relations.map(relation => ({ relationId: relation.id, decision: "passed", reason: "关系成立" })),
+    suggestedRelations: [],
+  };
+  const model = installModelSequence([
+    extraction,
+    review,
+    { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02", "F03"] }] }] } },
+  ]);
+  try {
+    const body = await (await POST(request(sources))).json() as Record<string, any>;
+    const paragraph = body.draft.sections[0].paragraphs[0].text as string;
+    assert.equal((paragraph.match(/信任影响成交/gu) ?? []).length, 1);
+    assert.match(paragraph, /高客单价服务中更明显/);
+    assert.match(paragraph, /持续兑现承诺可以逐步建立客户信任/);
+  } finally { model.restore(); }
+});
+
+test("内容份额不能压缩待确认冲突的任一方原文", async () => {
+  const weightedSources = [
+    { id: "source-1", name: "文案1", content: "第一篇认为执行需要三个月，并给出了完整的项目背景。", contentWeight: 3 },
+    { id: "source-2", name: "文案2", content: "第二篇认为执行只需要一个月，并给出了不同的时间判断。", contentWeight: 7 },
+  ];
+  const extraction = {
+    facts: [
+      { id: "F01", statement: "第一篇认为执行需要三个月", originalQuote: weightedSources[0].content, sourceId: "source-1", classification: "usable", confidence: "high" },
+      { id: "F02", statement: "第二篇认为执行只需要一个月", originalQuote: weightedSources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+    ],
+    relations: [{ id: "R01", type: "conflict", factIds: ["F01", "F02"], summary: "执行周期冲突" }],
+  };
+  const review = {
+    decisions: extraction.facts.map(fact => ({ factId: fact.id, decision: "passed", classification: "usable", atomicity: "atomic", reason: "原文支持" })),
+    relationDecisions: [{ relationId: "R01", decision: "passed", reason: "冲突成立" }],
+    suggestedRelations: [],
+  };
+  const synthesis = { draft: { sections: [{ paragraphPlans: [{ factIds: ["F01", "F02"] }] }] } };
+  const model = installModelSequence([extraction, review, synthesis]);
+  try {
+    const body = await (await POST(request(weightedSources))).json() as Record<string, any>;
+    assert.match(body.draft.fullText, new RegExp(weightedSources[0].content));
+    assert.match(body.draft.fullText, new RegExp(weightedSources[1].content));
+    assert.equal(body.conflicts.length, 1);
+  } finally { model.restore(); }
+});
+
 test("关联观点未在同一段落融合时定向重试后失败", async () => {
   const separated = { draft: { sections: [{
     paragraphPlans: [{ factIds: ["F01"] }, { factIds: ["F02"] }],
@@ -619,7 +983,7 @@ test("疑似口播支架经复核后作为待确认候选保留在母稿", async
     facts: [
       {
         id: "F01",
-        statement: "客户不买往往是因为缺乏信任",
+        statement: "客户不买，往往是因为缺乏信任。",
         originalQuote: "客户不买，往往是因为缺乏信任。",
         sourceId: "source-1",
         classification: "usable",
@@ -627,7 +991,7 @@ test("疑似口播支架经复核后作为待确认候选保留在母稿", async
       },
       {
         id: "F02",
-        statement: "持续兑现承诺可以建立信任",
+        statement: "先通过持续兑现承诺建立信任。",
         originalQuote: "先通过持续兑现承诺建立信任。",
         sourceId: "source-2",
         classification: "usable",
@@ -695,7 +1059,7 @@ test("复核建议拒绝口播支架时仍须等待用户确认", async () => {
   const extraction = {
     facts: [
       { id: "F01", statement: "互动问句", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
-      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F02", statement: sources[1].content, originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
     ],
     relations: [],
   };
@@ -730,7 +1094,7 @@ test("复核不确定是否为口播支架时转为依据不足并继续保留",
   const extraction = {
     facts: [
       { id: "F01", statement: "提问过渡", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
-      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F02", statement: sources[1].content, originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
     ],
     relations: [],
   };
@@ -766,7 +1130,7 @@ test("待确认排除候选不参与关系图并独立保留成节", async () =>
   const extraction = {
     facts: [
       { id: "F01", statement: "互动问句", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
-      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F02", statement: sources[1].content, originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
     ],
     relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "错误关系" }],
   };
@@ -797,7 +1161,7 @@ test("待确认排除候选与正常观点放在同一节时拒绝生成", async
   const extraction = {
     facts: [
       { id: "F01", statement: "互动问句", originalQuote: sources[0].content, sourceId: "source-1", classification: "context_only", confidence: "high" },
-      { id: "F02", statement: "复盘帮助发现问题", originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
+      { id: "F02", statement: sources[1].content, originalQuote: sources[1].content, sourceId: "source-2", classification: "usable", confidence: "high" },
     ],
     relations: [],
   };
@@ -1454,15 +1818,15 @@ test("同一事实可以同时参与重叠和补充关系且新增证据不丢�
   } finally { model.restore(); }
 });
 
-test("公开四部分不使用提取模型自由改写的statement和关系摘要", async () => {
+test("公开四部分不使用提取模型自由编写的关系摘要", async () => {
   const safeSources = [
     { id: "source-1", name: "素材1", content: "过度关注外界可能消耗注意力。" },
     { id: "source-2", name: "素材2", content: "静坐可以帮助收回注意力。" },
   ];
   const extraction = {
     facts: [
-      { id: "F01", statement: "过度关注外界一定导致人生失败", originalQuote: safeSources[0].content, sourceId: "source-1", classification: "usable", confidence: "low" },
-      { id: "F02", statement: "静坐三天就能彻底改变命运", originalQuote: safeSources[1].content, sourceId: "source-2", classification: "usable", confidence: "low" },
+      { id: "F01", statement: safeSources[0].content, originalQuote: safeSources[0].content, sourceId: "source-1", classification: "usable", confidence: "low" },
+      { id: "F02", statement: safeSources[1].content, originalQuote: safeSources[1].content, sourceId: "source-2", classification: "usable", confidence: "low" },
     ],
     relations: [{ id: "R01", type: "complement", factIds: ["F01", "F02"], summary: "静坐三天就能彻底改变命运" }],
   };
@@ -1478,7 +1842,7 @@ test("公开四部分不使用提取模型自由改写的statement和关系摘�
   const model = installModelSequence([extraction, review, synthesis]);
   try {
     const serialized = JSON.stringify(await (await POST(request(safeSources))).json());
-    assert.doesNotMatch(serialized, /人生失败|三天|改变命运/);
+    assert.doesNotMatch(serialized, /三天|改变命运/);
     assert.match(serialized, /过度关注外界可能消耗注意力/);
     assert.match(serialized, /静坐可以帮助收回注意力/);
   } finally { model.restore(); }

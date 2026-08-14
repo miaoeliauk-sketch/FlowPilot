@@ -26,8 +26,16 @@ function readSources(value: unknown): CopyIntegrationSource[] {
         id: source.id.trim(),
         name: source.name.trim() || "未命名素材",
         content: source.content.trim(),
+        contentWeight: typeof source.contentWeight === "number" ? source.contentWeight : 1,
       }))
     : [];
+}
+
+function hasInvalidContentWeight(value: unknown): boolean {
+  return Array.isArray(value) && value.some(source =>
+    isRecord(source) &&
+    source.contentWeight !== undefined &&
+    (typeof source.contentWeight !== "number" || !Number.isFinite(source.contentWeight) || source.contentWeight <= 0));
 }
 
 export async function POST(req: NextRequest) {
@@ -42,6 +50,9 @@ export async function POST(req: NextRequest) {
   }
   if (rawBody.instruction !== undefined && typeof rawBody.instruction !== "string") {
     return NextResponse.json({ error: "补充要求格式错误" }, { status: 400 });
+  }
+  if (hasInvalidContentWeight(rawBody.sources)) {
+    return NextResponse.json({ error: "文案内容份额必须大于0" }, { status: 400 });
   }
   const sources = readSources(rawBody.sources);
   if (sources.length < 2) {

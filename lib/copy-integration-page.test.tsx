@@ -72,7 +72,7 @@ after(() => {
 
 test("用户提交两份素材后按固定顺序看到四部分整合结果", async () => {
   const originalFetch = globalThis.fetch;
-  let requestBody: { sources?: Array<{ name: string; content: string }> } = {};
+  let requestBody: { sources?: Array<{ name: string; content: string; contentWeight?: number }> } = {};
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body));
     return new Response(JSON.stringify({
@@ -121,16 +121,25 @@ test("用户提交两份素材后按固定顺序看到四部分整合结果", as
 
     const nameInputs = view.getAllByLabelText("素材名称");
     const contentInputs = view.getAllByLabelText("素材正文");
+    const weightInputs = view.getAllByLabelText(/文案\d+内容份额/);
+    assert.equal(weightInputs.length, 2);
+    await user.clear(weightInputs[0]);
+    await user.type(weightInputs[0], "3");
+    await user.clear(weightInputs[1]);
+    await user.type(weightInputs[1], "7");
     await user.clear(nameInputs[0]);
     await user.type(nameInputs[0], "逐字稿");
     await user.type(contentInputs[0], "客户不买，是因为缺乏信任。建立信任需要7天。");
     await user.clear(nameInputs[1]);
     await user.type(nameInputs[1], "笔记");
     await user.type(contentInputs[1], "成交困难源于客户不信任。建立信任需要30天。");
+    assert.ok(view.getByText("约30%"));
+    assert.ok(view.getByText("约70%"));
     await user.click(view.getByRole("button", { name: "开始整合" }));
 
     assert.equal(requestBody.sources?.length, 2);
     assert.equal(requestBody.sources?.[0].name, "逐字稿");
+    assert.deepEqual(requestBody.sources?.map(source => source.contentWeight), [3, 7]);
     const draftHeading = await view.findByRole("heading", { name: "内容母稿" });
     const summaryHeading = view.getByRole("heading", { name: "决策摘要" });
     const conflictsHeading = view.getByRole("heading", { name: "待确认冲突" });
@@ -229,7 +238,27 @@ test("页面最多允许添加10份素材", async () => {
   }
 
   assert.equal(view.getAllByLabelText("素材正文").length, 10);
+  assert.equal(view.getAllByLabelText(/文案\d+内容份额/).length, 10);
   assert.equal((addButton as HTMLButtonElement).disabled, true);
+});
+
+test("空白文案不参与页面内容份额计算", async () => {
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const CopyIntegrationPage = (await import("../app/copy-integration/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(React.createElement(CopyIntegrationPage));
+  try {
+    await user.click(view.getByRole("button", { name: /添加素材/ }));
+    const contentInputs = view.getAllByLabelText("素材正文");
+    await user.type(contentInputs[0], "第一篇文案");
+    await user.type(contentInputs[1], "第二篇文案");
+
+    assert.equal(view.getAllByText("约50%").length, 2);
+    assert.equal(view.getAllByText("填写正文后参与计算").length, 1);
+  } finally {
+    view.unmount();
+  }
 });
 
 test("未保存的整合结果不分配编号，点击保存后生成母稿和片段编号", async () => {

@@ -2,6 +2,7 @@ export interface CopyIntegrationSource {
   id: string;
   name: string;
   content: string;
+  contentWeight?: number;
 }
 
 export interface CopyIntegrationNote {

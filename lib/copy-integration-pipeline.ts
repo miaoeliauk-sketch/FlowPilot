@@ -48,6 +48,7 @@ function safeCorrection(error: unknown): string {
     INVALID_RELATION_FACTS: "关系必须引用至少两个不同且真实存在的Fact_ID；conflict只能并列双方事实。",
     DUPLICATE_FACT_CONTENT: "同一素材中的同一段原文被重复登记。请只保留一次。",
     DUPLICATE_RELATION_CONTENT: "同一组Fact_ID被重复登记为相同关系。请只保留一条关系。",
+    NON_EXTRACTIVE_STATEMENT: "statement必须逐字来自originalQuote，并完整表达核心意思，不能概括改写。请重新提取。",
     EXCLUSION_CANDIDATE_NOT_ISOLATED: "待用户确认的排除候选必须独占一个section，且该section只能包含这一个Fact_ID的paragraphPlan，不能和正常观点合并。",
     CONFLICTING_RELATION_TYPES: "同一对Fact_ID只能有一种关系类型。请拒绝错误旧关系，再提交正确的新关系。",
     UNSUPPORTED_SPECIFIC_DETAIL: "母稿加入了证据表之外的人物、数字、时间、地点或案例。请删除所有无证据细节，只使用已登记事实。",
