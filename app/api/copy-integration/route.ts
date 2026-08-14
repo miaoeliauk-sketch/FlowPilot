@@ -8,34 +8,64 @@ import type { CopyIntegrationModelAdapter } from "@/lib/copy-integration-interna
 import type { CopyIntegrationSource } from "@/lib/copy-integration-types";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
 
+type ValidSourceRecord = Record<string, unknown> & {
+  id: string;
+  name: string;
+  content: string;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readSources(value: unknown): CopyIntegrationSource[] {
-  return Array.isArray(value)
-    ? value
-      .filter((source): source is CopyIntegrationSource =>
-        isRecord(source) &&
-        typeof source.id === "string" &&
-        typeof source.name === "string" &&
-        typeof source.content === "string" &&
-        Boolean(source.id.trim()) &&
-        Boolean(source.content.trim()))
-      .map(source => ({
-        id: source.id.trim(),
-        name: source.name.trim() || "未命名素材",
-        content: source.content.trim(),
-        contentWeight: typeof source.contentWeight === "number" ? source.contentWeight : 1,
-      }))
-    : [];
+function readValidSourceRecords(value: unknown): ValidSourceRecord[] {
+  return Array.isArray(value) ? value.filter((source): source is ValidSourceRecord =>
+    isRecord(source) &&
+    typeof source.id === "string" &&
+    typeof source.name === "string" &&
+    typeof source.content === "string" &&
+    Boolean(source.id.trim()) &&
+    Boolean(source.content.trim())) : [];
 }
 
-function hasInvalidContentWeight(value: unknown): boolean {
-  return Array.isArray(value) && value.some(source =>
-    isRecord(source) &&
+function readSources(value: unknown): CopyIntegrationSource[] {
+  return readValidSourceRecords(value).map(source => ({
+    id: source.id.trim(),
+    name: source.name.trim() || "未命名素材",
+    content: source.content.trim(),
+    contentWeight: typeof source.contentPercentage === "number"
+      ? source.contentPercentage
+      : typeof source.contentWeight === "number" ? source.contentWeight : 1,
+  }));
+}
+
+function usesContentPercentage(value: unknown): boolean {
+  return readValidSourceRecords(value).some(source => source.contentPercentage !== undefined);
+}
+
+function hasInvalidContentSetting(value: unknown): boolean {
+  const validSources = readValidSourceRecords(value);
+  if (usesContentPercentage(value)) {
+    return validSources.some(source =>
+      typeof source.contentPercentage !== "number" ||
+      !Number.isFinite(source.contentPercentage) ||
+      source.contentPercentage <= 0 ||
+      source.contentPercentage > 100);
+  }
+  return validSources.some(source =>
     source.contentWeight !== undefined &&
-    (typeof source.contentWeight !== "number" || !Number.isFinite(source.contentWeight) || source.contentWeight <= 0));
+    (typeof source.contentWeight !== "number" ||
+      !Number.isFinite(source.contentWeight) ||
+      source.contentWeight <= 0));
+}
+
+function hasInvalidPercentageTotal(value: unknown): boolean {
+  if (!usesContentPercentage(value)) return false;
+  const percentageTotal = readValidSourceRecords(value).reduce(
+    (total, source) => total + (typeof source.contentPercentage === "number" ? source.contentPercentage : 0),
+    0,
+  );
+  return Math.abs(percentageTotal - 100) > 0.01;
 }
 
 export async function POST(req: NextRequest) {
@@ -51,8 +81,14 @@ export async function POST(req: NextRequest) {
   if (rawBody.instruction !== undefined && typeof rawBody.instruction !== "string") {
     return NextResponse.json({ error: "补充要求格式错误" }, { status: 400 });
   }
-  if (hasInvalidContentWeight(rawBody.sources)) {
-    return NextResponse.json({ error: "文案内容份额必须大于0" }, { status: 400 });
+  const percentageMode = usesContentPercentage(rawBody.sources);
+  if (hasInvalidContentSetting(rawBody.sources)) {
+    return NextResponse.json({
+      error: percentageMode ? "文案内容占比必须大于0且不超过100" : "文案内容份额必须大于0",
+    }, { status: 400 });
+  }
+  if (hasInvalidPercentageTotal(rawBody.sources)) {
+    return NextResponse.json({ error: "文案内容占比合计必须为100%" }, { status: 400 });
   }
   const sources = readSources(rawBody.sources);
   if (sources.length < 2) {

@@ -9,16 +9,21 @@ import type {
   CopyIntegrationResult,
   CopyIntegrationSource,
 } from "@/lib/copy-integration-types";
-import { formatContentShare, normalizeContentShares } from "@/lib/copy-integration-weights";
 
 type ExclusionDecisionRecord = CopyIntegrationExclusionCandidate & {
   decision: "kept" | "excluded";
 };
 
 const INITIAL_SOURCES: CopyIntegrationSource[] = [
-  { id: "source-1", name: "素材1", content: "", contentWeight: 1 },
-  { id: "source-2", name: "素材2", content: "", contentWeight: 1 },
+  { id: "source-1", name: "素材1", content: "", contentWeight: 50 },
+  { id: "source-2", name: "素材2", content: "", contentWeight: 50 },
 ];
+
+function formatPercentageTotal(percent: number): string {
+  const rounded = Math.round(percent * 100) / 100;
+  if (Number.isInteger(rounded)) return `${rounded}%`;
+  return `${rounded.toFixed(2).replace(/0$/u, "")}%`;
+}
 
 function NoteSources({ sourceIds, names }: { sourceIds: string[]; names: Map<string, string> }) {
   return (
@@ -47,7 +52,10 @@ export default function CopyIntegrationPage() {
 
   const sourceNames = resultSourceNames;
   const sourcesWithContent = sources.filter(source => source.content.trim().length > 0);
-  const sourceShares = new Map(normalizeContentShares(sourcesWithContent).map(item => [item.sourceId, item]));
+  const activePercentageTotal = sourcesWithContent.reduce(
+    (total, source) => total + (source.contentWeight ?? 0),
+    0,
+  );
 
   function rebuildFullText(sections: CopyIntegrationResult["draft"]["sections"]): string {
     return sections
@@ -121,7 +129,7 @@ export default function CopyIntegrationPage() {
     nextSourceNumber.current += 1;
     setSources((current) => [
       ...current,
-      { id: `source-${number}`, name: `素材${number}`, content: "", contentWeight: 1 },
+      { id: `source-${number}`, name: `素材${number}`, content: "", contentWeight: 0 },
     ]);
   }
 
@@ -137,8 +145,15 @@ export default function CopyIntegrationPage() {
       setError("请至少填写2份素材正文");
       return;
     }
-    if (validSources.some(source => !Number.isFinite(source.contentWeight) || (source.contentWeight ?? 0) <= 0)) {
-      setError("每篇文案的内容份额必须大于0");
+    if (validSources.some(source =>
+      !Number.isFinite(source.contentWeight) ||
+      (source.contentWeight ?? 0) <= 0 ||
+      (source.contentWeight ?? 0) > 100)) {
+      setError("每篇文案的内容占比必须大于0且不超过100%");
+      return;
+    }
+    if (Math.abs(activePercentageTotal - 100) > 0.01) {
+      setError("所有已填写文案的内容占比合计必须为100%");
       return;
     }
 
@@ -152,9 +167,10 @@ export default function CopyIntegrationPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sources: validSources.map((source) => ({
-            ...source,
+            id: source.id,
             name: source.name.trim() || "未命名素材",
             content: source.content.trim(),
+            contentPercentage: source.contentWeight,
           })),
           instruction: instruction.trim(),
         }),
@@ -212,8 +228,8 @@ export default function CopyIntegrationPage() {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <h2 className="text-[15px] font-bold text-[#1C1C1B]">原始素材</h2>
-              <p className="mt-1 text-[12px] text-[#999]">每篇文案独立填写，并设置它在母稿中的目标内容份额。</p>
-              <p className="mt-1 text-[11px] text-[#AAA]">比例用于调节详略，不会删除关键观点；实际占比可能因重复和冲突略有浮动。</p>
+              <p className="mt-1 text-[12px] text-[#999]">每篇文案独立填写，并直接设置它在母稿中的目标内容占比。</p>
+              <p className="mt-1 text-[11px] text-[#AAA]">已填写文案的占比合计需为100%；实际成稿可能因重复和冲突略有浮动。</p>
             </div>
             <button type="button" onClick={addSource} disabled={sources.length >= 10}
               className="rounded-full bg-[#F2F1ED] px-3 py-1.5 text-[12px] font-semibold text-[#444] hover:bg-[#E8E6DF] disabled:cursor-not-allowed disabled:opacity-50">
@@ -247,25 +263,32 @@ export default function CopyIntegrationPage() {
                 </label>
                 <div className="mt-2 flex items-center gap-2">
                   <label className="flex items-center gap-2 text-[11px] font-semibold text-[#666]">
-                    <span>内容份额</span>
-                    <input
-                      type="number"
-                      min="0.1"
-                      step="0.1"
-                      aria-label={`文案${index + 1}内容份额`}
-                      value={source.contentWeight ?? 1}
-                      onChange={event => updateSourceWeight(source.id, Number(event.target.value))}
-                      className="w-20 rounded-[7px] border border-[#DDDCD6] bg-white px-2 py-1 text-[12px] outline-none focus:border-[#639922]"
-                    />
+                    <span>内容占比</span>
+                    <span className="relative">
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.1"
+                        aria-label={`文案${index + 1}内容占比`}
+                        value={source.contentWeight ?? 0}
+                        onChange={event => updateSourceWeight(source.id, Number(event.target.value))}
+                        className="w-20 rounded-[7px] border border-[#DDDCD6] bg-white py-1 pl-2 pr-6 text-[12px] outline-none focus:border-[#639922]"
+                      />
+                      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-[#888]">%</span>
+                    </span>
                   </label>
                   <span className="text-[11px] text-[#888]">
-                    {sourceShares.has(source.id)
-                      ? `约${formatContentShare(sourceShares.get(source.id)?.sharePercent ?? 0)}`
-                      : "填写正文后参与计算"}
+                    {source.content.trim() ? "计入合计" : "填写正文后参与计算"}
                   </span>
                 </div>
               </div>
             ))}
+          </div>
+          <div className={`mt-3 text-right text-[12px] font-semibold ${
+            Math.abs(activePercentageTotal - 100) <= 0.01 ? "text-[#639922]" : "text-[#A32D2D]"
+          }`}>
+            当前合计：{formatPercentageTotal(activePercentageTotal)}
           </div>
 
           <label className="mt-4 block">

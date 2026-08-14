@@ -239,33 +239,74 @@ test("补充要求类型错误时返回400且不调用模型", async () => {
   } finally { model.restore(); }
 });
 
-test("内容份额必须是大于0的有限数字且不会调用模型", async () => {
+test("内容占比必须大于0且不超过100并且不会调用模型", async () => {
   const model = installModelSequence([EXTRACTION]);
   try {
     const invalidSources = [
-      { ...SOURCES[0], contentWeight: 0 },
-      { ...SOURCES[1], contentWeight: 7 },
+      { ...SOURCES[0], contentPercentage: 0 },
+      { ...SOURCES[1], contentPercentage: 100 },
     ];
     const response = await POST(request(invalidSources));
     assert.equal(response.status, 400);
     assert.equal(model.calls(), 0);
-    assert.deepEqual(await response.json(), { error: "文案内容份额必须大于0" });
+    assert.deepEqual(await response.json(), { error: "文案内容占比必须大于0且不超过100" });
   } finally { model.restore(); }
 });
 
-test("3比7内容份额会压缩第一篇细节并保留第二篇完整内容", async () => {
+test("内容占比合计不是100%时返回400且不调用模型", async () => {
+  const model = installModelSequence([EXTRACTION]);
+  try {
+    const invalidTotalSources = [
+      { ...SOURCES[0], contentPercentage: 40 },
+      { ...SOURCES[1], contentPercentage: 40 },
+    ];
+    const response = await POST(request(invalidTotalSources));
+    assert.equal(response.status, 400);
+    assert.equal(model.calls(), 0);
+    assert.deepEqual(await response.json(), { error: "文案内容占比合计必须为100%" });
+  } finally { model.restore(); }
+});
+
+test("空白文案不参与接口内容占比校验", async () => {
+  const model = installModelSequence([EXTRACTION, REVIEW, SYNTHESIS]);
+  try {
+    const sourcesWithBlank = [
+      { ...SOURCES[0], contentPercentage: 50 },
+      { ...SOURCES[1], contentPercentage: 50 },
+      { id: "source-3", name: "素材3", content: "", contentPercentage: 0 },
+    ];
+    const response = await POST(request(sourcesWithBlank));
+    assert.equal(response.status, 200);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("旧版3比7内容份额请求继续兼容", async () => {
+  const model = installModelSequence([EXTRACTION, REVIEW, SYNTHESIS]);
+  try {
+    const legacyWeightedSources = [
+      { ...SOURCES[0], contentWeight: 3 },
+      { ...SOURCES[1], contentWeight: 7 },
+    ];
+    const response = await POST(request(legacyWeightedSources));
+    assert.equal(response.status, 200);
+    assert.equal(model.calls(), 3);
+  } finally { model.restore(); }
+});
+
+test("30%与70%内容占比会压缩第一篇细节并保留第二篇完整内容", async () => {
   const weightedSources = [
     {
       id: "source-1",
       name: "文案1",
       content: "第一篇的核心观点值得保留，这里还有用于解释背景的补充细节。",
-      contentWeight: 3,
+      contentPercentage: 30,
     },
     {
       id: "source-2",
       name: "文案2",
       content: "第二篇的核心方法需要展开说明，因为它包含完整的执行步骤与判断依据。",
-      contentWeight: 7,
+      contentPercentage: 70,
     },
   ];
   const extraction = {
@@ -482,7 +523,7 @@ test("条件片段不能用于压缩，完整原句可以安全缩短说明细�
   } finally { model.restore(); }
 });
 
-test("相等内容份额下重叠观点仍保留新增证据", async () => {
+test("相等内容占比下重叠观点仍保留新增证据", async () => {
   const equalSources = [
     { id: "source-1", name: "文案1", content: "信任影响成交。", contentWeight: 1 },
     { id: "source-2", name: "文案2", content: "信任影响成交，尤其在高客单价服务中更明显。", contentWeight: 1 },
@@ -576,7 +617,7 @@ test("重叠与补充混合关系中仍优先保留能覆盖短句的完整证�
   } finally { model.restore(); }
 });
 
-test("内容份额不能压缩待确认冲突的任一方原文", async () => {
+test("内容占比不能压缩待确认冲突的任一方原文", async () => {
   const weightedSources = [
     { id: "source-1", name: "文案1", content: "第一篇认为执行需要三个月，并给出了完整的项目背景。", contentWeight: 3 },
     { id: "source-2", name: "文案2", content: "第二篇认为执行只需要一个月，并给出了不同的时间判断。", contentWeight: 7 },
