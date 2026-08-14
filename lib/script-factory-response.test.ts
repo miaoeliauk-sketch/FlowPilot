@@ -87,28 +87,42 @@ test("normalizes safe optional core fields", () => {
   assert.deepEqual(result.commentGuidance.keywordReplies, []);
 });
 
-test("水木然专属标题必须同时提供主推、流量和安全三个版本", () => {
+test("水木然老师确认版只接受一个标题、完整口播和待核验清单", () => {
   const result = parseScriptContentResponse(JSON.stringify({
-    ...VALID_CONTENT,
     titles: [
-      { title: "主推标题", formula: "核心冲突", platform: "视频号", whyFitsIP: "切中核心判断", role: "主推", recommended: true },
-      { title: "流量标题", formula: "危机感", platform: "视频号", whyFitsIP: "力度更强", role: "流量", recommended: false },
-      { title: "安全标题", formula: "克制判断", platform: "视频号", whyFitsIP: "表达更稳妥", role: "安全", recommended: false },
+      { title: "胖东来的真正秘密，藏在《道德经》里" },
     ],
-  }), { titleMode: "shuimuran" });
+    fullScript: "胖东来真正厉害的地方，根本不是服务。完整口播正文。",
+    pendingVerification: ["《道德经》原文出处待确认"],
+  }), { outputMode: "shuimuran-confirmed" });
 
-  assert.equal(result.titles.length, 3);
-  assert.equal(result.titles[0].recommended, true);
+  assert.equal(result.titles.length, 1);
+  assert.equal(result.outline.length, 1);
+  assert.equal(result.outline[0].content, "胖东来真正厉害的地方，根本不是服务。完整口播正文。");
+  assert.deepEqual(result.pendingVerification, ["《道德经》原文出处待确认"]);
+  assert.deepEqual(result.coverCopy, []);
+  assert.equal(result.ipStyleExplanation, "");
 });
 
-test("水木然专属标题缺少任一版本时拒绝结果", () => {
+test("水木然老师确认版缺少完整口播时拒绝结果", () => {
   expectError(() => parseScriptContentResponse(JSON.stringify({
-    ...VALID_CONTENT,
-    titles: [
-      { title: "主推标题", role: "主推", recommended: true },
-      { title: "流量标题", role: "流量", recommended: false },
-    ],
-  }), { titleMode: "shuimuran" }), "incomplete_fields");
+    titles: [{ title: "胖东来的真正秘密" }],
+    pendingVerification: [],
+  }), { outputMode: "shuimuran-confirmed" }), "incomplete_fields");
+});
+
+test("水木然老师确认版拒绝缺少待核验字段或夹带额外输出", () => {
+  expectError(() => parseScriptContentResponse(JSON.stringify({
+    titles: [{ title: "胖东来的真正秘密" }],
+    fullScript: "完整口播正文。",
+  }), { outputMode: "shuimuran-confirmed" }), "incomplete_fields");
+
+  expectError(() => parseScriptContentResponse(JSON.stringify({
+    titles: [{ title: "胖东来的真正秘密" }],
+    fullScript: "完整口播正文。",
+    pendingVerification: [],
+    writingNotes: "不应输出的写作思路",
+  }), { outputMode: "shuimuran-confirmed" }), "incomplete_fields");
 });
 
 test("rejects core response when the required transcript is missing", () => {

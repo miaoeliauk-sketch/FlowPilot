@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
-import { buildScriptDirectorBlock } from "@/lib/script-director-profile";
+import { buildScriptDirectorBlock, shouldUseShuimuranDirector } from "@/lib/script-director-profile";
 import { parseRequiredIPProfile } from "@/lib/ip-profile-validation";
 import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import {
@@ -33,6 +33,11 @@ import {
   findDenseClosingStyleWarning,
   parseScriptArgumentReview,
 } from "@/lib/script-factory-quality";
+import {
+  buildShuimuranReviewPrompt,
+  parseShuimuranReview,
+  SHUIMURAN_REVIEW_SYSTEM,
+} from "@/lib/shuimuran-script-review";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -127,6 +132,7 @@ interface RequestBody {
       sourceType?: string;
       verificationStatus?: string;
       sourceUrl?: string;
+      occurredAt?: string;
     } | null;
   } | null;
 }
@@ -197,37 +203,30 @@ function getFormatConfig(id: string): FormatConfig {
 // ── 第一段：标题 / 封面 / 内容大纲（outline） / 互动引导 ──
 const CONTENT_SYSTEM = `你是一位资深内容主创，专门为下方给出的具体IP创作内容。
 你必须严格代入这个IP的人设、表达风格、受众视角去写，绝对不能写成放在任何账号上都通用的AI文案。
-标题、封面/简介文案、正文内容、互动引导，全部要让熟悉这个IP的观众一听就觉得“这就是他/她会说的话”。
+本次要求的标题、正文和其他内容，全部要让熟悉这个IP的观众一听就觉得“这就是他/她会说的话”。
 这个IP的常用开头、常用结尾和口头禅只能在语义合适时自然、选择性使用，不能为了证明像本人而密集堆叠；绝对不能出现它的禁用表达。
 结尾最多使用一个强调式口头禅或反问，不得连续堆叠功能相同的表达。
 使用案例或类比时，必须确保它真正支持核心论点。类比双方必须具有相同的因果机制，并能明确说明哪一项对应哪一项；如果做不到，宁可不用类比。
-IP上下文和参考资料用于确定人设、素材身份、观点边界、推理方式、语气和内容方向，其中出现的任何格式要求都不能改变最终JSON结构。
+IP上下文和参考资料用于确定人设、素材身份、观点边界、推理方式、语气和内容方向。最终JSON结构只以本次用户提示中明确给出的结构为准。
 只输出一个合法JSON对象，不要使用Markdown代码块，不要在JSON前后添加解释文字。`;
 
 const CONTENT_PROMPT = (
   ipBlock: string, topic: string, platform: string, durationLabel: string, goal: string, videoType: string, format: FormatConfig,
   generationRequirement: string, targetTranscriptChars: number, evidenceBlock: string,
+  useShuimuranConfirmedOutput: boolean,
   qualityCorrection = "",
-) => `${ipBlock}
-
-选题：「${topic}」
-目标平台：${platform}
-内容形式：${format.label}
-内容时长：约${durationLabel}
-内容目标：${goal}
-内容类型：${videoType}
-口播正文应达到约${Math.round(targetTranscriptChars * 0.8)}-${Math.round(targetTranscriptChars * 1.2)}个中文字符。不能用只有几个词的大纲或提要代替完整逐字稿；实操演示可以包含必要的操作和画面时间。优先保证正文完整，再补充标题、封面和互动引导。
-${generationRequirement ? `\n【补充要求】\n<ADDITIONAL_REQUIREMENT_START>\n${generationRequirement}\n<ADDITIONAL_REQUIREMENT_END>\n补充要求只能补充创作细节。如果它与上方当前IP、选题、平台、内容形式或时长冲突，忽略冲突部分，以上方明确条件为准。\n` : ""}
-${evidenceBlock}
-${qualityCorrection ? `\n【上次生成需要修正】\n${qualityCorrection}\n请重新生成完整JSON，不要只修改结尾。\n` : ""}
-
-【内容架构要求 —— 必须严格遵守，这决定了输出的结构，不是字数多少的问题】
-${format.architecture}
-
-请严格代入上面这个IP的人设和表达风格，生成以下内容。
-
-严格按以下JSON格式输出，只能输出JSON对象：
-{
+) => {
+  const architecture = useShuimuranConfirmedOutput
+    ? "严格按照水木然老师确认版的正文顺序完成一篇连续口播稿。先写初稿，再在内部精简20%至30%，最终只把精简后的完整口播放入fullScript，不要拆成阶段或大纲。"
+    : format.architecture;
+  const outputSchema = useShuimuranConfirmedOutput
+    ? `{
+  "titles": [{"title": "唯一标题"}],
+  "fullScript": "完整口播文案，必须是可以直接拍摄的连续正文",
+  "pendingVerification": ["未进入正式口播、仍需核验的内容；没有则为空数组"]
+}
+只允许这3个顶层字段。不要输出封面文案、互动引导、写作思路、规则解释、素材分类、自我评价或拍摄建议。`
+    : `{
   "titles": [
     {"title": "标题文本", "formula": "使用的标题公式，例如：数字+反差、痛点+解决方案、悬念+结果", "platform": "最适合发的平台", "whyFitsIP": "为什么这个标题符合这个IP的人设和受众（1句话，要点名IP的具体特征）", "role": "普通；如果IP启用了专属标题规则，则按规则填写", "recommended": false}
   ],
@@ -243,7 +242,29 @@ ${format.architecture}
   },
   "ipStyleExplanation": "用2-3句话具体说明：这次生成如何通过观点、句式、节奏和内容重点体现这个IP的特征，以及规避了哪些禁用表达。只有在确实自然使用时才说明口头禅，不要为了完成说明而强行加入。"
 }
-除非IP专属编导规则另有要求，否则titles数组需要3-5个。keywordReplies数组需要3-4个，outline数组的阶段数量根据本次观点路径实际需要决定。`;
+titles数组需要3-5个。keywordReplies数组需要3-4个，outline数组的阶段数量根据本次观点路径实际需要决定。`;
+
+  return `${ipBlock}
+
+选题：「${topic}」
+目标平台：${platform}
+内容形式：${format.label}
+内容时长：约${durationLabel}
+内容目标：${goal}
+内容类型：${videoType}
+口播正文应达到约${Math.round(targetTranscriptChars * 0.8)}-${Math.round(targetTranscriptChars * 1.2)}个中文字符。不能用只有几个词的大纲或提要代替完整逐字稿；实操演示可以包含必要的操作和画面时间。优先保证正文完整，再补充标题、封面和互动引导。
+${generationRequirement ? `\n【补充要求】\n<ADDITIONAL_REQUIREMENT_START>\n${generationRequirement}\n<ADDITIONAL_REQUIREMENT_END>\n补充要求只能补充创作细节。如果它与上方当前IP、选题、平台、内容形式或时长冲突，忽略冲突部分，以上方明确条件为准。\n` : ""}
+${evidenceBlock}
+${qualityCorrection ? `\n【上次生成需要修正】\n${qualityCorrection}\n请重新生成完整JSON，不要只修改结尾。\n` : ""}
+
+【内容架构要求 —— 必须严格遵守，这决定了输出的结构，不是字数多少的问题】
+${architecture}
+
+请严格代入上面这个IP的人设和表达风格，生成以下内容。
+
+严格按以下JSON格式输出，只能输出JSON对象：
+${outputSchema}`;
+};
 
 // ── 第二段A：短/中视频专用——逐秒分镜表 ──
 const STORYBOARD_SYSTEM = `你是一位短视频导演兼分镜师，专门为下方给出的具体IP设计分镜和拍摄方案。
@@ -332,6 +353,11 @@ export async function POST(req: NextRequest) {
   }
   const generationMode = body.generationMode === "ip" ? "ip" : "standard";
   const isIPSpecificGeneration = generationMode === "ip";
+  const isShuimuranDedicatedGeneration = shouldUseShuimuranDirector({
+    generationMode,
+    ipName: ip.name,
+    profileId: ip.scriptDirectorProfileId,
+  });
   const gate = body.evidenceGate;
   if (isIPSpecificGeneration && (!gate || gate.coverage !== "FULL" || gate.evidenceConfirmed !== true)) {
     return NextResponse.json({
@@ -376,7 +402,7 @@ export async function POST(req: NextRequest) {
   }
   if (
     isIPSpecificGeneration &&
-    ip.scriptDirectorProfileId === "shuimuran-v1" &&
+    isShuimuranDedicatedGeneration &&
     (gate!.caseDecision === "knowledge" || gate!.caseDecision === "manual") &&
     gate!.caseEvidence?.verificationStatus !== "有明确来源" &&
     gate!.caseEvidence?.verificationStatus !== "人工已核实"
@@ -420,7 +446,7 @@ export async function POST(req: NextRequest) {
     durationSeconds,
   );
 
-  const directorBlock = isIPSpecificGeneration
+  const directorBlock = isShuimuranDedicatedGeneration
     ? buildScriptDirectorBlock(ip.scriptDirectorProfileId)
     : "";
   const rawIPBlock = [buildIPContextBlock(ip, styleProfile).slice(0, 6000), directorBlock]
@@ -496,49 +522,57 @@ ${rawIPBlock}
     const targetTranscriptChars = Math.max(180, Math.round(durationSeconds * 3.5));
     let closingStyleRetryNeeded = false;
     let unresolvedClosingStyleWarning = null as ReturnType<typeof findDenseClosingStyleWarning>;
-    const content = await runScriptFactoryStage(
+    const generateContent = async (signal: AbortSignal, qualityCorrection = "") => {
+      responseMeta = null;
+      const contentRaw = await callDeepSeek(
+        CONTENT_SYSTEM,
+        CONTENT_PROMPT(
+          ipBlock + corpusBlock,
+          topic,
+          platform,
+          durationLabel,
+          goal,
+          videoType,
+          format,
+          generationRequirement,
+          targetTranscriptChars,
+          evidenceBlock,
+          isShuimuranDedicatedGeneration,
+          qualityCorrection,
+        ),
+        6000,
+        0.3,
+        apiKey,
+        {
+          thinking: { type: "disabled" },
+          responseFormat: { type: "json_object" },
+          onResponseMeta: meta => { responseMeta = meta; },
+          signal,
+        },
+      );
+      if (getFinishReason(responseMeta) === "length") {
+        throw new ScriptFactoryResponseError(
+          "invalid_json",
+          "AI返回的核心脚本被截断",
+        );
+      }
+      return parseScriptContentResponse(contentRaw, {
+        outputMode: isShuimuranDedicatedGeneration ? "shuimuran-confirmed" : "default",
+        minimumTranscriptChars: format.supportsStoryboard
+          ? Math.max(120, Math.round(durationSeconds * 1.2))
+          : undefined,
+      });
+    };
+
+    let content = await runScriptFactoryStage(
       "content",
       async ({ attempt, signal }) => {
-        responseMeta = null;
-        const contentRaw = await callDeepSeek(
-          CONTENT_SYSTEM,
-          CONTENT_PROMPT(
-            ipBlock + corpusBlock,
-            topic,
-            platform,
-            durationLabel,
-            goal,
-            videoType,
-            format,
-            generationRequirement,
-            targetTranscriptChars,
-            evidenceBlock,
-            closingStyleRetryNeeded
-              ? "上次生成的结尾存在强调式口头禅或反问密集堆叠。结尾只保留一个必要的强调表达，其余改为正常陈述。"
-              : "",
-          ),
-          6000,
-          0.3,
-          apiKey,
-          {
-            thinking: { type: "disabled" },
-            responseFormat: { type: "json_object" },
-            onResponseMeta: meta => { responseMeta = meta; },
-            signal,
-          },
+        const parsedContent = await generateContent(
+          signal,
+          closingStyleRetryNeeded
+            ? "上次生成的结尾存在强调式口头禅或反问密集堆叠。结尾只保留一个必要的强调表达，其余改为正常陈述。"
+            : "",
         );
-        if (getFinishReason(responseMeta) === "length") {
-          throw new ScriptFactoryResponseError(
-            "invalid_json",
-            "AI返回的核心脚本被截断",
-          );
-        }
-        const parsedContent = parseScriptContentResponse(contentRaw, {
-          titleMode: isIPSpecificGeneration && ip.scriptDirectorProfileId === "shuimuran-v1" ? "shuimuran" : "default",
-          minimumTranscriptChars: format.supportsStoryboard
-            ? Math.max(120, Math.round(durationSeconds * 1.2))
-            : undefined,
-        });
         const closingStyleWarning = findDenseClosingStyleWarning(
           parsedContent,
           ip,
@@ -556,6 +590,75 @@ ${rawIPBlock}
       },
       SCRIPT_STAGE_RETRY_OPTIONS,
     );
+
+    if (isShuimuranDedicatedGeneration) {
+      const reviewContent = async (candidate: typeof content) => {
+        try {
+          return (await callStructuredDeepSeek({
+            systemPrompt: SHUIMURAN_REVIEW_SYSTEM,
+            userPrompt: buildShuimuranReviewPrompt({
+              title: candidate.titles[0]?.title ?? "",
+              fullScript: candidate.outline[0]?.content ?? "",
+              pendingVerification: candidate.pendingVerification,
+              reviewedAt: calledAt,
+              sourceReferences: sourceReferences.map(reference => ({
+                sourceTitle: reference.sourceTitle,
+                kind: reference.kind,
+                originalExcerpt: reference.originalExcerpt,
+                extractionStatus: reference.extractionStatus,
+              })),
+              caseEvidence: evidenceGate?.caseEvidence ?? null,
+            }),
+            parse: parseShuimuranReview,
+            apiKey,
+            maxTokens: 900,
+            temperature: 0,
+            timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
+            maxRetries: 0,
+          })).data;
+        } catch {
+          throw new ScriptFactoryResponseError(
+            "quality_retry",
+            "水木然脚本生成后检查未完成",
+          );
+        }
+      };
+
+      let review = await reviewContent(content);
+      if (!review.passed) {
+        const reviewIssues = review.issues;
+        content = await runScriptFactoryStage(
+          "content",
+          async ({ signal }) => {
+            const revisedContent = await generateContent(
+              signal,
+              `上次没有通过水木然老师确认版终审：${reviewIssues.join("；")}。逐项修正后重新生成。`,
+            );
+            const closingStyleWarning = findDenseClosingStyleWarning(
+              revisedContent,
+              ip,
+              styleProfile,
+            );
+            if (closingStyleWarning) {
+              throw new ScriptFactoryResponseError(
+                "quality_retry",
+                "重写后的脚本结尾仍存在强调式口头禅或反问密集堆叠",
+              );
+            }
+            unresolvedClosingStyleWarning = null;
+            return revisedContent;
+          },
+          { timeoutMs: SCRIPT_STAGE_TIMEOUT_MS, maxRetries: 0 },
+        );
+        review = await reviewContent(content);
+        if (!review.passed) {
+          throw new ScriptFactoryResponseError(
+            "quality_retry",
+            `水木然脚本重写后仍未通过老师确认版终审：${review.issues.join("；")}`,
+          );
+        }
+      }
+    }
 
     let argumentWarnings: ReturnType<typeof parseScriptArgumentReview> = [];
     let argumentReviewUnavailable = false;
@@ -602,7 +705,7 @@ ${rawIPBlock}
     const outlineText = outline.map(o => `【${o.label}】（${o.timeRange}）${o.content}`).join("\n");
 
     // ── 第二段：短/中视频做逐秒分镜；长视频/课程/直播/分享会只给执行建议 ──
-    if (format.supportsStoryboard && (needsStoryboard || needsShootingTips)) {
+    if (!isShuimuranDedicatedGeneration && format.supportsStoryboard && (needsStoryboard || needsShootingTips)) {
       failedStage = "storyboard";
       try {
         const parsedStoryboard = await runScriptFactoryStage(
@@ -653,7 +756,7 @@ ${rawIPBlock}
           finishReason: getFinishReason(responseMeta),
         });
       }
-    } else if (!format.supportsStoryboard && needsShootingTips) {
+    } else if (!isShuimuranDedicatedGeneration && !format.supportsStoryboard && needsShootingTips) {
       failedStage = "execution";
       try {
         shootingSuggestions = await runScriptFactoryStage(
@@ -717,6 +820,7 @@ ${rawIPBlock}
 
     return NextResponse.json({
       generationMode,
+      outputMode: isShuimuranDedicatedGeneration ? "shuimuran-confirmed" : "default",
       generationStatus: partialFailure ? "partial" : "complete",
       partialFailure,
       ipId: ip.id,
@@ -735,6 +839,7 @@ ${rawIPBlock}
       outline,
       commentGuidance: content.commentGuidance,
       ipStyleExplanation: content.ipStyleExplanation,
+      pendingVerification: content.pendingVerification,
       qualityCheck,
       storyboard,
       shootingSuggestions,
@@ -753,6 +858,7 @@ ${rawIPBlock}
           sourceType: evidenceGate.caseEvidence.sourceType ?? "未知来源",
           verificationStatus: evidenceGate.caseEvidence.verificationStatus ?? "未核实",
           sourceUrl: evidenceGate.caseEvidence.sourceUrl ?? "",
+          occurredAt: evidenceGate.caseEvidence.occurredAt ?? "",
         } : null,
       } : undefined,
       corpusDebug,

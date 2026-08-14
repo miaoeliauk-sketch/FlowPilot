@@ -26,6 +26,7 @@ import {
   type CoverageAssessment,
   type CoverageSourceReference,
 } from "@/lib/script-factory-coverage";
+import { shouldUseShuimuranDirector } from "@/lib/script-director-profile";
 
 const TOPIC_PLACEHOLDER = "例如：一个正在发生的变化，普通人应该如何判断？";
 type GenerationMode = "standard" | "ip";
@@ -45,16 +46,18 @@ interface EvidenceAudit {
   reason: string;
   sourceReferences: CoverageSourceReference[];
   caseNeed: string;
-  caseEvidence: { title: string; sourceType: string; verificationStatus: string; sourceUrl?: string } | null;
+  caseEvidence: { title: string; sourceType: string; verificationStatus: string; sourceUrl?: string; occurredAt?: string } | null;
 }
 interface ScriptResult {
   generationMode?: GenerationMode;
+  outputMode?: "default" | "shuimuran-confirmed";
   generationStatus: ScriptGenerationStatus; partialFailure: ScriptPartialFailure | null;
   ipId: string; ipName: string; topic: string; platform: string;
   formatCategory: string; formatLabel: string; durationSeconds: number; durationLabel: string; goal: string; videoType: string;
   outputLabels: OutputLabels;
   titles: TitleOption[]; coverCopy: string[]; outline: OutlineSection[]; commentGuidance: CommentGuidance;
   ipStyleExplanation: string;
+  pendingVerification?: string[];
   qualityCheck?: ScriptQualityCheck;
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
@@ -213,6 +216,37 @@ function ResultView({
   draftSavedAt?: string | null;
   onClearDraft?: () => void;
 }) {
+  if (data.outputMode === "shuimuran-confirmed") {
+    const fullScript = data.outline.map(section => section.content).join("\n\n");
+    const pendingVerification = data.pendingVerification ?? [];
+    return (
+      <div className="flex flex-col gap-5">
+        <div>
+          <div className="mb-2 text-[12px] font-bold text-[#888]">标题：</div>
+          <div className="rounded-[10px] bg-[#F7F6F2] p-3 text-[13.5px] font-semibold text-[#1C1C1B]">
+            {data.titles[0]?.title ?? ""}
+          </div>
+        </div>
+        <div>
+          <div className="mb-2 text-[12px] font-bold text-[#888]">完整口播文案：</div>
+          <div className="whitespace-pre-wrap rounded-[10px] border border-[#F0EFE9] p-4 text-[13px] leading-7 text-[#333]">
+            {fullScript}
+          </div>
+        </div>
+        <div>
+          <div className="mb-2 text-[12px] font-bold text-[#888]">待核验内容：</div>
+          {pendingVerification.length > 0 ? (
+            <ul className="list-disc rounded-[10px] bg-[#FFF8DC] px-8 py-3 text-[12.5px] leading-6 text-[#755700]">
+              {pendingVerification.map((item, index) => <li key={index}>{item}</li>)}
+            </ul>
+          ) : (
+            <div className="rounded-[10px] bg-[#F7F6F2] p-3 text-[12.5px] text-[#666]">无</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-5">
       {data.evidenceAudit && (
@@ -559,6 +593,11 @@ export default function ScriptFactoryPage() {
     return category === "爆款案例" || category === "选题案例" || category === "IP历史内容" || category === "IP高表现内容";
   });
   const selectedKnowledgeCase = caseCandidates.find(entry => entry.id === selectedCaseId) ?? null;
+  const isShuimuranDedicatedMode = shouldUseShuimuranDirector({
+    generationMode,
+    ipName: activeIP?.name,
+    profileId: activeIP?.scriptDirectorProfileId,
+  });
   const permission = resolveGenerationPermission(coverage, caseDecision, evidenceConfirmed);
   const canGenerate = generationMode === "standard" || permission.allowed;
 
@@ -642,7 +681,7 @@ export default function ScriptFactoryPage() {
       return;
     }
     if (
-      activeIP?.scriptDirectorProfileId === "shuimuran-v1" &&
+      isShuimuranDedicatedMode &&
       caseDecision === "knowledge" &&
       selectedKnowledgeCase?.sourceTier !== "高"
     ) {
@@ -650,7 +689,7 @@ export default function ScriptFactoryPage() {
       return;
     }
     if (
-      activeIP?.scriptDirectorProfileId === "shuimuran-v1" &&
+      isShuimuranDedicatedMode &&
       caseDecision === "manual" &&
       (!manualCaseSource.trim() || !manualCaseVerified)
     ) {
@@ -1039,7 +1078,7 @@ export default function ScriptFactoryPage() {
               {activeIP?.avatar ?? "?"}
             </span>
             当前以 <b>{activeIP?.name ?? "未选择IP"}</b> 的人设、受众、表达风格与拍摄习惯生成内容。
-            {generationMode === "ip" && activeIP?.scriptDirectorProfileId === "shuimuran-v1" && (
+            {isShuimuranDedicatedMode && (
               <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-[#639922]">水木然专属编导规则已启用</span>
             )}
           </div>
@@ -1164,8 +1203,8 @@ export default function ScriptFactoryPage() {
                 <div className="mt-3 grid gap-2">
                   <input aria-label="案例名称" value={manualCaseTitle} onChange={event => { setManualCaseTitle(event.target.value); setEvidenceConfirmed(false); }} placeholder="案例人物或事件" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
                   <textarea aria-label="案例内容" value={manualCaseContent} onChange={event => { setManualCaseContent(event.target.value); setEvidenceConfirmed(false); }} placeholder="只填写你能确认的事实。人工提供不代表已经核实。" className="min-h-[90px] rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setManualCaseVerified(false); setEvidenceConfirmed(false); }} placeholder={activeIP?.scriptDirectorProfileId === "shuimuran-v1" ? "来源链接或明确出处（必填）" : "来源链接或出处（可选）"} className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  {activeIP?.scriptDirectorProfileId === "shuimuran-v1" && (
+                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setManualCaseVerified(false); setEvidenceConfirmed(false); }} placeholder={isShuimuranDedicatedMode ? "来源链接或明确出处（必填）" : "来源链接或出处（可选）"} className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  {isShuimuranDedicatedMode && (
                     <label className="flex items-start gap-2 rounded-[9px] bg-[#F7F6F2] px-3 py-2 text-[11.5px] leading-5 text-[#555]">
                       <input type="checkbox" checked={manualCaseVerified} onChange={event => { setManualCaseVerified(event.target.checked); setEvidenceConfirmed(false); }} className="mt-1" />
                       <span>我已核对案例原始来源与事实。此确认只代表人工核对，不代表系统联网核验。</span>

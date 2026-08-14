@@ -156,7 +156,7 @@ test("水木然专属规则阻止未经核验的案例进入正式口播稿", as
       headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
       body: JSON.stringify({
         generationMode: "ip",
-        ipProfile: { ...IP, scriptDirectorProfileId: "shuimuran-v1" },
+        ipProfile: { ...IP, name: "水木然", scriptDirectorProfileId: "shuimuran-v1" },
         topic: "测试选题",
         evidenceGate: {
           coverage: "FULL", evidenceConfirmed: true, caseNeed: "REQUIRED", caseDecision: "manual",

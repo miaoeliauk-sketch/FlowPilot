@@ -37,6 +37,7 @@ export interface ScriptContentResponse {
     materialPackGuidance: string;
   };
   ipStyleExplanation: string;
+  pendingVerification: string[];
 }
 
 export interface ScriptStoryboardResponse {
@@ -182,7 +183,7 @@ export function parseScriptContentResponse(
   options: {
     expectedOutlineCount?: number;
     minimumTranscriptChars?: number;
-    titleMode?: "default" | "shuimuran";
+    outputMode?: "default" | "shuimuran-confirmed";
   } = {},
 ): ScriptContentResponse {
   const object = parseJSONObject(content);
@@ -203,24 +204,50 @@ export function parseScriptContentResponse(
         : {}),
     };
   });
-  if (options.titleMode === "shuimuran") {
-    const roles = titles.map(title => title.role);
-    const expectedRoles = ["主推", "流量", "安全"];
+  if (options.outputMode === "shuimuran-confirmed") {
+    const expectedFields = ["fullScript", "pendingVerification", "titles"];
+    const actualFields = Object.keys(object).sort();
+    const pendingVerification = object.pendingVerification;
     if (
-      titles.length !== 3 ||
-      expectedRoles.some(role => roles.filter(item => item === role).length !== 1) ||
-      titles.filter(title => title.recommended).length !== 1 ||
-      !titles.find(title => title.role === "主推")?.recommended ||
-      titles[0]?.role !== "主推" ||
-      titles[1]?.role !== "流量" ||
-      titles[2]?.role !== "安全" ||
-      !titles[0]?.whyFitsIP
+      actualFields.length !== expectedFields.length ||
+      actualFields.some((field, index) => field !== expectedFields[index]) ||
+      !Array.isArray(pendingVerification) ||
+      pendingVerification.some(item => typeof item !== "string") ||
+      titles.length !== 1
     ) {
       throw new ScriptFactoryResponseError(
         "incomplete_fields",
-        "脚本结果字段不完整：titles.role",
+        "脚本结果字段不完整：shuimuran-confirmed",
       );
     }
+    const fullScript = requiredString(object, "fullScript");
+    if (
+      options.minimumTranscriptChars &&
+      fullScript.length < options.minimumTranscriptChars
+    ) {
+      throw new ScriptFactoryResponseError(
+        "incomplete_fields",
+        "脚本结果字段不完整：fullScript.length",
+      );
+    }
+    return {
+      titles,
+      coverCopy: [],
+      outline: [{
+        label: "完整口播文案",
+        timeRange: "完整口播",
+        content: fullScript,
+        subPoints: [],
+      }],
+      commentGuidance: {
+        interactionPrompt: "",
+        keywordReplies: [],
+        dmGuidance: "",
+        materialPackGuidance: "",
+      },
+      ipStyleExplanation: "",
+      pendingVerification: pendingVerification.map(item => item.trim()).filter(Boolean),
+    };
   }
   const coverCopy = stringArray(object.coverCopy);
   if (coverCopy.length === 0) {
@@ -289,6 +316,7 @@ export function parseScriptContentResponse(
       materialPackGuidance: optionalString(guidance.materialPackGuidance),
     },
     ipStyleExplanation: requiredString(object, "ipStyleExplanation"),
+    pendingVerification: stringArray(object.pendingVerification),
   };
 }
 

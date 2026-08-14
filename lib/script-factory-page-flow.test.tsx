@@ -302,3 +302,61 @@ test("重新打开IP专属脚本时恢复对应生成模式", async () => {
   assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
   window.history.replaceState({}, "", "/script-factory");
 });
+
+test("水木然IP专属结果只展示标题、完整口播文案和待核验内容", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-shuimuran-confirmed",
+    ipId: SHUIMURAN.id,
+    title: "胖东来的经营秘诀",
+    cover: "",
+    content: "胖东来真正厉害的地方，根本不是服务。",
+    status: "草稿",
+    createdAt: "2026-08-14T00:00:00.000Z",
+    scriptResult: {
+      generationMode: "ip",
+      outputMode: "shuimuran-confirmed",
+      generationStatus: "complete",
+      partialFailure: null,
+      ipId: SHUIMURAN.id,
+      ipName: SHUIMURAN.name,
+      topic: "胖东来的经营秘诀",
+      platform: "视频号",
+      formatCategory: "short",
+      formatLabel: "短视频",
+      durationSeconds: 60,
+      durationLabel: "60秒",
+      goal: "建立信任",
+      videoType: "口播",
+      outputLabels: { cover: "封面文案", outline: "口播逐字稿", shooting: "拍摄建议", comment: "互动引导" },
+      titles: [{ title: "胖东来的经营秘诀，就是《道德经》的这八个字", formula: "", platform: "", whyFitsIP: "" }],
+      coverCopy: [],
+      outline: [{ label: "完整口播文案", timeRange: "完整口播", content: "胖东来真正厉害的地方，根本不是服务。" }],
+      commentGuidance: { interactionPrompt: "", keywordReplies: [], dmGuidance: "", materialPackGuidance: "" },
+      ipStyleExplanation: "不应展示的自我评价",
+      pendingVerification: ["《道德经》原文出处待确认"],
+      storyboard: [],
+      shootingSuggestions: [],
+      shotPrompts: [],
+      editingRhythm: { subtitleHighlights: [], soundEffects: [], screenRecordingCuts: [], caseInserts: [], pauses: [] },
+      apiMeta: { apiCalled: true, calledAt: "2026-08-14T00:00:00.000Z", model: "test", ipUsed: SHUIMURAN.name, mockHit: false },
+    },
+  }]));
+  window.history.replaceState({}, "", "/script-factory?scriptId=script-shuimuran-confirmed");
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  assert.ok(await view.findByText("标题："));
+  assert.ok(view.getByText("完整口播文案："));
+  assert.ok(view.getByText("待核验内容："));
+  assert.ok(view.getByText("《道德经》原文出处待确认"));
+  assert.equal(view.queryByText("封面文案"), null);
+  assert.equal(view.queryByText("互动引导"), null);
+  assert.equal(view.queryByText("不应展示的自我评价"), null);
+  window.history.replaceState({}, "", "/script-factory");
+});

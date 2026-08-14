@@ -79,33 +79,29 @@ const VALID_CONTENT = {
 };
 
 const SHUIMURAN_DIRECTOR_CONTENT = {
-  ...VALID_CONTENT,
   titles: [
     {
-      title: "未来，真正稀缺的是判断力",
-      formula: "时代趋势+明确人群+结果",
-      platform: "视频号",
-      whyFitsIP: "切中了老师关于认知分层与个人选择的核心判断",
-      role: "主推",
-      recommended: true,
-    },
-    {
-      title: "AI越强，为什么多数人反而失去判断力？",
-      formula: "趋势+冲突",
-      platform: "视频号",
-      whyFitsIP: "强化时代变化带来的认知冲突",
-      role: "流量",
-      recommended: false,
-    },
-    {
-      title: "工具越来越强，人更需要保留自己的判断",
-      formula: "现象+选择",
-      platform: "视频号",
-      whyFitsIP: "用克制表达承接老师关于个人选择的判断",
-      role: "安全",
-      recommended: false,
+      title: "普通人下一轮机会的真正秘密，藏在这三个信号里",
     },
   ],
+  fullScript: VALID_CONTENT.outline.map(section => section.content).join(""),
+  pendingVerification: [],
+};
+
+const VALID_SHUIMURAN_REVIEW = {
+  checks: {
+    viewpointBelongs: true,
+    titleKeepsAnswer: true,
+    openingBuildsSuspense: true,
+    concreteEntry: true,
+    classicExplainsReality: true,
+    risesToPattern: true,
+    conciseWithoutRepetition: true,
+    staleHotspotReframed: true,
+    titleOpeningEndingClosed: true,
+    soundsLikeTeacher: true,
+  },
+  issues: [],
 };
 
 const VALID_STORYBOARD = {
@@ -244,7 +240,37 @@ test("固定脚本生成不要求观点覆盖度，也不启用IP专属编导规
   }
 });
 
-test("只有启用水木然专属编导规则的IP才会注入规则并强制三类标题", async () => {
+test("其他IP即使误带水木然规则编号也不注入老师确认版规则", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(VALID_CONTENT), "other-content");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "other-review");
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "other-storyboard");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(null, {
+      ...SHUIMURAN,
+      id: "ip-other",
+      name: "其他IP",
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+
+    assert.equal(response.status, 200);
+    assert.doesNotMatch(prompts[0], /水木然IP专属脚本生成规则｜老师确认版/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("只有水木然IP专属生成才会注入老师确认版规则", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
   let calls = 0;
@@ -258,6 +284,9 @@ test("只有启用水木然专属编导规则的IP才会注入规则并强制三
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-content");
     }
     if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    }
+    if (calls === 3) {
       return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-review");
     }
     return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "director-storyboard");
@@ -271,13 +300,100 @@ test("只有启用水木然专属编导规则的IP才会注入规则并强制三
     const result = await response.json();
 
     assert.equal(response.status, 200);
-    assert.equal(result.titles.length, 3);
-    assert.equal(result.titles[0].role, "主推");
-    assert.equal(result.titles[0].recommended, true);
-    assert.match(prompts[0], /水木然专属内容编导规则/);
-    assert.match(prompts[0], /不能替IP创造老师从未表达过的核心判断/);
-    assert.match(prompts[0], /这些是动作库，不是固定八段模板/);
-    assert.match(prompts[0], /严格输出3个标题/);
+    assert.equal(result.outputMode, "shuimuran-confirmed");
+    assert.equal(result.titles.length, 1);
+    assert.equal(result.outline.length, 1);
+    assert.deepEqual(result.pendingVerification, []);
+    assert.equal(result.storyboard.length, 0);
+    assert.match(prompts[0], /水木然IP专属脚本生成规则｜老师确认版/);
+    assert.match(prompts[0], /不超过24小时，可以直接追热点/);
+    assert.match(prompts[0], /强制进行一次20%至30%的精简/);
+    assert.match(prompts[0], /"fullScript"/);
+    assert.match(prompts[0], /"pendingVerification"/);
+    assert.doesNotMatch(prompts[0], /"coverCopy"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然脚本任一终审项不通过时定向重生成并再次检查", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1 || calls === 3) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `director-content-${calls}`);
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify({
+        ...VALID_SHUIMURAN_REVIEW,
+        checks: { ...VALID_SHUIMURAN_REVIEW.checks, titleKeepsAnswer: false },
+        issues: ["标题直接公布了核心答案"],
+      }), "director-review-failed");
+    }
+    if (calls === 4) {
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 5);
+    assert.match(prompts[2], /标题直接公布了核心答案/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然终审拥有独立重写机会，不会被首次内容重试占用", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) {
+      return deepSeekResponse("{内容被截断", "director-content-invalid");
+    }
+    if (calls === 2 || calls === 4) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `director-content-${calls}`);
+    }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify({
+        ...VALID_SHUIMURAN_REVIEW,
+        checks: { ...VALID_SHUIMURAN_REVIEW.checks, titleKeepsAnswer: false },
+        issues: ["标题直接公布了核心答案"],
+      }), "director-review-failed");
+    }
+    if (calls === 5) {
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 6);
+    assert.match(prompts[3], /标题直接公布了核心答案/);
   } finally {
     globalThis.fetch = originalFetch;
   }
