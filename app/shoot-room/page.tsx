@@ -11,6 +11,7 @@ import { Icon } from "@/components/ui/icon";
 import { getKnowledgeEntries, recordKnowledgeUsage, getScriptAssets, addKnowledgeEntry } from "@/lib/ip-store";
 import { KnowledgeEntry, ScriptAsset } from "@/lib/types";
 import { useIP } from "@/lib/ip-context";
+import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 
 type ProductionMode = "real" | "digital" | "hybrid";
 
@@ -81,6 +82,7 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
 }
 
 function RealShootMode() {
+  const { activeIP } = useIP();
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [availableTime, setAvailableTime] = useState<"2h" | "4h" | "full">("4h");
   const [location, setLocation] = useState("");
@@ -100,6 +102,9 @@ function RealShootMode() {
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const knowledgeRequestIdRef = useRef(0);
+  const activeKnowledgeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
+  activeKnowledgeIPIdRef.current = activeIP?.id ?? null;
 
   function createEmptyVideo(): VideoTask {
     return {
@@ -112,15 +117,23 @@ function RealShootMode() {
   const videoNamesQuery = videos.map(v => v.name).filter(Boolean).join(" ");
 
   useEffect(() => {
+    const requestId = ++knowledgeRequestIdRef.current;
+    const requestedIPId = activeIP?.id ?? null;
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (videoNamesQuery.trim().length < 4) { setKnowledgeSearched(false); setKnowledgeRefs([]); return; }
-    debounceRef.current = setTimeout(() => searchKnowledge(videoNamesQuery), 800);
+    if (videoNamesQuery.trim().length < 4) { setKnowledgeSearched(false); setKnowledgeRefs([]); setKnowledgeLoading(false); return; }
+    debounceRef.current = setTimeout(() => searchKnowledge(videoNamesQuery, requestedIPId, requestId), 800);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [videoNamesQuery]);
+  }, [videoNamesQuery, activeIP?.id]);
 
-  async function searchKnowledge(query: string) {
-    const allEntries = [...getKnowledgeEntries("方法论"), ...getKnowledgeEntries("复盘经验库")];
-    if (allEntries.length === 0) { setKnowledgeSearched(true); setKnowledgeRefs([]); return; }
+  async function searchKnowledge(query: string, requestedIPId: string | null, requestId: number) {
+    const allEntries = filterKnowledgeVisibleToIP(
+      [...getKnowledgeEntries("方法论"), ...getKnowledgeEntries("复盘经验库")],
+      requestedIPId,
+    );
+    if (allEntries.length === 0) {
+      if (requestId !== knowledgeRequestIdRef.current || requestedIPId !== activeKnowledgeIPIdRef.current) return;
+      setKnowledgeSearched(true); setKnowledgeRefs([]); setKnowledgeLoading(false); return;
+    }
     setKnowledgeLoading(true); setKnowledgeSearched(true);
     try {
       const res = await apiFetch("/api/knowledge-search", {
@@ -128,6 +141,7 @@ function RealShootMode() {
         body: JSON.stringify({ query, entries: allEntries.map(e => ({ id: e.id, category: e.category, title: e.title, tags: e.tags, keywords: e.keywords })) }),
       });
       const data = await res.json();
+      if (requestId !== knowledgeRequestIdRef.current || requestedIPId !== activeKnowledgeIPIdRef.current) return;
       if (!res.ok) { setKnowledgeRefs([]); return; }
       const entryMap = new Map(allEntries.map(e => [e.id, e]));
       const refs: KnowledgeRef[] = (data.results ?? [])
@@ -135,7 +149,11 @@ function RealShootMode() {
         .filter((r: KnowledgeRef | null): r is KnowledgeRef => r !== null);
       setKnowledgeRefs(refs);
       refs.forEach(r => recordKnowledgeUsage(r.id, { module: "拍摄作战室", usedAt: new Date().toISOString(), reason: r.reason, relevanceTier: r.relevanceTier as "高度相关" | "中度相关" | "低度相关", relevanceReason: r.relevanceReason, context: query }, "已用于分析"));
-    } catch { setKnowledgeRefs([]); } finally { setKnowledgeLoading(false); }
+    } catch {
+      if (requestId === knowledgeRequestIdRef.current && requestedIPId === activeKnowledgeIPIdRef.current) setKnowledgeRefs([]);
+    } finally {
+      if (requestId === knowledgeRequestIdRef.current && requestedIPId === activeKnowledgeIPIdRef.current) setKnowledgeLoading(false);
+    }
   }
 
   async function handleSubmit() {
