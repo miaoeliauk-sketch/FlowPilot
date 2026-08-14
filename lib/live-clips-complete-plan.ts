@@ -79,7 +79,7 @@ function parseSourceSection(
   context: CompletePlanResponseContext,
   candidatesById: Map<string, CompletePlanSourceCandidate>,
 ): CompleteVideoPlanSection {
-  const candidateId = object.candidateId === null
+  const candidateId = object.candidateId === null || object.candidateId === undefined
     ? null
     : stringValue(object.candidateId, `${role}.candidateId`, 160);
   const candidate = candidateId ? candidatesById.get(candidateId) : null;
@@ -137,13 +137,16 @@ function parseSupplementalSection(
   role: CompleteVideoSectionRole,
 ): CompleteVideoPlanSection {
   if (role !== "opening" && role !== "ending") fail("只有开头或结尾缺失时可以提供补录建议");
-  if (
-    object.candidateId !== null
-    || object.startParagraph !== null
-    || object.endParagraph !== null
-    || object.startQuote !== null
-    || object.endQuote !== null
-  ) fail(`${role}补录建议不得伪造原文位置`);
+  const sourceClaims = [
+    object.candidateId,
+    object.startParagraph,
+    object.endParagraph,
+    object.startQuote,
+    object.endQuote,
+  ];
+  if (sourceClaims.some(value => value !== null && value !== undefined)) {
+    fail(`${role}补录建议不得伪造原文位置`);
+  }
   if (object.supplementalSuggestion !== null && object.supplementalSuggestion !== undefined) {
     fail("补录内容只能由程序固定生成，AI不得自由编写");
   }

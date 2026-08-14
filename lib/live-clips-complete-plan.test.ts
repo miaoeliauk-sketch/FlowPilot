@@ -91,6 +91,40 @@ test("完整成片方案按开头到结尾组织可追溯原文，并明确标�
   assert.equal(plan.createdAt, NOW);
 });
 
+test("补录段落省略无来源字段时仍生成安全的完整成片方案", () => {
+  const { parsed, candidates } = fixture();
+  const result = parseCompleteVideoPlanResponse(JSON.stringify({
+    plans: [{
+      title: "知识付费真正卖的是什么",
+      recommendReason: "用问题开头并在结尾收束。",
+      sections: [{
+        role: "opening", sourceType: "supplemental", supplementalKind: "problem_hook",
+        transitionNote: "补录后直接进入主体。",
+      }, {
+        role: "body", sourceType: "transcript", candidateId: "core-1",
+        startParagraph: 2, endParagraph: 3, startQuote: "但用户买的不是", endQuote: "证明你能解决。",
+        transitionNote: "保留完整论证。",
+      }, {
+        role: "ending", sourceType: "supplemental", supplementalKind: "summary_closure",
+        transitionNote: "单独补录结尾。",
+      }],
+      editingNotes: [],
+    }],
+  }), {
+    liveTranscriptId: "live-1",
+    coreCandidateId: "core-1",
+    candidates,
+    paragraphs: parsed.paragraphs,
+    createId: () => "complete-plan-safe-omission",
+    now: () => NOW,
+  });
+
+  assert.equal(result.plans[0].sections[0].sourceType, "supplemental");
+  assert.equal(result.plans[0].sections[0].candidateId, null);
+  assert.equal(result.plans[0].sections[0].startParagraph, null);
+  assert.equal(result.plans[0].sections[2].endParagraph, null);
+});
+
 test("完整成片接口可以从整场直播补齐候选之外的原片，并返回程序截取的原文", async () => {
   const originalFetch = globalThis.fetch;
   const { parsed, candidates } = fixture();
@@ -110,7 +144,7 @@ test("完整成片接口可以从整场直播补齐候选之外的原片，并�
           startParagraph: 2, endParagraph: 3, startQuote: "但用户买的不是", endQuote: "证明你能解决。",
           supplementalSuggestion: null, transitionNote: "解释核心原因。",
         }, {
-          role: "ending", sourceType: "transcript", candidateId: null,
+          role: "ending", sourceType: "transcript",
           startParagraph: 6, endParagraph: 6, startQuote: "先解决一个具体问题", endQuote: "建立起来。",
           supplementalKind: null, supplementalSuggestion: null, transitionNote: "用直播原话收束。",
         }],
@@ -173,6 +207,16 @@ test("完整成片方案拒绝换核心主体、重复原文、伪造原话和�
   const invalidSections = [
     [opening, { ...body, candidateId: "opening-1", startParagraph: 1, endParagraph: 1, startQuote: "很多人以为", endQuote: "越好卖。" }, ending],
     [opening, { ...body, startQuote: "AI编造的主体开头" }, ending],
+    [{
+      ...ending,
+      role: "opening",
+      supplementalKind: "problem_hook",
+      candidateId: "opening-1",
+      startParagraph: 1,
+      endParagraph: 1,
+      startQuote: "很多人以为",
+      endQuote: "越好卖。",
+    }, body, ending],
     [
       { ...opening, candidateId: "core-1", startParagraph: 2, endParagraph: 2, startQuote: "但用户买的不是", endQuote: "解决具体问题的能力。" },
       body,
