@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  CLIP_TYPE_LABELS,
+  CLIP_STRUCTURE_ROLE_LABELS,
   type ClipCandidate,
   type ClipRating,
 } from "@/lib/live-clips-types";
@@ -48,7 +48,7 @@ export function formatClipCardForCopy(candidate: ClipCandidate) {
     : "";
   return [
     `【切片主题】\n${candidate.topic}`,
-    `【切片类型】\n${CLIP_TYPE_LABELS[candidate.clipType]}`,
+    `【结构角色】\n${candidate.structureRole ? CLIP_STRUCTURE_ROLE_LABELS[candidate.structureRole] : "历史未分类"}`,
     `【内容目的】\n${purpose}`,
     `【目的证据】\n${purposeEvidence}${secondaryPurposeEvidence}`,
     `【推荐程度】\n${candidate.recommendation}`,
@@ -89,11 +89,8 @@ export default function ClipCandidateCard({
         />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-[#EAF3DE] px-2.5 py-1 text-[11px] font-bold text-[#3B6D11]">{CLIP_TYPE_LABELS[candidate.clipType]}</span>
+            <span className="rounded-full bg-[#EAF3DE] px-2.5 py-1 text-[11px] font-bold text-[#3B6D11]">{candidate.structureRole ? CLIP_STRUCTURE_ROLE_LABELS[candidate.structureRole] : "历史未分类"}</span>
             <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${recommendationStyle(candidate.recommendation)}`}>{candidate.recommendation}</span>
-            {candidate.secondaryTags.map(tag => (
-              <span key={tag} className="rounded-full bg-[#F2F1ED] px-2.5 py-1 text-[10.5px] text-[#888]">{CLIP_TYPE_LABELS[tag]}</span>
-            ))}
             {candidate.primaryPurpose && <span className="rounded-full bg-[#E9F0FF] px-2.5 py-1 text-[10.5px] font-bold text-[#315E9C]">目的：{candidate.primaryPurpose}</span>}
             {candidate.secondaryPurpose && <span className="rounded-full bg-[#F2F1ED] px-2.5 py-1 text-[10.5px] text-[#777]">辅助：{candidate.secondaryPurpose}</span>}
           </div>

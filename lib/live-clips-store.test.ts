@@ -29,6 +29,7 @@ const transcript: LiveTranscript = {
 
 const candidate: ClipCandidate = {
   id: "candidate-1", liveTranscriptId: "live-1", topicBlockId: "topic-1", topic: "主题",
+  structureRole: "golden_quote",
   clipType: "opinion", secondaryTags: [], recommendation: "强烈建议切",
   dimensions: { completeness: "强", hookStrength: "强", pointClarity: "强", informationDensity: "强", tension: "中", ipFit: "强" },
   recommendReason: "值得剪", primaryPurpose: "信任建立",
@@ -57,6 +58,7 @@ test("旧版候选缺少内容目的字段时仍可读取并安全补为空值",
   delete legacyCandidate.primaryPurposeEvidence;
   delete legacyCandidate.secondaryPurpose;
   delete legacyCandidate.secondaryPurposeEvidence;
+  delete legacyCandidate.structureRole;
   const partialCandidate = { ...candidate, id: "candidate-partial", primaryPurposeEvidence: undefined };
   const legacyPlan = {
     id: "plan-old", liveTranscriptId: "live-1", clipCandidateId: "candidate-1", ipId: "ip-1",
@@ -75,10 +77,12 @@ test("旧版候选缺少内容目的字段时仍可读取并安全补为空值",
   assert.equal(restored.clipCandidates[0].primaryPurpose, null);
   assert.equal(restored.clipCandidates[0].primaryPurposeEvidence, null);
   assert.equal(restored.clipCandidates[0].secondaryPurpose, null);
+  assert.equal(restored.clipCandidates[0].structureRole, null);
   assert.equal(restored.clipCandidates[1].primaryPurpose, null);
   assert.equal(restored.clipCandidates[1].primaryPurposeEvidence, null);
   assert.equal(restored.clipPlans[0].primaryPurpose, null);
   assert.equal(restored.clipPlans[0].secondaryPurposeEvidence, null);
+  assert.equal(restored.clipPlans[0].structureRole, null);
 });
 
 test("旧版分块和主题缺少细分原因时补为null，已保存原因刷新后保留", () => {
@@ -153,6 +157,7 @@ test("只有用户勾选的候选会生成正式ClipPlan，重复生成不会重
   assert.equal(first.clipPlans[0].clipCandidateId, "candidate-1");
   assert.equal(first.clipPlans[0].ipId, "ip-1");
   assert.equal(first.clipPlans[0].primaryPurpose, "信任建立");
+  assert.equal(first.clipPlans[0].structureRole, "golden_quote");
   assert.deepEqual(first.clipPlans[0].primaryPurposeEvidence, { paragraphNumber: 1, quote: "原始逐字稿" });
   assert.equal(second.clipPlans.length, 1);
   assert.equal(second.clipPlans[0].id, "plan-1");

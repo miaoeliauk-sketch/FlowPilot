@@ -8,7 +8,7 @@ import {
   parseTranscriptParagraphs,
 } from "@/lib/live-clips-route";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
-import type { TopicBlock } from "@/lib/live-clips-types";
+import { LIVE_CLIP_STRUCTURE_ROLES, type ClipStructureRole, type TopicBlock } from "@/lib/live-clips-types";
 
 const SYSTEM_PROMPT = `你是直播短视频切片策划。你只负责发现直播里已经存在、能连续剪出的短视频候选，不是直播总结器，也不改写主播的切片正文。
 
@@ -18,18 +18,18 @@ const SYSTEM_PROMPT = `你是直播短视频切片策划。你只负责发现直
 3. 不得返回时间、rawClipText或cleanedClipText。只能返回段落编号和逐字复制的开始句、结束句、删除片段。
 4. startQuote、endQuote和removeSuggestions.quote必须逐字存在于指定原文段落。
 5. 标题和封面可以包装，但不能把新写的话冒充主播原话。
-6. 只允许观点型、方法型、反常识型、案例型、问答型、故事型六类。
+6. 每条候选只能选择一个主要结构角色：opening（开头）、golden_quote（金句）、marketing（营销）、ending（结尾）。判断标准是“放在成片哪个位置价值最大”：有明确产品价值、购买理由、异议处理或行动引导时归营销；能自然总结、升华或结束话题时归结尾；前几秒有冲突、悬念或反常识且适合留人时归开头；能独立传播但不承担以上功能时归金句。仅仅提到课程、产品或价格，不能直接归营销。
 7. 每条候选必须判断一个主要内容目的，只能从${CONTENT_PURPOSES.join("、")}中选择；最多再给一个不同的辅助目的，也可以不提供。
 8. 每个内容目的都必须附带一条逐字存在于该候选段落范围内的原文证据。不得根据整场直播背景判断；仅仅提到课程、产品、价格或直播，不足以自动判定为成交转化或直播导流。
 9. 标题和封面不得出现具体直播日期、钟点或活动地址，例如“今晚8点”“8月15日”“某酒店3楼”“某路88号”；普通城市观点如“杭州适合创业”不属于活动地址，可以保留。
-10. 不输出爆款分、概率、预计播放量。宁可候选少，也不要凑数。`;
+10. 不输出爆款分、概率、预计播放量。宁可候选少，也不要凑数。不要为了凑齐四类而生成不值得剪的候选，同一段原文不能因为符合多个角色而重复生成。`;
 
 function prompt(input: {
   topic: TopicBlock;
   paragraphsText: string;
   platform: string;
   targetDuration: string;
-  preferredClipTypes: string[];
+  preferredStructureRoles: string[];
   ipContext: Record<string, unknown> | null;
 }) {
   const ip = input.ipContext
@@ -43,7 +43,7 @@ function prompt(input: {
 
 目标平台：${input.platform || "抖音"}
 目标长度：${input.targetDuration || "不限制"}
-偏好类型：${input.preferredClipTypes.join("、") || "不限"}
+偏好结构角色：${input.preferredStructureRoles.join("、") || "不限"}
 当前IP：${ip}
 
 <SOURCE_TRANSCRIPT>
@@ -55,6 +55,7 @@ ${input.paragraphsText}
   "candidates": [
     {
       "topic": "切片主题",
+      "structureRole": "opening|golden_quote|marketing|ending",
       "clipType": "opinion|method|counterintuitive|case|qa|story",
       "secondaryTags": ["opinion"],
       "recommendation": "强烈建议切|可以考虑|不建议",
@@ -122,8 +123,10 @@ export async function POST(request: NextRequest) {
     const ipContext = record.ipContext && typeof record.ipContext === "object" && !Array.isArray(record.ipContext)
       ? record.ipContext as Record<string, unknown>
       : null;
-    const preferredClipTypes = Array.isArray(record.preferredClipTypes)
-      ? record.preferredClipTypes.filter((value): value is string => typeof value === "string")
+    const preferredStructureRoles = Array.isArray(record.preferredStructureRoles)
+      ? record.preferredStructureRoles.filter((value): value is ClipStructureRole => (
+        typeof value === "string" && LIVE_CLIP_STRUCTURE_ROLES.includes(value as ClipStructureRole)
+      ))
       : [];
 
     const result = await callStructuredDeepSeek({
@@ -133,7 +136,7 @@ export async function POST(request: NextRequest) {
         paragraphsText,
         platform: typeof record.platform === "string" ? record.platform : "抖音",
         targetDuration: typeof record.targetDuration === "string" ? record.targetDuration : "不限制",
-        preferredClipTypes,
+        preferredStructureRoles,
         ipContext,
       }),
       parse: content => parseCandidateAnalysisResponse(content, {
@@ -148,7 +151,7 @@ export async function POST(request: NextRequest) {
       maxRetries: 1,
       buildParseRetryInstruction: code => (
         code === "JSON_PARSE_FAIL" || code === "SCHEMA_FAIL"
-          ? "上次输出不符合JSON、内容目的、包装安全或原话追溯要求。只返回规定JSON，所有quote必须逐字复制自指定段落；每条候选必须有一个主要目的及证据；辅助目的和证据必须同时为空或同时提供；标题封面不得出现具体直播时间或活动地址；不得返回时间或正文。"
+          ? "上次输出不符合JSON、结构角色、内容目的、包装安全或原话追溯要求。只返回规定JSON，每条候选只能有一个opening、golden_quote、marketing或ending结构角色；所有quote必须逐字复制自指定段落；每条候选必须有一个主要目的及证据；辅助目的和证据必须同时为空或同时提供；标题封面不得出现具体直播时间或活动地址；不得返回时间或正文。"
           : null
       ),
     });

@@ -109,6 +109,7 @@ test("候选的原始稿和清洗稿全部由原文位置及删除片段生成",
   const result = parseCandidateAnalysisResponse(JSON.stringify({
     candidates: [{
       topic: "为什么知识付费不能只证明懂得多",
+      structureRole: "opening",
       clipType: "counterintuitive",
       secondaryTags: ["opinion"],
       recommendation: "强烈建议切",
@@ -143,6 +144,7 @@ test("候选的原始稿和清洗稿全部由原文位置及删除片段生成",
   });
 
   const candidate = result.candidates[0];
+  assert.equal(candidate.structureRole, "opening");
   assert.equal(candidate.startTime, "00:01:08");
   assert.equal(candidate.endTime, "00:01:38");
   assert.ok(candidate.rawClipText.startsWith("知识付费最大的误区"));
@@ -174,7 +176,7 @@ test("相同语气词出现在不同段落时，按段落身份分别清理", ()
   } satisfies TopicBlock;
   const payload = {
     candidates: [{
-      topic: "先问题后方法", clipType: "method", secondaryTags: [], recommendation: "可以考虑",
+      topic: "先问题后方法", structureRole: "golden_quote", clipType: "method", secondaryTags: [], recommendation: "可以考虑",
       dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "弱", ipFit: "强" },
       recommendReason: "结构完整。", primaryPurpose: "信任建立",
       primaryPurposeEvidence: { paragraphNumber: 1, quote: "第一段先讲问题" },
@@ -219,7 +221,7 @@ test("候选拒绝带具体直播时间的标题和具体活动地址的封面",
     candidateStatus: "pending", candidateError: null, createdAt: NOW,
   } satisfies TopicBlock;
   const base = {
-    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    topic: "候选", structureRole: "ending", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
     dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
     recommendReason: "理由", primaryPurpose: "信任建立",
     primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
@@ -252,7 +254,7 @@ test("候选必须有一个主要目的及证据，辅助目的最多一个且�
     candidateStatus: "pending", candidateError: null, createdAt: NOW,
   } satisfies TopicBlock;
   const base = {
-    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    topic: "候选", structureRole: "opening", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
     dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
     recommendReason: "理由", primaryPurpose: "信任建立",
     primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
@@ -292,7 +294,7 @@ test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝
     candidateStatus: "pending", candidateError: null, createdAt: NOW,
   } satisfies TopicBlock;
   const base = {
-    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    topic: "候选", structureRole: "golden_quote", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
     dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
     recommendReason: "理由", primaryPurpose: "信任建立",
     primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
@@ -300,7 +302,12 @@ test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝
     startQuote: "AI写出的漂亮开头", endQuote: "解决问题的信任。", corePoint: "观点",
     removeSuggestions: [], titleSuggestions: ["标题1", "标题2", "标题3"], coverSuggestions: ["封面1", "封面2"],
   };
-  for (const candidate of [base, { ...base, startQuote: "知识付费最大的误区", startTime: "00:01:08" }, { ...base, startQuote: "知识付费最大的误区", clipType: "tutorial" }]) {
+  for (const candidate of [
+    base,
+    { ...base, startQuote: "知识付费最大的误区", startTime: "00:01:08" },
+    { ...base, startQuote: "知识付费最大的误区", clipType: "tutorial" },
+    { ...base, startQuote: "知识付费最大的误区", structureRole: "story" },
+  ]) {
     assert.throws(
       () => parseCandidateAnalysisResponse(JSON.stringify({ candidates: [candidate] }), {
         liveTranscriptId: "live-1",
@@ -321,7 +328,7 @@ test("候选原话追溯失败时返回稳定细分原因码", () => {
     candidateStatus: "pending", candidateError: null, createdAt: NOW,
   } satisfies TopicBlock;
   const base = {
-    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    topic: "候选", structureRole: "marketing", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
     dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
     recommendReason: "理由", primaryPurpose: "信任建立",
     primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },

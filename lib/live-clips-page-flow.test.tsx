@@ -54,6 +54,12 @@ test("用户导入无时间逐字稿后先保存原文，再进入AI分析且不
     const view = render(<IPProvider><LiveClipsPage /></IPProvider>);
 
     await waitFor(() => assert.ok(view.getByText("彭彭说AI")));
+    assert.ok(view.getByRole("button", { name: "开头" }));
+    assert.ok(view.getByRole("button", { name: "金句" }));
+    assert.ok(view.getByRole("button", { name: "营销" }));
+    assert.ok(view.getByRole("button", { name: "结尾" }));
+    assert.equal(view.queryByRole("button", { name: "观点型" }), null);
+    fireEvent.click(view.getByRole("button", { name: "开头" }));
     fireEvent.change(view.getByLabelText("直播名称"), { target: { value: "8月10日直播" } });
     fireEvent.change(view.getByLabelText("直播逐字稿"), {
       target: {
@@ -66,6 +72,8 @@ test("用户导入无时间逐字稿后先保存原文，再进入AI分析且不
     const state = JSON.parse(localStorage.getItem(LIVE_CLIP_STORAGE_KEY) || "{}") as LiveClipWorkspaceState;
     assert.equal(state.liveTranscripts[0].rawTranscript.includes("第一反应是追求爆款"), true);
     assert.equal(state.liveTranscripts[0].hasTimecode, false);
+    assert.deepEqual(state.liveTranscripts[0].preferredStructureRoles, ["opening"]);
+    assert.deepEqual(state.liveTranscripts[0].preferredClipTypes, []);
     assert.ok(state.liveTranscripts[0].paragraphs.every(paragraph => paragraph.startTime === null && paragraph.endTime === null));
     assert.ok(state.transcriptChunks.length > 0);
   } finally {
@@ -100,7 +108,7 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
       if (url.includes("/api/live-clips/candidates")) {
         return Response.json({ candidates: [{
           id: "candidate-1", liveTranscriptId: requestBody.liveTranscriptId, topicBlockId: "topic-1",
-          topic: "为什么知识付费不能只证明懂得多", clipType: "counterintuitive", secondaryTags: ["opinion"],
+          topic: "为什么知识付费不能只证明懂得多", structureRole: "opening", clipType: "counterintuitive", secondaryTags: ["opinion"],
           recommendation: "强烈建议切", dimensions: {
             completeness: "强", hookStrength: "强", pointClarity: "强", informationDensity: "强", tension: "中", ipFit: "强",
           },
@@ -138,6 +146,12 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     fireEvent.click(view.getByRole("button", { name: "保存并进入AI分析" }));
     fireEvent.click(await view.findByRole("button", { name: "开始AI分析" }));
 
+    await waitFor(() => assert.ok(view.getByText("为什么知识付费不能只证明懂得多")));
+    assert.ok(view.getAllByText("开头").length >= 2);
+    assert.equal(view.queryByText("反常识型"), null);
+    fireEvent.change(view.getByLabelText("结构角色筛选"), { target: { value: "marketing" } });
+    await waitFor(() => assert.equal(view.queryByText("为什么知识付费不能只证明懂得多"), null));
+    fireEvent.change(view.getByLabelText("结构角色筛选"), { target: { value: "opening" } });
     await waitFor(() => assert.ok(view.getByText("为什么知识付费不能只证明懂得多")));
     assert.ok(view.getByText("目的：信任建立"));
     assert.ok(view.getByText("辅助：流量增长"));

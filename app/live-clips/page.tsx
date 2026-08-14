@@ -17,13 +17,13 @@ import {
   parseLiveTranscript,
 } from "@/lib/live-clips-transcript";
 import {
-  CLIP_TYPE_LABELS,
+  CLIP_STRUCTURE_ROLE_LABELS,
   LIVE_CLIP_FAILURE_REASON_LABELS,
-  LIVE_CLIP_TYPES,
+  LIVE_CLIP_STRUCTURE_ROLES,
   isLiveClipFailureReason,
   type ClipCandidate,
   type ClipRecommendation,
-  type ClipType,
+  type ClipStructureRole,
   type LiveClipApiError,
   type LiveClipFailureCause,
   type LiveClipFailureReason,
@@ -150,7 +150,7 @@ export default function LiveClipsPage() {
   const [ipId, setIpId] = useState("");
   const [platform, setPlatform] = useState<LivePlatform>("抖音");
   const [targetDuration, setTargetDuration] = useState<TargetDuration>("1—3分钟");
-  const [preferredTypes, setPreferredTypes] = useState<ClipType[]>([]);
+  const [preferredRoles, setPreferredRoles] = useState<ClipStructureRole[]>([]);
   const [rawTranscript, setRawTranscript] = useState("");
   const [sourceType, setSourceType] = useState<TranscriptSourceType>("paste");
   const [fileName, setFileName] = useState("");
@@ -159,7 +159,7 @@ export default function LiveClipsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [recommendationFilter, setRecommendationFilter] = useState<"全部" | ClipRecommendation>("全部");
-  const [typeFilter, setTypeFilter] = useState<"全部" | ClipType>("全部");
+  const [roleFilter, setRoleFilter] = useState<"全部" | ClipStructureRole>("全部");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [planFeedback, setPlanFeedback] = useState<string | null>(null);
 
@@ -233,8 +233,8 @@ export default function LiveClipsPage() {
     }
   }
 
-  function togglePreferredType(type: ClipType) {
-    setPreferredTypes(current => current.includes(type) ? current.filter(item => item !== type) : [...current, type]);
+  function togglePreferredRole(role: ClipStructureRole) {
+    setPreferredRoles(current => current.includes(role) ? current.filter(item => item !== role) : [...current, role]);
   }
 
   function handleImport() {
@@ -258,7 +258,8 @@ export default function LiveClipsPage() {
         hasTimecode: parsed.hasTimecode,
         sourceType,
         targetDuration,
-        preferredClipTypes: preferredTypes,
+        preferredClipTypes: [],
+        preferredStructureRoles: preferredRoles,
         paragraphs: parsed.paragraphs,
         analysisStatus: "imported",
         createdAt: now,
@@ -304,7 +305,7 @@ export default function LiveClipsPage() {
         liveTranscriptId: transcript.id,
         topic,
         paragraphs: paragraphsNearRange(transcript.paragraphs, topic.startParagraph, topic.endParagraph),
-        preferredClipTypes: transcript.preferredClipTypes,
+        preferredStructureRoles: transcript.preferredStructureRoles ?? [],
         targetDuration: transcript.targetDuration,
         platform: transcript.platform,
         ipContext: ip ? { name: ip.name, positioning: ip.positioning, audience: ip.audience } : null,
@@ -479,14 +480,13 @@ export default function LiveClipsPage() {
 
   const visibleCandidates = useMemo(() => currentCandidates.filter(candidate => (
     (recommendationFilter === "全部" || candidate.recommendation === recommendationFilter)
-    && (typeFilter === "全部" || candidate.clipType === typeFilter || candidate.secondaryTags.includes(typeFilter))
-  )), [currentCandidates, recommendationFilter, typeFilter]);
+    && (roleFilter === "全部" || candidate.structureRole === roleFilter)
+  )), [currentCandidates, recommendationFilter, roleFilter]);
 
-  const counts = useMemo(() => ({
-    strong: currentCandidates.filter(candidate => candidate.recommendation === "强烈建议切").length,
-    consider: currentCandidates.filter(candidate => candidate.recommendation === "可以考虑").length,
-    reject: currentCandidates.filter(candidate => candidate.recommendation === "不建议").length,
-  }), [currentCandidates]);
+  const roleCounts = useMemo(() => Object.fromEntries(LIVE_CLIP_STRUCTURE_ROLES.map(role => [
+    role,
+    currentCandidates.filter(candidate => candidate.structureRole === role).length,
+  ])) as Record<ClipStructureRole, number>, [currentCandidates]);
 
   if (!ready || ipLoading) return <div className="p-8 text-[13px] text-[#888]">正在加载直播切片工作台…</div>;
 
@@ -528,10 +528,10 @@ export default function LiveClipsPage() {
               {DURATIONS.map(item => <option key={item}>{item}</option>)}
             </select>
 
-            <div className="mt-4 text-[12px] font-bold text-[#666]">偏好切片类型（可多选，不选代表不限）</div>
+            <div className="mt-4 text-[12px] font-bold text-[#666]">偏好结构角色（可多选，不选代表不限）</div>
             <div className="mt-2 flex flex-wrap gap-2">
-              {LIVE_CLIP_TYPES.map(type => (
-                <button key={type} type="button" onClick={() => togglePreferredType(type)} className="rounded-full px-3 py-1.5 text-[12px] font-semibold" style={preferredTypes.includes(type) ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>{CLIP_TYPE_LABELS[type]}</button>
+              {LIVE_CLIP_STRUCTURE_ROLES.map(role => (
+                <button key={role} type="button" onClick={() => togglePreferredRole(role)} className="rounded-full px-3 py-1.5 text-[12px] font-semibold" style={preferredRoles.includes(role) ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>{CLIP_STRUCTURE_ROLE_LABELS[role]}</button>
               ))}
             </div>
           </Card>
@@ -619,19 +619,18 @@ export default function LiveClipsPage() {
             </div>
           )}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Card className="p-4"><div className="text-[21px] font-bold text-[#1C1C1B]">{currentTopics.length}</div><div className="mt-1 text-[11.5px] text-[#888]">识别主题块</div></Card>
-            <Card className="p-4"><div className="text-[21px] font-bold text-[#3B6D11]">{counts.strong}</div><div className="mt-1 text-[11.5px] text-[#888]">强烈建议切</div></Card>
-            <Card className="p-4"><div className="text-[21px] font-bold text-[#7A5C00]">{counts.consider}</div><div className="mt-1 text-[11.5px] text-[#888]">可以考虑</div></Card>
-            <Card className="p-4"><div className="text-[21px] font-bold text-[#999]">{counts.reject}</div><div className="mt-1 text-[11.5px] text-[#888]">不建议</div></Card>
+            {LIVE_CLIP_STRUCTURE_ROLES.map(role => (
+              <Card key={role} className="p-4"><div className="text-[21px] font-bold text-[#1C1C1B]">{roleCounts[role]}</div><div className="mt-1 text-[11.5px] text-[#888]">{CLIP_STRUCTURE_ROLE_LABELS[role]}</div></Card>
+            ))}
           </div>
 
           <Card className="p-4">
             <div className="flex flex-wrap items-center gap-2">
               {(["全部", "强烈建议切", "可以考虑", "不建议"] as const).map(value => <button key={value} type="button" onClick={() => setRecommendationFilter(value)} className="rounded-full px-3 py-1.5 text-[11.5px] font-semibold" style={recommendationFilter === value ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#666" }}>{value}</button>)}
               <span className="mx-1 h-5 w-px bg-[#E5E4DE]" />
-              <select value={typeFilter} onChange={event => setTypeFilter(event.target.value as "全部" | ClipType)} className="rounded-[9px] border border-[#E5E4DE] bg-white px-3 py-1.5 text-[11.5px] text-[#555]">
-                <option value="全部">全部类型</option>
-                {LIVE_CLIP_TYPES.map(type => <option key={type} value={type}>{CLIP_TYPE_LABELS[type]}</option>)}
+              <select aria-label="结构角色筛选" value={roleFilter} onChange={event => setRoleFilter(event.target.value as "全部" | ClipStructureRole)} className="rounded-[9px] border border-[#E5E4DE] bg-white px-3 py-1.5 text-[11.5px] text-[#555]">
+                <option value="全部">全部结构角色</option>
+                {LIVE_CLIP_STRUCTURE_ROLES.map(role => <option key={role} value={role}>{CLIP_STRUCTURE_ROLE_LABELS[role]}</option>)}
               </select>
               <span className="ml-auto text-[11.5px] text-[#888]">已选{selectedIds.size}条</span>
             </div>
@@ -650,7 +649,10 @@ export default function LiveClipsPage() {
                 {currentPlans.map(plan => (
                   <div key={plan.id} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
                     <div>
-                      <div className="text-[13px] font-semibold text-[#333]">{plan.topic}</div>
+                      <div className="flex items-center gap-2 text-[13px] font-semibold text-[#333]">
+                        <span>{plan.topic}</span>
+                        <span className="rounded-full bg-[#EAF3DE] px-2 py-0.5 text-[10.5px] text-[#3B6D11]">{plan.structureRole ? CLIP_STRUCTURE_ROLE_LABELS[plan.structureRole] : "历史未分类"}</span>
+                      </div>
                       <div className="mt-1 text-[11.5px] text-[#888]">{formatLiveClipPosition(plan)}</div>
                     </div>
                     <div className="flex items-center gap-2">

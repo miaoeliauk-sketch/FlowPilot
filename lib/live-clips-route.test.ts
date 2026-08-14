@@ -81,7 +81,7 @@ test("候选接口安全透传开始句无法定位的稳定原因码", async ()
     candidateStatus: "pending", candidateError: null, createdAt: "2026-08-11T00:00:00.000Z",
   };
   const invalidCandidate = {
-    topic: "候选", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
+    topic: "候选", structureRole: "opening", clipType: "opinion", secondaryTags: [], recommendation: "可以考虑",
     dimensions: { completeness: "强", hookStrength: "中", pointClarity: "强", informationDensity: "中", tension: "中", ipFit: "强" },
     recommendReason: "理由", primaryPurpose: "信任建立",
     primaryPurposeEvidence: { paragraphNumber: 4, quote: "解决问题的信任" },
@@ -161,7 +161,7 @@ test("候选路由把空content明确映射为EMPTY_CONTENT", async () => {
   }
 });
 
-test("候选提示词要求内容目的有原文证据且不能因提到课程就判为成交转化", async () => {
+test("候选提示词要求唯一结构角色并按成片价值解决分类冲突", async () => {
   const originalFetch = globalThis.fetch;
   const { parsed } = fixture();
   const topic: TopicBlock = {
@@ -185,6 +185,11 @@ test("候选提示词要求内容目的有原文证据且不能因提到课程�
     const request = JSON.parse(sentBody) as { messages: Array<{ content: string }> };
     const promptText = request.messages.map(message => message.content).join("\n");
     assert.ok(promptText.includes("仅仅提到课程、产品、价格或直播，不足以自动判定为成交转化或直播导流"));
+    assert.ok(promptText.includes("每条候选只能选择一个主要结构角色"));
+    assert.ok(promptText.includes("放在成片哪个位置价值最大"));
+    assert.ok(promptText.includes("有明确产品价值、购买理由、异议处理或行动引导"));
+    assert.ok(promptText.includes("不要为了凑齐四类而生成不值得剪的候选"));
+    assert.ok(promptText.includes('"structureRole": "opening|golden_quote|marketing|ending"'));
     assert.ok(promptText.includes("primaryPurposeEvidence"));
     assert.ok(promptText.includes("标题和封面不得出现具体直播日期、钟点或活动地址"));
   } finally {

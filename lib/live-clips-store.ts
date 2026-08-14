@@ -1,12 +1,14 @@
 import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_STORAGE_KEY,
+  LIVE_CLIP_STRUCTURE_ROLES,
   isLiveClipFailureReason,
   type ClipCandidate,
   type ClipPlan,
   type LiveClipWorkspaceState,
   type PurposeEvidence,
   type LiveClipFailureReason,
+  type ClipStructureRole,
 } from "./live-clips-types";
 
 export type LiveClipStorageErrorCode = "WRITE_FAILED" | "VERIFY_FAILED" | "CORRUPTED";
@@ -62,6 +64,12 @@ function legacyFailureReason(value: unknown): LiveClipFailureReason | null {
   return isLiveClipFailureReason(value) ? value : null;
 }
 
+function legacyStructureRole(value: unknown): ClipStructureRole | null {
+  return typeof value === "string" && LIVE_CLIP_STRUCTURE_ROLES.includes(value as ClipStructureRole)
+    ? value as ClipStructureRole
+    : null;
+}
+
 function legacyPurposeEvidence(value: unknown): PurposeEvidence | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -85,6 +93,7 @@ function migrateCandidatePurpose(candidate: ClipCandidate): ClipCandidate {
   const secondary = migratePurposePair(candidate.secondaryPurpose, candidate.secondaryPurposeEvidence);
   return {
     ...candidate,
+    structureRole: legacyStructureRole(candidate.structureRole),
     primaryPurpose: primary.purpose,
     primaryPurposeEvidence: primary.evidence,
     secondaryPurpose: secondary.purpose,
@@ -97,6 +106,7 @@ function migratePlanPurpose(plan: ClipPlan): ClipPlan {
   const secondary = migratePurposePair(plan.secondaryPurpose, plan.secondaryPurposeEvidence);
   return {
     ...plan,
+    structureRole: legacyStructureRole(plan.structureRole),
     primaryPurpose: primary.purpose,
     primaryPurposeEvidence: primary.evidence,
     secondaryPurpose: secondary.purpose,
@@ -184,6 +194,7 @@ export function createClipPlans(
       clipCandidateId: candidate.id,
       ipId: transcript.ipId,
       topic: candidate.topic,
+      structureRole: candidate.structureRole,
       clipType: candidate.clipType,
       recommendation: candidate.recommendation,
       primaryPurpose: candidate.primaryPurpose,

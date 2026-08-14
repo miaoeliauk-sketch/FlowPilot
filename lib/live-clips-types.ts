@@ -12,6 +12,16 @@ export const LIVE_CLIP_TYPES = [
 ] as const;
 
 export type ClipType = typeof LIVE_CLIP_TYPES[number];
+
+export const LIVE_CLIP_STRUCTURE_ROLES = ["opening", "golden_quote", "marketing", "ending"] as const;
+export type ClipStructureRole = typeof LIVE_CLIP_STRUCTURE_ROLES[number];
+
+export const CLIP_STRUCTURE_ROLE_LABELS: Record<ClipStructureRole, string> = {
+  opening: "开头",
+  golden_quote: "金句",
+  marketing: "营销",
+  ending: "结尾",
+};
 export type ClipRating = "强" | "中" | "弱";
 export type ClipRecommendation = "强烈建议切" | "可以考虑" | "不建议";
 export type LivePlatform = "抖音" | "视频号" | "小红书" | "B站";
@@ -110,6 +120,7 @@ export interface LiveTranscript {
   sourceType: TranscriptSourceType;
   targetDuration: TargetDuration;
   preferredClipTypes: ClipType[];
+  preferredStructureRoles?: ClipStructureRole[];
   paragraphs: TranscriptParagraph[];
   analysisStatus: LiveAnalysisStatus;
   createdAt: string;
@@ -153,6 +164,7 @@ export interface ClipCandidate {
   liveTranscriptId: string;
   topicBlockId: string;
   topic: string;
+  structureRole: ClipStructureRole | null;
   clipType: ClipType;
   secondaryTags: ClipType[];
   recommendation: ClipRecommendation;
@@ -185,6 +197,7 @@ export interface ClipPlan {
   clipCandidateId: string;
   ipId: string;
   topic: string;
+  structureRole: ClipStructureRole | null;
   clipType: ClipType;
   recommendation: ClipRecommendation;
   primaryPurpose: ContentPurpose | null;
