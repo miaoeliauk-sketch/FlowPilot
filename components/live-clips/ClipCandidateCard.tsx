@@ -73,6 +73,7 @@ export default function ClipCandidateCard({
   onCopy,
   onGenerateCompletePlan,
   generatingCompletePlan,
+  completePlanGenerationDisabled,
 }: {
   candidate: ClipCandidate;
   selected: boolean;
@@ -80,6 +81,7 @@ export default function ClipCandidateCard({
   onCopy: (text: string, label: string) => void;
   onGenerateCompletePlan: () => void;
   generatingCompletePlan: boolean;
+  completePlanGenerationDisabled: boolean;
 }) {
   return (
     <article className={`rounded-[18px] border bg-white p-5 shadow-sm transition ${selected ? "border-[#639922] ring-2 ring-[#EAF3DE]" : "border-[#E5E4DE]"}`}>
@@ -204,7 +206,7 @@ export default function ClipCandidateCard({
           type="button"
           aria-label={`生成完整成片方案：${candidate.topic}`}
           onClick={onGenerateCompletePlan}
-          disabled={generatingCompletePlan}
+          disabled={completePlanGenerationDisabled}
           className="rounded-[10px] bg-[#EAF3DE] px-4 py-2 text-[12px] font-semibold text-[#3B6D11] disabled:opacity-50"
         >
           {generatingCompletePlan ? "正在生成完整方案…" : "生成完整成片方案"}

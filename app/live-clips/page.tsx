@@ -703,6 +703,7 @@ export default function LiveClipsPage() {
               onCopy={copyText}
               onGenerateCompletePlan={() => void generateCompletePlan(candidate)}
               generatingCompletePlan={generatingCompletePlanFor === candidate.id}
+              completePlanGenerationDisabled={generatingCompletePlanFor !== null || storageBlocked}
             />
           ))}
 

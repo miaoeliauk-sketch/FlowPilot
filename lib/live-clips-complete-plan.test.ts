@@ -63,7 +63,7 @@ test("完整成片方案按开头到结尾组织可追溯原文，并明确标�
         {
           role: "ending", sourceType: "supplemental", candidateId: null,
           startParagraph: null, endParagraph: null, startQuote: null, endQuote: null,
-          supplementalSuggestion: "补录一句对核心观点的自然收束，不增加新的事实或承诺。",
+          supplementalKind: "summary_closure", supplementalSuggestion: null,
           transitionNote: "单独补录，不冒充直播原话。",
         },
       ],
@@ -91,7 +91,7 @@ test("完整成片方案按开头到结尾组织可追溯原文，并明确标�
   assert.equal(plan.createdAt, NOW);
 });
 
-test("完整成片接口只组合当前直播候选，并返回程序截取的原文", async () => {
+test("完整成片接口可以从整场直播补齐候选之外的原片，并返回程序截取的原文", async () => {
   const originalFetch = globalThis.fetch;
   const { parsed, candidates } = fixture();
   let sentBody = "";
@@ -110,9 +110,9 @@ test("完整成片接口只组合当前直播候选，并返回程序截取的�
           startParagraph: 2, endParagraph: 3, startQuote: "但用户买的不是", endQuote: "证明你能解决。",
           supplementalSuggestion: null, transitionNote: "解释核心原因。",
         }, {
-          role: "ending", sourceType: "supplemental", candidateId: null,
-          startParagraph: null, endParagraph: null, startQuote: null, endQuote: null,
-          supplementalSuggestion: "补录一句自然收束，不增加事实。", transitionNote: "明确标记补录。",
+          role: "ending", sourceType: "transcript", candidateId: null,
+          startParagraph: 6, endParagraph: 6, startQuote: "先解决一个具体问题", endQuote: "建立起来。",
+          supplementalKind: null, supplementalSuggestion: null, transitionNote: "用直播原话收束。",
         }],
         editingNotes: ["原片之间直接跳切"],
       }],
@@ -141,11 +141,13 @@ test("完整成片接口只组合当前直播候选，并返回程序截取的�
     const body = await response.json();
     assert.equal(response.status, 200);
     assert.equal(body.plans[0].sections[0].rawText, "很多人以为知识越多，课程就越好卖。");
-    assert.equal(body.plans[0].sections[2].sourceType, "supplemental");
+    assert.equal(body.plans[0].sections[2].sourceType, "transcript");
+    assert.equal(body.plans[0].sections[2].rawText, "先解决一个具体问题，信任自然会建立起来。");
     const prompt = (JSON.parse(sentBody) as { messages: Array<{ content: string }> }).messages.map(item => item.content).join("\n");
     assert.match(prompt, /同一个核心主题/);
     assert.match(prompt, /只有开头或结尾缺失时/);
     assert.match(prompt, /\[P1\] 很多人以为知识越多/);
+    assert.match(prompt, /\[P6\] 先解决一个具体问题/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -166,7 +168,7 @@ test("完整成片方案拒绝换核心主体、重复原文、伪造原话和�
   const ending = {
     role: "ending", sourceType: "supplemental", candidateId: null,
     startParagraph: null, endParagraph: null, startQuote: null, endQuote: null,
-    supplementalSuggestion: "补录自然收束。", transitionNote: "结尾。",
+    supplementalKind: "summary_closure", supplementalSuggestion: null, transitionNote: "结尾。",
   };
   const invalidSections = [
     [opening, { ...body, candidateId: "opening-1", startParagraph: 1, endParagraph: 1, startQuote: "很多人以为", endQuote: "越好卖。" }, ending],

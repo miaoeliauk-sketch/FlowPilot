@@ -1,5 +1,17 @@
 import { LiveClipResponseError } from "./live-clips-response";
 import {
+  contractEnum,
+  contractObject,
+  contractString,
+  strictJsonObject,
+} from "./live-clips-json-contract";
+import {
+  completeVideoSectionsError,
+  isCompleteVideoSupplementalKind,
+  isSupplementalKindAllowedForRole,
+  supplementalSuggestion,
+} from "./live-clips-complete-plan-contract";
+import {
   COMPLETE_VIDEO_SECTION_ROLES,
   type ClipRemovalSuggestion,
   type CompleteVideoPlan,
@@ -36,25 +48,15 @@ function fail(message: string, reasonCode = "FIELD_INVALID"): never {
 }
 
 function strictJSON(content: string): unknown {
-  const trimmed = content.trim();
-  if (!trimmed || trimmed.startsWith("```") || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    throw new LiveClipResponseError("JSON_PARSE_FAIL", "AI返回内容不是纯JSON对象");
-  }
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    throw new LiveClipResponseError("JSON_PARSE_FAIL", "AI返回内容不是有效JSON");
-  }
+  return strictJsonObject(content, message => { throw new LiveClipResponseError("JSON_PARSE_FAIL", message); });
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label}必须是对象`);
-  return value as Record<string, unknown>;
+  return contractObject(value, label, message => fail(message));
 }
 
 function stringValue(value: unknown, label: string, max = 1000) {
-  if (typeof value !== "string" || !value.trim() || value.length > max) fail(`${label}必须是非空字符串`);
-  return value.trim();
+  return contractString(value, label, max, message => fail(message));
 }
 
 function nullableString(value: unknown, label: string, max = 1000) {
@@ -68,8 +70,7 @@ function nullableInteger(value: unknown, label: string) {
 }
 
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
-  if (typeof value !== "string" || !allowed.includes(value as T)) fail(`${label}不在允许范围内`);
-  return value as T;
+  return contractEnum(value, allowed, label, message => fail(message));
 }
 
 function parseSourceSection(
@@ -78,20 +79,23 @@ function parseSourceSection(
   context: CompletePlanResponseContext,
   candidatesById: Map<string, CompletePlanSourceCandidate>,
 ): CompleteVideoPlanSection {
-  const candidateId = stringValue(object.candidateId, `${role}.candidateId`, 160);
-  const candidate = candidatesById.get(candidateId);
-  if (!candidate || candidate.liveTranscriptId !== context.liveTranscriptId) fail(`${role}引用的候选不存在或归属不匹配`);
+  const candidateId = object.candidateId === null
+    ? null
+    : stringValue(object.candidateId, `${role}.candidateId`, 160);
+  const candidate = candidateId ? candidatesById.get(candidateId) : null;
+  if (candidateId && (!candidate || candidate.liveTranscriptId !== context.liveTranscriptId)) fail(`${role}引用的候选不存在或归属不匹配`);
   if (role === "body" && candidateId !== context.coreCandidateId) fail("主体必须来自当前核心候选");
   const startParagraph = nullableInteger(object.startParagraph, `${role}.startParagraph`);
   const endParagraph = nullableInteger(object.endParagraph, `${role}.endParagraph`);
   if (startParagraph === null || endParagraph === null || endParagraph < startParagraph) fail(`${role}段落范围无效`);
-  if (startParagraph < candidate.startParagraph || endParagraph > candidate.endParagraph) {
+  if (candidate && (startParagraph < candidate.startParagraph || endParagraph > candidate.endParagraph)) {
     fail(`${role}超出所引用候选的原文范围`);
   }
   const startQuote = nullableString(object.startQuote, `${role}.startQuote`, 500);
   const endQuote = nullableString(object.endQuote, `${role}.endQuote`, 500);
   if (!startQuote || !endQuote) fail(`${role}缺少原文开始句或结束句`);
-  if (object.supplementalSuggestion !== null) fail(`${role}原片段落不得夹带补录内容`);
+  if (object.supplementalSuggestion !== null && object.supplementalSuggestion !== undefined) fail(`${role}原片段落不得夹带补录内容`);
+  if (object.supplementalKind !== null && object.supplementalKind !== undefined) fail(`${role}原片段落不得带补录类型`);
   const input = { startParagraph, endParagraph, startQuote, endQuote };
   let rawText: string;
   let cleanedText: string;
@@ -101,7 +105,7 @@ function parseSourceSection(
     const message = error instanceof Error ? error.message : "原话无法定位";
     fail(message, message.includes("开始句") ? "START_QUOTE_NOT_FOUND" : "END_QUOTE_NOT_FOUND");
   }
-  const removals = candidate.removeSuggestions.filter(item => (
+  const removals = (candidate?.removeSuggestions ?? []).filter(item => (
     item.paragraphNumber >= startParagraph
     && item.paragraphNumber <= endParagraph
     && rawText.includes(item.quote)
@@ -122,6 +126,7 @@ function parseSourceSection(
     endParagraph,
     rawText,
     cleanedText,
+    supplementalKind: null,
     supplementalSuggestion: null,
     transitionNote: stringValue(object.transitionNote, `${role}.transitionNote`, 500),
   };
@@ -139,6 +144,12 @@ function parseSupplementalSection(
     || object.startQuote !== null
     || object.endQuote !== null
   ) fail(`${role}补录建议不得伪造原文位置`);
+  if (object.supplementalSuggestion !== null && object.supplementalSuggestion !== undefined) {
+    fail("补录内容只能由程序固定生成，AI不得自由编写");
+  }
+  if (!isCompleteVideoSupplementalKind(object.supplementalKind)) fail(`${role}补录类型无效`);
+  const kind = object.supplementalKind;
+  if (!isSupplementalKindAllowedForRole(role, kind)) fail(`${role}补录类型无效`);
   return {
     role,
     sourceType: "supplemental",
@@ -149,14 +160,10 @@ function parseSupplementalSection(
     endParagraph: null,
     rawText: null,
     cleanedText: null,
-    supplementalSuggestion: stringValue(object.supplementalSuggestion, `${role}.supplementalSuggestion`, 500),
+    supplementalKind: kind,
+    supplementalSuggestion: supplementalSuggestion(kind),
     transitionNote: stringValue(object.transitionNote, `${role}.transitionNote`, 500),
   };
-}
-
-function rangesOverlap(left: CompleteVideoPlanSection, right: CompleteVideoPlanSection) {
-  if (left.startParagraph === null || left.endParagraph === null || right.startParagraph === null || right.endParagraph === null) return false;
-  return Math.max(left.startParagraph, right.startParagraph) <= Math.min(left.endParagraph, right.endParagraph);
 }
 
 export function parseCompleteVideoPlanResponse(content: string, context: CompletePlanResponseContext) {
@@ -181,17 +188,8 @@ export function parseCompleteVideoPlanResponse(content: string, context: Complet
         ? parseSourceSection(section, role, context, candidatesById)
         : parseSupplementalSection(section, role);
     });
-    const roles = sections.map(section => section.role);
-    if (new Set(roles).size !== roles.length || !roles.includes("opening") || !roles.includes("body") || !roles.includes("ending")) {
-      fail("完整成片方案必须有且仅有一个开头、主体和结尾");
-    }
-    const ranks = roles.map(role => COMPLETE_VIDEO_SECTION_ROLES.indexOf(role));
-    if (ranks.some((rank, index) => index > 0 && rank <= ranks[index - 1])) fail("成片段落顺序必须从开头到结尾");
-    for (let left = 0; left < sections.length; left += 1) {
-      for (let right = left + 1; right < sections.length; right += 1) {
-        if (rangesOverlap(sections[left], sections[right])) fail("成片方案不能重复使用同一段原文");
-      }
-    }
+    const sectionsError = completeVideoSectionsError(sections);
+    if (sectionsError) fail(sectionsError);
     const sourceLocations = sections.filter(section => section.sourceType === "transcript").map(section => (
       deriveSourceLocation(context.paragraphs, section.startParagraph!, section.endParagraph!)
     ));

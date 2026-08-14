@@ -30,6 +30,8 @@ export function isClipStructureRole(value: unknown): value is ClipStructureRole 
 export const COMPLETE_VIDEO_SECTION_ROLES = ["opening", "body", "golden_quote", "marketing", "ending"] as const;
 export type CompleteVideoSectionRole = typeof COMPLETE_VIDEO_SECTION_ROLES[number];
 export type CompleteVideoSectionSource = "transcript" | "supplemental";
+export const COMPLETE_VIDEO_SUPPLEMENTAL_KINDS = ["problem_hook", "conflict_hook", "summary_closure", "action_closure"] as const;
+export type CompleteVideoSupplementalKind = typeof COMPLETE_VIDEO_SUPPLEMENTAL_KINDS[number];
 
 export const COMPLETE_VIDEO_SECTION_ROLE_LABELS: Record<CompleteVideoSectionRole, string> = {
   opening: "开头",
@@ -235,19 +237,39 @@ export interface ClipPlan {
   createdAt: string;
 }
 
-export interface CompleteVideoPlanSection {
+interface CompleteVideoPlanSectionBase {
   role: CompleteVideoSectionRole;
-  sourceType: CompleteVideoSectionSource;
+  transitionNote: string;
+}
+
+export interface CompleteVideoTranscriptSection extends CompleteVideoPlanSectionBase {
+  sourceType: "transcript";
   candidateId: string | null;
   startTime: string | null;
   endTime: string | null;
-  startParagraph: number | null;
-  endParagraph: number | null;
-  rawText: string | null;
-  cleanedText: string | null;
-  supplementalSuggestion: string | null;
-  transitionNote: string;
+  startParagraph: number;
+  endParagraph: number;
+  rawText: string;
+  cleanedText: string;
+  supplementalKind: null;
+  supplementalSuggestion: null;
 }
+
+export interface CompleteVideoSupplementalSection extends CompleteVideoPlanSectionBase {
+  sourceType: "supplemental";
+  role: "opening" | "ending";
+  candidateId: null;
+  startTime: null;
+  endTime: null;
+  startParagraph: null;
+  endParagraph: null;
+  rawText: null;
+  cleanedText: null;
+  supplementalKind: CompleteVideoSupplementalKind;
+  supplementalSuggestion: string;
+}
+
+export type CompleteVideoPlanSection = CompleteVideoTranscriptSection | CompleteVideoSupplementalSection;
 
 export interface CompleteVideoPlan {
   id: string;

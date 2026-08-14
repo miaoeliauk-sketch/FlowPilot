@@ -189,6 +189,70 @@ test("字段不完整的成片方案会触发数据保护，不会带病进入�
   );
 });
 
+test("成片原文结束段早于开始段时会触发数据保护", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+    ...createEmptyLiveClipState(),
+    completeVideoPlans: [{
+      id: "broken-range", liveTranscriptId: "live-1", coreCandidateId: "candidate-1",
+      title: "损坏方案", recommendReason: "测试", editingNotes: [], sourceDurationSeconds: 20,
+      durationBasis: "text-estimate", createdAt: "2026-08-14T00:00:00.000Z",
+      sections: [{
+        role: "opening", sourceType: "supplemental", candidateId: null,
+        startTime: null, endTime: null, startParagraph: null, endParagraph: null,
+        rawText: null, cleanedText: null, supplementalKind: "problem_hook",
+        supplementalSuggestion: "补录一句直接提出本条视频要解决的问题，不增加新的事实。", transitionNote: "开头",
+      }, {
+        role: "body", sourceType: "transcript", candidateId: "candidate-1",
+        startTime: null, endTime: null, startParagraph: 3, endParagraph: 2,
+        rawText: "原文", cleanedText: "原文", supplementalKind: null,
+        supplementalSuggestion: null, transitionNote: "主体",
+      }, {
+        role: "ending", sourceType: "supplemental", candidateId: null,
+        startTime: null, endTime: null, startParagraph: null, endParagraph: null,
+        rawText: null, cleanedText: null, supplementalKind: "summary_closure",
+        supplementalSuggestion: "补录一句重新概括主体已经表达的核心观点，不增加新的事实或承诺。", transitionNote: "结尾",
+      }],
+    }],
+  }));
+  assert.throws(
+    () => loadLiveClipState(storage),
+    (error: unknown) => error instanceof LiveClipStorageError && error.code === "CORRUPTED",
+  );
+});
+
+test("成片补录类型与开头结尾不匹配时会触发数据保护", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+    ...createEmptyLiveClipState(),
+    completeVideoPlans: [{
+      id: "broken-supplement", liveTranscriptId: "live-1", coreCandidateId: "candidate-1",
+      title: "损坏方案", recommendReason: "测试", editingNotes: [], sourceDurationSeconds: 20,
+      durationBasis: "text-estimate", createdAt: "2026-08-14T00:00:00.000Z",
+      sections: [{
+        role: "opening", sourceType: "supplemental", candidateId: null,
+        startTime: null, endTime: null, startParagraph: null, endParagraph: null,
+        rawText: null, cleanedText: null, supplementalKind: "summary_closure",
+        supplementalSuggestion: "补录一句重新概括主体已经表达的核心观点，不增加新的事实或承诺。", transitionNote: "开头",
+      }, {
+        role: "body", sourceType: "transcript", candidateId: "candidate-1",
+        startTime: null, endTime: null, startParagraph: 1, endParagraph: 2,
+        rawText: "原文", cleanedText: "原文", supplementalKind: null,
+        supplementalSuggestion: null, transitionNote: "主体",
+      }, {
+        role: "ending", sourceType: "supplemental", candidateId: null,
+        startTime: null, endTime: null, startParagraph: null, endParagraph: null,
+        rawText: null, cleanedText: null, supplementalKind: "action_closure",
+        supplementalSuggestion: "补录一句邀请观众根据本条内容采取下一步行动，不增加产品、价格或效果承诺。", transitionNote: "结尾",
+      }],
+    }],
+  }));
+  assert.throws(
+    () => loadLiveClipState(storage),
+    (error: unknown) => error instanceof LiveClipStorageError && error.code === "CORRUPTED",
+  );
+});
+
 test("只有用户勾选的候选会生成正式ClipPlan，重复生成不会重复追加", () => {
   const state = {
     ...createEmptyLiveClipState(),

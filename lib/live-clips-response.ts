@@ -1,5 +1,12 @@
 import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
+  contractArray,
+  contractEnum,
+  contractObject,
+  contractString,
+  strictJsonObject,
+} from "./live-clips-json-contract";
+import {
   LIVE_CLIP_STRUCTURE_ROLES,
   type ClipCandidate,
   type ClipDimensions,
@@ -66,32 +73,19 @@ function schemaFail(
 }
 
 function strictJSON(content: string): unknown {
-  const trimmed = content.trim();
-  if (!trimmed || trimmed.startsWith("```") || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    throw new LiveClipResponseError("JSON_PARSE_FAIL", "AI返回内容不是纯JSON对象");
-  }
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    throw new LiveClipResponseError("JSON_PARSE_FAIL", "AI返回内容不是有效JSON");
-  }
+  return strictJsonObject(content, message => { throw new LiveClipResponseError("JSON_PARSE_FAIL", message); });
 }
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) schemaFail(`${label}必须是对象`);
-  return value as Record<string, unknown>;
+  return contractObject(value, label, message => schemaFail(message));
 }
 
 function arrayValue(value: unknown, label: string): unknown[] {
-  if (!Array.isArray(value)) schemaFail(`${label}必须是数组`);
-  return value;
+  return contractArray(value, label, message => schemaFail(message));
 }
 
 function stringValue(value: unknown, label: string, maxLength = 2000): string {
-  if (typeof value !== "string" || !value.trim() || value.length > maxLength) {
-    schemaFail(`${label}必须是非空字符串`);
-  }
-  return value.trim();
+  return contractString(value, label, maxLength, message => schemaFail(message));
 }
 
 function integerValue(value: unknown, label: string): number {
@@ -108,8 +102,7 @@ function stringArray(value: unknown, label: string, options: { min?: number; max
 }
 
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
-  if (typeof value !== "string" || !allowed.includes(value as T)) schemaFail(`${label}不在允许范围内`);
-  return value as T;
+  return contractEnum(value, allowed, label, message => schemaFail(message));
 }
 
 function parseRemoval(

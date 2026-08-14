@@ -134,18 +134,20 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
           sections: [{
             role: "opening", sourceType: "supplemental", candidateId: null,
             startTime: null, endTime: null, startParagraph: null, endParagraph: null,
-            rawText: null, cleanedText: null, supplementalSuggestion: "补录一句提出用户常见误区。",
+            rawText: null, cleanedText: null, supplementalKind: "problem_hook",
+            supplementalSuggestion: "补录一句直接提出本条视频要解决的问题，不增加新的事实。",
             transitionNote: "补录后直接进入直播原片。",
           }, {
             role: "body", sourceType: "transcript", candidateId: "candidate-1",
             startTime: "00:01:08", endTime: "00:01:38", startParagraph: 2, endParagraph: 4,
             rawText: "知识付费最大的误区，就是天天证明自己懂得多。",
             cleanedText: "知识付费最大的误区，证明自己懂得多。",
-            supplementalSuggestion: null, transitionNote: "保留完整论证。",
+            supplementalKind: null, supplementalSuggestion: null, transitionNote: "保留完整论证。",
           }, {
             role: "ending", sourceType: "supplemental", candidateId: null,
             startTime: null, endTime: null, startParagraph: null, endParagraph: null,
-            rawText: null, cleanedText: null, supplementalSuggestion: "补录一句自然收束，不增加新的承诺。",
+            rawText: null, cleanedText: null, supplementalKind: "summary_closure",
+            supplementalSuggestion: "补录一句重新概括主体已经表达的核心观点，不增加新的事实或承诺。",
             transitionNote: "单独补录并标明。",
           }],
           editingNotes: ["补录段落与原片使用直接跳切"], sourceDurationSeconds: 30,
