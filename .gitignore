@@ -1,2 +1,15 @@
 # 本地业务数据，可能包含个人信息，禁止进入版本控制
 data/
+
+# 本机环境变量，可能包含第三方密钥，禁止进入版本控制
+.env.local
+
+# Next.js开发服务缓存（与生产构建目录分开）
+.next-dev/
+
+# 本地构建、依赖和系统缓存
+.next/
+node_modules/
+.DS_Store
+dev.log
+tsconfig.tsbuildinfo
