@@ -1,7 +1,8 @@
 import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_STORAGE_KEY,
-  LIVE_CLIP_STRUCTURE_ROLES,
+  LIVE_CLIP_TYPES,
+  isClipStructureRole,
   isLiveClipFailureReason,
   type ClipCandidate,
   type ClipPlan,
@@ -9,6 +10,7 @@ import {
   type PurposeEvidence,
   type LiveClipFailureReason,
   type ClipStructureRole,
+  type ClipType,
 } from "./live-clips-types";
 
 export type LiveClipStorageErrorCode = "WRITE_FAILED" | "VERIFY_FAILED" | "CORRUPTED";
@@ -65,9 +67,16 @@ function legacyFailureReason(value: unknown): LiveClipFailureReason | null {
 }
 
 function legacyStructureRole(value: unknown): ClipStructureRole | null {
-  return typeof value === "string" && LIVE_CLIP_STRUCTURE_ROLES.includes(value as ClipStructureRole)
-    ? value as ClipStructureRole
-    : null;
+  return isClipStructureRole(value) ? value : null;
+}
+
+function legacyClipType(value: unknown): ClipType | null {
+  return typeof value === "string" && LIVE_CLIP_TYPES.includes(value as ClipType) ? value as ClipType : null;
+}
+
+function legacyClipTypes(value: unknown): ClipType[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.filter((item): item is ClipType => legacyClipType(item) !== null))).slice(0, 2);
 }
 
 function legacyPurposeEvidence(value: unknown): PurposeEvidence | null {
@@ -88,12 +97,14 @@ function migratePurposePair(purposeValue: unknown, evidenceValue: unknown) {
   return purpose && evidence ? { purpose, evidence } : { purpose: null, evidence: null };
 }
 
-function migrateCandidatePurpose(candidate: ClipCandidate): ClipCandidate {
+function migrateCandidate(candidate: ClipCandidate): ClipCandidate {
   const primary = migratePurposePair(candidate.primaryPurpose, candidate.primaryPurposeEvidence);
   const secondary = migratePurposePair(candidate.secondaryPurpose, candidate.secondaryPurposeEvidence);
   return {
     ...candidate,
     structureRole: legacyStructureRole(candidate.structureRole),
+    clipType: legacyClipType(candidate.clipType),
+    secondaryTags: legacyClipTypes(candidate.secondaryTags),
     primaryPurpose: primary.purpose,
     primaryPurposeEvidence: primary.evidence,
     secondaryPurpose: secondary.purpose,
@@ -101,12 +112,13 @@ function migrateCandidatePurpose(candidate: ClipCandidate): ClipCandidate {
   };
 }
 
-function migratePlanPurpose(plan: ClipPlan): ClipPlan {
+function migratePlan(plan: ClipPlan): ClipPlan {
   const primary = migratePurposePair(plan.primaryPurpose, plan.primaryPurposeEvidence);
   const secondary = migratePurposePair(plan.secondaryPurpose, plan.secondaryPurposeEvidence);
   return {
     ...plan,
     structureRole: legacyStructureRole(plan.structureRole),
+    clipType: legacyClipType(plan.clipType),
     primaryPurpose: primary.purpose,
     primaryPurposeEvidence: primary.evidence,
     secondaryPurpose: secondary.purpose,
@@ -131,8 +143,8 @@ export function loadLiveClipState(storage: LiveClipStorageLike | null = defaultS
         ...topic,
         candidateErrorReason: legacyFailureReason(topic.candidateErrorReason),
       })),
-      clipCandidates: parsed.clipCandidates.map(migrateCandidatePurpose),
-      clipPlans: parsed.clipPlans.map(migratePlanPurpose),
+      clipCandidates: parsed.clipCandidates.map(migrateCandidate),
+      clipPlans: parsed.clipPlans.map(migratePlan),
     };
   } catch {
     throw new LiveClipStorageError("CORRUPTED", "直播切片本地数据损坏，已停止读取以保护原始数据。");

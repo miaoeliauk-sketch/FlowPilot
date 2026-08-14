@@ -1,12 +1,10 @@
 import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
-  LIVE_CLIP_TYPES,
   LIVE_CLIP_STRUCTURE_ROLES,
   type ClipCandidate,
   type ClipDimensions,
   type ClipRating,
   type ClipRecommendation,
-  type ClipType,
   type ClipStructureRole,
   type LiveClipFailureReason,
   type PurposeEvidence,
@@ -317,9 +315,6 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
       LIVE_CLIP_STRUCTURE_ROLES,
       `candidates[${index}].structureRole`,
     ) as ClipStructureRole;
-    const clipType = enumValue(object.clipType, LIVE_CLIP_TYPES, `candidates[${index}].clipType`);
-    const secondaryTags = stringArray(object.secondaryTags, `candidates[${index}].secondaryTags`, { max: 2 })
-      .map((tag, tagIndex) => enumValue(tag, LIVE_CLIP_TYPES, `candidates[${index}].secondaryTags[${tagIndex}]`));
     const primaryPurpose = enumValue(
       object.primaryPurpose,
       CONTENT_PURPOSES,
@@ -355,8 +350,8 @@ export function parseCandidateAnalysisResponse(content: string, context: Candida
       topicBlockId: context.topic.id,
       topic: stringValue(object.topic, `candidates[${index}].topic`, 160),
       structureRole,
-      clipType,
-      secondaryTags: Array.from(new Set(secondaryTags)).filter(tag => tag !== clipType).slice(0, 2) as ClipType[],
+      clipType: null,
+      secondaryTags: [],
       recommendation: enumValue(object.recommendation, RECOMMENDATIONS, `candidates[${index}].recommendation`),
       dimensions: parseDimensions(object.dimensions, `candidates[${index}].dimensions`),
       recommendReason: stringValue(object.recommendReason, `candidates[${index}].recommendReason`, 800),

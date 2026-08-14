@@ -190,6 +190,8 @@ test("候选提示词要求唯一结构角色并按成片价值解决分类冲�
     assert.ok(promptText.includes("有明确产品价值、购买理由、异议处理或行动引导"));
     assert.ok(promptText.includes("不要为了凑齐四类而生成不值得剪的候选"));
     assert.ok(promptText.includes('"structureRole": "opening|golden_quote|marketing|ending"'));
+    assert.equal(promptText.includes('"clipType"'), false);
+    assert.equal(promptText.includes('"secondaryTags"'), false);
     assert.ok(promptText.includes("primaryPurposeEvidence"));
     assert.ok(promptText.includes("标题和封面不得出现具体直播日期、钟点或活动地址"));
   } finally {

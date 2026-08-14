@@ -22,6 +22,10 @@ export const CLIP_STRUCTURE_ROLE_LABELS: Record<ClipStructureRole, string> = {
   marketing: "营销",
   ending: "结尾",
 };
+
+export function isClipStructureRole(value: unknown): value is ClipStructureRole {
+  return typeof value === "string" && LIVE_CLIP_STRUCTURE_ROLES.includes(value as ClipStructureRole);
+}
 export type ClipRating = "强" | "中" | "弱";
 export type ClipRecommendation = "强烈建议切" | "可以考虑" | "不建议";
 export type LivePlatform = "抖音" | "视频号" | "小红书" | "B站";
@@ -165,7 +169,7 @@ export interface ClipCandidate {
   topicBlockId: string;
   topic: string;
   structureRole: ClipStructureRole | null;
-  clipType: ClipType;
+  clipType: ClipType | null;
   secondaryTags: ClipType[];
   recommendation: ClipRecommendation;
   dimensions: ClipDimensions;
@@ -198,7 +202,7 @@ export interface ClipPlan {
   ipId: string;
   topic: string;
   structureRole: ClipStructureRole | null;
-  clipType: ClipType;
+  clipType: ClipType | null;
   recommendation: ClipRecommendation;
   primaryPurpose: ContentPurpose | null;
   primaryPurposeEvidence: PurposeEvidence | null;

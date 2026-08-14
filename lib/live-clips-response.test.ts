@@ -110,8 +110,6 @@ test("候选的原始稿和清洗稿全部由原文位置及删除片段生成",
     candidates: [{
       topic: "为什么知识付费不能只证明懂得多",
       structureRole: "opening",
-      clipType: "counterintuitive",
-      secondaryTags: ["opinion"],
       recommendation: "强烈建议切",
       dimensions: {
         completeness: "强",
@@ -145,6 +143,8 @@ test("候选的原始稿和清洗稿全部由原文位置及删除片段生成",
 
   const candidate = result.candidates[0];
   assert.equal(candidate.structureRole, "opening");
+  assert.equal(candidate.clipType, null);
+  assert.deepEqual(candidate.secondaryTags, []);
   assert.equal(candidate.startTime, "00:01:08");
   assert.equal(candidate.endTime, "00:01:38");
   assert.ok(candidate.rawClipText.startsWith("知识付费最大的误区"));
@@ -285,7 +285,7 @@ test("候选必须有一个主要目的及证据，辅助目的最多一个且�
   }
 });
 
-test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝", () => {
+test("候选伪造开始句、时间字段或结构角色时按SCHEMA_FAIL拒绝", () => {
   const { parsed } = topicFixture();
   const topic = {
     id: "topic-1", liveTranscriptId: "live-1", title: "主题", summary: "摘要",
@@ -305,7 +305,6 @@ test("候选伪造开始句、时间字段或错误枚举时按SCHEMA_FAIL拒绝
   for (const candidate of [
     base,
     { ...base, startQuote: "知识付费最大的误区", startTime: "00:01:08" },
-    { ...base, startQuote: "知识付费最大的误区", clipType: "tutorial" },
     { ...base, startQuote: "知识付费最大的误区", structureRole: "story" },
   ]) {
     assert.throws(
@@ -345,7 +344,6 @@ test("候选原话追溯失败时返回稳定细分原因码", () => {
     [{ ...base, startQuote: "最大的误区", removeSuggestions: [{ paragraphNumber: 2, quote: "知识付费", reason: "冗余" }] }, "REMOVAL_QUOTE_NOT_FOUND"],
     [{ ...base, primaryPurposeEvidence: { paragraphNumber: 3, quote: "AI编造的目的证据" } }, "PURPOSE_EVIDENCE_NOT_FOUND"],
     [{ ...base, primaryPurposeEvidence: { paragraphNumber: 1, quote: "开场" } }, "PURPOSE_EVIDENCE_NOT_FOUND"],
-    [{ ...base, clipType: "tutorial" }, "FIELD_INVALID"],
   ] as const;
 
   for (const [candidate, reasonCode] of cases) {

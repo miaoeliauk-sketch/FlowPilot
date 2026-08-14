@@ -8,7 +8,7 @@ import {
   parseTranscriptParagraphs,
 } from "@/lib/live-clips-route";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
-import { LIVE_CLIP_STRUCTURE_ROLES, type ClipStructureRole, type TopicBlock } from "@/lib/live-clips-types";
+import { isClipStructureRole, type ClipStructureRole, type TopicBlock } from "@/lib/live-clips-types";
 
 const SYSTEM_PROMPT = `你是直播短视频切片策划。你只负责发现直播里已经存在、能连续剪出的短视频候选，不是直播总结器，也不改写主播的切片正文。
 
@@ -29,7 +29,7 @@ function prompt(input: {
   paragraphsText: string;
   platform: string;
   targetDuration: string;
-  preferredStructureRoles: string[];
+  preferredStructureRoles: ClipStructureRole[];
   ipContext: Record<string, unknown> | null;
 }) {
   const ip = input.ipContext
@@ -56,8 +56,6 @@ ${input.paragraphsText}
     {
       "topic": "切片主题",
       "structureRole": "opening|golden_quote|marketing|ending",
-      "clipType": "opinion|method|counterintuitive|case|qa|story",
-      "secondaryTags": ["opinion"],
       "recommendation": "强烈建议切|可以考虑|不建议",
       "dimensions": {
         "completeness": "强|中|弱",
@@ -124,9 +122,7 @@ export async function POST(request: NextRequest) {
       ? record.ipContext as Record<string, unknown>
       : null;
     const preferredStructureRoles = Array.isArray(record.preferredStructureRoles)
-      ? record.preferredStructureRoles.filter((value): value is ClipStructureRole => (
-        typeof value === "string" && LIVE_CLIP_STRUCTURE_ROLES.includes(value as ClipStructureRole)
-      ))
+      ? record.preferredStructureRoles.filter(isClipStructureRole)
       : [];
 
     const result = await callStructuredDeepSeek({

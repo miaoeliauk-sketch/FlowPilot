@@ -78,11 +78,26 @@ test("旧版候选缺少内容目的字段时仍可读取并安全补为空值",
   assert.equal(restored.clipCandidates[0].primaryPurposeEvidence, null);
   assert.equal(restored.clipCandidates[0].secondaryPurpose, null);
   assert.equal(restored.clipCandidates[0].structureRole, null);
+  assert.equal(restored.clipCandidates[0].clipType, "opinion");
   assert.equal(restored.clipCandidates[1].primaryPurpose, null);
   assert.equal(restored.clipCandidates[1].primaryPurposeEvidence, null);
   assert.equal(restored.clipPlans[0].primaryPurpose, null);
   assert.equal(restored.clipPlans[0].secondaryPurposeEvidence, null);
   assert.equal(restored.clipPlans[0].structureRole, null);
+  assert.equal(restored.clipPlans[0].clipType, "opinion");
+});
+
+test("历史记录里的非法旧分类会安全降级为空，不影响四类结构角色", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+    ...createEmptyLiveClipState(),
+    clipCandidates: [{ ...candidate, clipType: "unknown", secondaryTags: ["unknown", "opinion"] }],
+  }));
+
+  const restored = loadLiveClipState(storage);
+  assert.equal(restored.clipCandidates[0].structureRole, "golden_quote");
+  assert.equal(restored.clipCandidates[0].clipType, null);
+  assert.deepEqual(restored.clipCandidates[0].secondaryTags, ["opinion"]);
 });
 
 test("旧版分块和主题缺少细分原因时补为null，已保存原因刷新后保留", () => {
