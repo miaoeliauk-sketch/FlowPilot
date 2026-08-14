@@ -2,9 +2,11 @@ import { CONTENT_PURPOSES, type ContentPurpose } from "./content-purpose";
 import {
   LIVE_CLIP_STORAGE_KEY,
   LIVE_CLIP_TYPES,
+  COMPLETE_VIDEO_SECTION_ROLES,
   isClipStructureRole,
   isLiveClipFailureReason,
   type ClipCandidate,
+  type CompleteVideoPlan,
   type ClipPlan,
   type LiveClipWorkspaceState,
   type PurposeEvidence,
@@ -41,6 +43,7 @@ export function createEmptyLiveClipState(): LiveClipWorkspaceState {
     topicBlocks: [],
     clipCandidates: [],
     clipPlans: [],
+    completeVideoPlans: [],
   };
 }
 
@@ -53,7 +56,76 @@ function isWorkspaceState(value: unknown): value is LiveClipWorkspaceState {
     && Array.isArray(record.transcriptChunks)
     && Array.isArray(record.topicBlocks)
     && Array.isArray(record.clipCandidates)
-    && Array.isArray(record.clipPlans);
+    && Array.isArray(record.clipPlans)
+    && (record.completeVideoPlans === undefined || (
+      Array.isArray(record.completeVideoPlans) && record.completeVideoPlans.every(isCompleteVideoPlan)
+    ));
+}
+
+function isNullableString(value: unknown) {
+  return value === null || typeof value === "string";
+}
+
+function isNullablePositiveInteger(value: unknown) {
+  return value === null || (typeof value === "number" && Number.isInteger(value) && value > 0);
+}
+
+function isCompleteVideoPlanSection(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const section = value as Record<string, unknown>;
+  if (
+    typeof section.role !== "string"
+    || !COMPLETE_VIDEO_SECTION_ROLES.includes(section.role as typeof COMPLETE_VIDEO_SECTION_ROLES[number])
+    || (section.sourceType !== "transcript" && section.sourceType !== "supplemental")
+    || typeof section.transitionNote !== "string"
+    || !isNullableString(section.startTime)
+    || !isNullableString(section.endTime)
+  ) return false;
+  if (section.sourceType === "supplemental") {
+    return (section.role === "opening" || section.role === "ending")
+      && section.candidateId === null
+      && section.startParagraph === null
+      && section.endParagraph === null
+      && section.rawText === null
+      && section.cleanedText === null
+      && typeof section.supplementalSuggestion === "string";
+  }
+  return typeof section.candidateId === "string"
+    && isNullablePositiveInteger(section.startParagraph) && section.startParagraph !== null
+    && isNullablePositiveInteger(section.endParagraph) && section.endParagraph !== null
+    && typeof section.rawText === "string"
+    && typeof section.cleanedText === "string"
+    && section.supplementalSuggestion === null;
+}
+
+function isCompleteVideoPlan(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const plan = value as Record<string, unknown>;
+  if (
+    typeof plan.id !== "string"
+    || typeof plan.liveTranscriptId !== "string"
+    || typeof plan.coreCandidateId !== "string"
+    || typeof plan.title !== "string"
+    || typeof plan.recommendReason !== "string"
+    || typeof plan.createdAt !== "string"
+    || typeof plan.sourceDurationSeconds !== "number"
+    || !Number.isFinite(plan.sourceDurationSeconds)
+    || plan.sourceDurationSeconds < 0
+    || (plan.durationBasis !== "actual" && plan.durationBasis !== "text-estimate")
+    || !Array.isArray(plan.editingNotes)
+    || !plan.editingNotes.every(note => typeof note === "string")
+    || !Array.isArray(plan.sections)
+    || plan.sections.length < 3
+    || plan.sections.length > 5
+    || !plan.sections.every(isCompleteVideoPlanSection)
+  ) return false;
+  const roles = plan.sections.map(section => (section as Record<string, unknown>).role as string);
+  const ranks = roles.map(role => COMPLETE_VIDEO_SECTION_ROLES.indexOf(role as typeof COMPLETE_VIDEO_SECTION_ROLES[number]));
+  return new Set(roles).size === roles.length
+    && roles.includes("opening")
+    && roles.includes("body")
+    && roles.includes("ending")
+    && ranks.every((rank, index) => index === 0 || rank > ranks[index - 1]);
 }
 
 function legacyPurpose(value: unknown): ContentPurpose | null {
@@ -145,10 +217,31 @@ export function loadLiveClipState(storage: LiveClipStorageLike | null = defaultS
       })),
       clipCandidates: parsed.clipCandidates.map(migrateCandidate),
       clipPlans: parsed.clipPlans.map(migratePlan),
+      completeVideoPlans: parsed.completeVideoPlans ?? [],
     };
   } catch {
     throw new LiveClipStorageError("CORRUPTED", "直播切片本地数据损坏，已停止读取以保护原始数据。");
   }
+}
+
+export function replaceCompleteVideoPlans(
+  state: LiveClipWorkspaceState,
+  liveTranscriptId: string,
+  coreCandidateId: string,
+  plans: CompleteVideoPlan[],
+): LiveClipWorkspaceState {
+  if (plans.some(plan => plan.liveTranscriptId !== liveTranscriptId || plan.coreCandidateId !== coreCandidateId)) {
+    throw new LiveClipStorageError("CORRUPTED", "完整成片方案归属不匹配，已停止保存。");
+  }
+  return {
+    ...state,
+    completeVideoPlans: [
+      ...state.completeVideoPlans.filter(plan => (
+        plan.liveTranscriptId !== liveTranscriptId || plan.coreCandidateId !== coreCandidateId
+      )),
+      ...plans,
+    ],
+  };
 }
 
 export function saveLiveClipState(

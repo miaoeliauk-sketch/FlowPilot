@@ -5,6 +5,7 @@ import {
   createClipPlans,
   createEmptyLiveClipState,
   loadLiveClipState,
+  replaceCompleteVideoPlans,
   saveLiveClipState,
 } from "./live-clips-store";
 import { LIVE_CLIP_STORAGE_KEY, type ClipCandidate, type LiveTranscript } from "./live-clips-types";
@@ -49,6 +50,30 @@ test("原始逐字稿状态写入后立即回读校验，并能完整恢复", ()
 
   assert.ok(storage.getItem(LIVE_CLIP_STORAGE_KEY)?.includes("原始逐字稿"));
   assert.deepEqual(loadLiveClipState(storage), state);
+});
+
+test("旧工作区刷新后安全补齐完整成片方案列表", () => {
+  const storage = new MemoryStorage();
+  const legacyState = { ...createEmptyLiveClipState() } as Record<string, unknown>;
+  delete legacyState.completeVideoPlans;
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify(legacyState));
+
+  assert.deepEqual(loadLiveClipState(storage).completeVideoPlans, []);
+});
+
+test("重新生成只替换当前核心候选的完整成片方案", () => {
+  const basePlan = {
+    id: "complete-1", liveTranscriptId: "live-1", coreCandidateId: "candidate-1",
+    title: "方案一", recommendReason: "理由", sections: [], editingNotes: [],
+    sourceDurationSeconds: 30, durationBasis: "text-estimate" as const, createdAt: "2026-08-14T00:00:00.000Z",
+  };
+  const otherPlan = { ...basePlan, id: "complete-other", coreCandidateId: "candidate-2" };
+  const state = { ...createEmptyLiveClipState(), completeVideoPlans: [basePlan, otherPlan] };
+  const replacement = { ...basePlan, id: "complete-new", title: "新方案" };
+
+  const next = replaceCompleteVideoPlans(state, "live-1", "candidate-1", [replacement]);
+
+  assert.deepEqual(next.completeVideoPlans.map(plan => plan.id), ["complete-other", "complete-new"]);
 });
 
 test("旧版候选缺少内容目的字段时仍可读取并安全补为空值", () => {
@@ -146,6 +171,18 @@ test("浏览器拒绝写入时抛出明确错误，不伪装成保存成功", ()
 test("损坏的本地直播切片数据会停止读取，不用空数据覆盖", () => {
   const storage = new MemoryStorage();
   storage.setItem(LIVE_CLIP_STORAGE_KEY, "{broken");
+  assert.throws(
+    () => loadLiveClipState(storage),
+    (error: unknown) => error instanceof LiveClipStorageError && error.code === "CORRUPTED",
+  );
+});
+
+test("字段不完整的成片方案会触发数据保护，不会带病进入页面", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(LIVE_CLIP_STORAGE_KEY, JSON.stringify({
+    ...createEmptyLiveClipState(),
+    completeVideoPlans: [{ liveTranscriptId: "live-1", coreCandidateId: "candidate-1" }],
+  }));
   assert.throws(
     () => loadLiveClipState(storage),
     (error: unknown) => error instanceof LiveClipStorageError && error.code === "CORRUPTED",

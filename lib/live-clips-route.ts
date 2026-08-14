@@ -94,7 +94,11 @@ export function liveClipErrorResponse(
     : error instanceof StructuredDeepSeekError
       ? lastReasonCode(error)
       : causeCode === "SCHEMA_FAIL" ? "FIELD_INVALID" : null;
-  const stageLabel = stageCode === "TOPIC_ANALYSIS_FAIL" ? "主题识别" : "切片识别";
+  const stageLabel = stageCode === "TOPIC_ANALYSIS_FAIL"
+    ? "主题识别"
+    : stageCode === "COMPLETE_PLAN_ANALYSIS_FAIL"
+      ? "完整成片方案生成"
+      : "切片识别";
   const causeLabel: Record<LiveClipFailureCause, string> = {
     EMPTY_CONTENT: "AI返回为空",
     JSON_PARSE_FAIL: "AI返回的JSON格式异常",

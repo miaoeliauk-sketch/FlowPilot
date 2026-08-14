@@ -7,6 +7,7 @@ import {
   createEmptyLiveClipState,
   LiveClipStorageError,
   loadLiveClipState,
+  replaceCompleteVideoPlans,
   saveLiveClipState,
 } from "@/lib/live-clips-store";
 import { dedupeClipCandidates } from "@/lib/live-clips-response";
@@ -22,6 +23,7 @@ import {
   LIVE_CLIP_STRUCTURE_ROLES,
   isLiveClipFailureReason,
   type ClipCandidate,
+  type CompleteVideoPlan,
   type ClipRecommendation,
   type ClipStructureRole,
   type LiveClipApiError,
@@ -37,6 +39,7 @@ import {
   type TranscriptSourceType,
 } from "@/lib/live-clips-types";
 import ClipCandidateCard from "@/components/live-clips/ClipCandidateCard";
+import CompleteVideoPlanCard from "@/components/live-clips/CompleteVideoPlanCard";
 import { formatLiveClipPosition } from "@/lib/live-clips-display";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -105,7 +108,11 @@ function apiFailure(data: unknown, fallback: LiveClipFailureCause): LiveClipApiE
     const record = data as Record<string, unknown>;
     return {
       error: typeof record.error === "string" ? record.error : "AI分析失败",
-      stageCode: record.stageCode === "CLIP_ANALYSIS_FAIL" ? "CLIP_ANALYSIS_FAIL" : "TOPIC_ANALYSIS_FAIL",
+      stageCode: record.stageCode === "CLIP_ANALYSIS_FAIL"
+        ? "CLIP_ANALYSIS_FAIL"
+        : record.stageCode === "COMPLETE_PLAN_ANALYSIS_FAIL"
+          ? "COMPLETE_PLAN_ANALYSIS_FAIL"
+          : "TOPIC_ANALYSIS_FAIL",
       causeCode: typeof record.causeCode === "string" ? record.causeCode as LiveClipFailureCause : fallback,
       reasonCode: isLiveClipFailureReason(record.reasonCode) ? record.reasonCode : null,
     };
@@ -162,6 +169,7 @@ export default function LiveClipsPage() {
   const [roleFilter, setRoleFilter] = useState<"全部" | ClipStructureRole>("全部");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [planFeedback, setPlanFeedback] = useState<string | null>(null);
+  const [generatingCompletePlanFor, setGeneratingCompletePlanFor] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -214,6 +222,9 @@ export default function LiveClipsPage() {
     : [];
   const currentPlans = currentTranscript
     ? workspace.clipPlans.filter(plan => plan.liveTranscriptId === currentTranscript.id)
+    : [];
+  const currentCompletePlans = currentTranscript
+    ? workspace.completeVideoPlans.filter(plan => plan.liveTranscriptId === currentTranscript.id)
     : [];
 
   async function handleFile(file: File | undefined) {
@@ -478,6 +489,51 @@ export default function LiveClipsPage() {
     }
   }
 
+  async function generateCompletePlan(candidate: ClipCandidate) {
+    if (!currentTranscript || generatingCompletePlanFor || storageBlocked) return;
+    setGeneratingCompletePlanFor(candidate.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await apiFetch("/api/live-clips/complete-plans", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          liveTranscriptId: currentTranscript.id,
+          coreCandidateId: candidate.id,
+          candidates: currentCandidates.map(item => ({
+            id: item.id,
+            liveTranscriptId: item.liveTranscriptId,
+            topic: item.topic,
+            corePoint: item.corePoint,
+            structureRole: item.structureRole,
+            recommendation: item.recommendation,
+            startParagraph: item.startParagraph,
+            endParagraph: item.endParagraph,
+            removeSuggestions: item.removeSuggestions,
+          })),
+          paragraphs: currentTranscript.paragraphs,
+          platform: currentTranscript.platform,
+          targetDuration: currentTranscript.targetDuration,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw apiFailure(data, "AI_REQUEST_FAIL");
+      const plans = (data as { plans?: CompleteVideoPlan[] }).plans;
+      if (!Array.isArray(plans) || plans.length === 0) throw new Error("AI没有返回可用的完整成片方案");
+      const next = replaceCompleteVideoPlans(workspaceRef.current, currentTranscript.id, candidate.id, plans);
+      if (!commit(next)) return;
+      setNotice(`已为“${candidate.topic}”生成${plans.length}套完整成片方案`);
+    } catch (failure) {
+      const message = failure && typeof failure === "object" && "error" in failure && typeof failure.error === "string"
+        ? failure.error
+        : failure instanceof Error ? failure.message : "完整成片方案生成失败";
+      setError(message);
+    } finally {
+      setGeneratingCompletePlanFor(null);
+    }
+  }
+
   const visibleCandidates = useMemo(() => currentCandidates.filter(candidate => (
     (recommendationFilter === "全部" || candidate.recommendation === recommendationFilter)
     && (roleFilter === "全部" || candidate.structureRole === roleFilter)
@@ -639,8 +695,28 @@ export default function LiveClipsPage() {
           {visibleCandidates.length === 0 ? (
             <Card className="py-12 text-center text-[13px] text-[#999]">当前筛选条件下没有切片候选。</Card>
           ) : visibleCandidates.map(candidate => (
-            <ClipCandidateCard key={candidate.id} candidate={candidate} selected={selectedIds.has(candidate.id)} onToggle={() => toggleSelected(candidate.id)} onCopy={copyText} />
+            <ClipCandidateCard
+              key={candidate.id}
+              candidate={candidate}
+              selected={selectedIds.has(candidate.id)}
+              onToggle={() => toggleSelected(candidate.id)}
+              onCopy={copyText}
+              onGenerateCompletePlan={() => void generateCompletePlan(candidate)}
+              generatingCompletePlan={generatingCompletePlanFor === candidate.id}
+            />
           ))}
+
+          {currentCompletePlans.length > 0 && (
+            <section aria-label="完整成片方案" className="rounded-[16px] border border-[#C9DDAE] bg-white p-5 shadow-sm">
+              <div>
+                <h2 className="text-[15px] font-bold text-[#1C1C1B]">完整成片方案（{currentCompletePlans.length}）</h2>
+                <p className="mt-1 text-[11.5px] text-[#888]">原片内容全部可追溯；补录建议会单独标记，不会混入主播原话。</p>
+              </div>
+              <div className="mt-4 flex flex-col gap-3">
+                {currentCompletePlans.map(plan => <CompleteVideoPlanCard key={plan.id} plan={plan} onCopy={copyText} />)}
+              </div>
+            </section>
+          )}
 
           {currentPlans.length > 0 && (
             <section aria-label="正式切片方案" className="rounded-[16px] border border-[#DAD9D4] bg-white p-5 shadow-sm">

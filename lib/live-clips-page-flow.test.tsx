@@ -126,6 +126,32 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
           coverSuggestions: ["别再证明你懂得多", "用户买的是解决问题"], createdAt: "2026-08-11T00:00:00.000Z",
         }] });
       }
+      if (url.includes("/api/live-clips/complete-plans")) {
+        return Response.json({ plans: [{
+          id: "complete-plan-1", liveTranscriptId: requestBody.liveTranscriptId,
+          coreCandidateId: requestBody.coreCandidateId, title: "知识付费完整成片",
+          recommendReason: "围绕同一个误区补齐开头和结尾。",
+          sections: [{
+            role: "opening", sourceType: "supplemental", candidateId: null,
+            startTime: null, endTime: null, startParagraph: null, endParagraph: null,
+            rawText: null, cleanedText: null, supplementalSuggestion: "补录一句提出用户常见误区。",
+            transitionNote: "补录后直接进入直播原片。",
+          }, {
+            role: "body", sourceType: "transcript", candidateId: "candidate-1",
+            startTime: "00:01:08", endTime: "00:01:38", startParagraph: 2, endParagraph: 4,
+            rawText: "知识付费最大的误区，就是天天证明自己懂得多。",
+            cleanedText: "知识付费最大的误区，证明自己懂得多。",
+            supplementalSuggestion: null, transitionNote: "保留完整论证。",
+          }, {
+            role: "ending", sourceType: "supplemental", candidateId: null,
+            startTime: null, endTime: null, startParagraph: null, endParagraph: null,
+            rawText: null, cleanedText: null, supplementalSuggestion: "补录一句自然收束，不增加新的承诺。",
+            transitionNote: "单独补录并标明。",
+          }],
+          editingNotes: ["补录段落与原片使用直接跳切"], sourceDurationSeconds: 30,
+          durationBasis: "text-estimate", createdAt: "2026-08-14T00:00:00.000Z",
+        }] });
+      }
       throw new Error(`unexpected request: ${url}`);
     };
 
@@ -157,6 +183,13 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     assert.ok(view.getByText("辅助：流量增长"));
     assert.ok(view.getByText(/信任建立：第4段/));
     assert.ok(view.getByText("00:01:08 → 00:01:38"));
+    fireEvent.click(view.getByRole("button", { name: "生成完整成片方案：为什么知识付费不能只证明懂得多" }));
+    const completePlansRegion = await view.findByRole("region", { name: "完整成片方案" });
+    assert.ok(within(completePlansRegion).getByText("完整成片方案（1）"));
+    assert.ok(within(completePlansRegion).getByText("知识付费完整成片"));
+    assert.equal(within(completePlansRegion).getAllByText("补录建议").length, 2);
+    assert.ok(within(completePlansRegion).getByText(/00:01:08 → 00:01:38/));
+    assert.ok(within(completePlansRegion).getByRole("button", { name: "复制完整成片方案" }));
     fireEvent.click(view.getByRole("checkbox", { name: "选择切片：为什么知识付费不能只证明懂得多" }));
     fireEvent.click(view.getByRole("button", { name: "生成切片方案" }));
     const actionBar = view.getByRole("button", { name: "生成切片方案" }).parentElement as HTMLElement;
@@ -178,6 +211,8 @@ test("AI按主题生成切片卡后，只有用户勾选的候选进入正式方
     assert.equal(state.clipPlans[0].userAccepted, true);
     assert.equal(state.clipPlans[0].primaryPurpose, "信任建立");
     assert.equal(state.clipPlans[0].primaryPurposeEvidence?.quote, "解决问题的信任");
+    assert.equal(state.completeVideoPlans.length, 1);
+    assert.equal(state.completeVideoPlans[0].coreCandidateId, "candidate-1");
   } finally {
     cleanupPage?.();
     globalThis.fetch = originalFetch;

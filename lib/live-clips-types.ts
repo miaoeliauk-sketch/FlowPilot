@@ -26,6 +26,18 @@ export const CLIP_STRUCTURE_ROLE_LABELS: Record<ClipStructureRole, string> = {
 export function isClipStructureRole(value: unknown): value is ClipStructureRole {
   return typeof value === "string" && LIVE_CLIP_STRUCTURE_ROLES.includes(value as ClipStructureRole);
 }
+
+export const COMPLETE_VIDEO_SECTION_ROLES = ["opening", "body", "golden_quote", "marketing", "ending"] as const;
+export type CompleteVideoSectionRole = typeof COMPLETE_VIDEO_SECTION_ROLES[number];
+export type CompleteVideoSectionSource = "transcript" | "supplemental";
+
+export const COMPLETE_VIDEO_SECTION_ROLE_LABELS: Record<CompleteVideoSectionRole, string> = {
+  opening: "开头",
+  body: "主体",
+  golden_quote: "金句",
+  marketing: "营销",
+  ending: "结尾",
+};
 export type ClipRating = "强" | "中" | "弱";
 export type ClipRecommendation = "强烈建议切" | "可以考虑" | "不建议";
 export type LivePlatform = "抖音" | "视频号" | "小红书" | "B站";
@@ -37,7 +49,8 @@ export type LiveAnalysisStatus = "imported" | "analyzing" | "completed" | "parti
 export type LiveClipStageCode =
   | "TRANSCRIPT_PARSE_FAIL"
   | "TOPIC_ANALYSIS_FAIL"
-  | "CLIP_ANALYSIS_FAIL";
+  | "CLIP_ANALYSIS_FAIL"
+  | "COMPLETE_PLAN_ANALYSIS_FAIL";
 
 export type LiveClipFailureCause =
   | "EMPTY_CONTENT"
@@ -222,6 +235,33 @@ export interface ClipPlan {
   createdAt: string;
 }
 
+export interface CompleteVideoPlanSection {
+  role: CompleteVideoSectionRole;
+  sourceType: CompleteVideoSectionSource;
+  candidateId: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  startParagraph: number | null;
+  endParagraph: number | null;
+  rawText: string | null;
+  cleanedText: string | null;
+  supplementalSuggestion: string | null;
+  transitionNote: string;
+}
+
+export interface CompleteVideoPlan {
+  id: string;
+  liveTranscriptId: string;
+  coreCandidateId: string;
+  title: string;
+  recommendReason: string;
+  sections: CompleteVideoPlanSection[];
+  editingNotes: string[];
+  sourceDurationSeconds: number;
+  durationBasis: "actual" | "text-estimate";
+  createdAt: string;
+}
+
 export interface LiveClipWorkspaceState {
   version: 1;
   activeLiveTranscriptId: string | null;
@@ -230,6 +270,7 @@ export interface LiveClipWorkspaceState {
   topicBlocks: TopicBlock[];
   clipCandidates: ClipCandidate[];
   clipPlans: ClipPlan[];
+  completeVideoPlans: CompleteVideoPlan[];
 }
 
 export interface LiveClipApiError {
