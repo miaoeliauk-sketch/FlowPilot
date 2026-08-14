@@ -138,12 +138,22 @@ after(() => {
   restoreBrowser?.();
 });
 
-test("工作台查看待完成脚本时携带对应scriptId", async () => {
+async function renderDashboard() {
   const { render } = await import("@testing-library/react");
-  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
   const Home = (await import("../app/page")).default;
+
+  return render(
+    <IPProvider>
+      <Home />
+    </IPProvider>,
+  );
+}
+
+test("工作台查看待完成脚本时携带对应scriptId", async () => {
+  const userEvent = (await import("@testing-library/user-event")).default;
   const user = userEvent.setup({ document });
-  const view = render(<Home />);
+  const view = await renderDashboard();
 
   await user.click(await view.findByRole("button", { name: /待完成脚本/ }));
   assert.ok(view.getByText(script.title));
@@ -156,11 +166,9 @@ test("工作台查看待完成脚本时携带对应scriptId", async () => {
 });
 
 test("工作台脚本记录展开历史后可查看指定脚本", async () => {
-  const { render } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
-  const Home = (await import("../app/page")).default;
   const user = userEvent.setup({ document });
-  const view = render(<Home />);
+  const view = await renderDashboard();
 
   await user.click(await view.findByRole("button", { name: /脚本记录/ }));
   assert.ok(view.getByText("脚本历史"));

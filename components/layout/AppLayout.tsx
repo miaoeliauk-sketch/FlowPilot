@@ -13,7 +13,6 @@ const MAIN_NAV: { label: string; href: string; icon: IconName }[] = [
   { label: "工作台", href: "/", icon: "grid" },
   { label: "IP身份中心", href: "/ip", icon: "id" },
   { label: "知识库中心", href: "/knowledge-hub", icon: "book" },
-  { label: "文案整合", href: "/copy-integration", icon: "edit" },
   { label: "设置", href: "/settings", icon: "settings" },
 ];
 const MEMORY_NAV: { label: string; href: string; icon: IconName }[] = [
@@ -23,13 +22,18 @@ const REPURPOSE_NAV: { label: string; href: string; icon: IconName }[] = [
   { label: "直播切片", href: "/live-clips", icon: "film" },
 ];
 const WORKFLOW_NAV: { label: string; href: string; icon: IconName; step: string }[] = [
-  { label: "AI 选题董事会", href: "/topic-board", icon: "chat", step: "01" },
-  { label: "AI IP脚本工厂", href: "/script-factory", icon: "film", step: "02" },
-  { label: "AI 拍摄作战室", href: "/shoot-room", icon: "camera", step: "03" },
-  { label: "AI 评论区需求雷达", href: "/comment-radar", icon: "radar", step: "04" },
-  { label: "爆款分析", href: "/hot-analysis", icon: "fire", step: "05" },
-  { label: "文案优化", href: "/copy-optimization", icon: "edit", step: "06" },
-  { label: "发布复盘", href: "/review", icon: "calendar", step: "07" },
+  { label: "文案整合", href: "/copy-integration", icon: "edit", step: "01" },
+  { label: "AI 选题董事会", href: "/topic-board", icon: "chat", step: "02" },
+  { label: "AI IP脚本工厂", href: "/script-factory", icon: "film", step: "03" },
+  { label: "AI 拍摄作战室", href: "/shoot-room", icon: "camera", step: "04" },
+  { label: "发布复盘", href: "/review", icon: "calendar", step: "05" },
+];
+
+const OPERATIONS_NAV: { label: string; href: string; icon: IconName }[] = [
+  { label: "智能知识入库", href: "/knowledge-intake", icon: "sparkle" },
+  { label: "评论区需求雷达", href: "/comment-radar", icon: "radar" },
+  { label: "爆款分析", href: "/hot-analysis", icon: "fire" },
+  { label: "文案优化", href: "/copy-optimization", icon: "edit" },
 ];
 
 function IPSwitcher() {
@@ -227,6 +231,15 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               style={{ background: isActive(item.href) ? "rgba(0,0,0,0.12)" : "#EAEAE6", color: isActive(item.href) ? "#1A1A1A" : "#888" }}>
               {item.step}
             </span>
+          </Link>
+        ))}
+
+        <div className="px-2 mt-4 mb-1 text-[10px] font-bold uppercase tracking-widest text-[#BBB]">运营工具</div>
+        {OPERATIONS_NAV.map(item => (
+          <Link key={item.href} href={item.href}
+            className="flex items-center gap-3 rounded-[12px] px-3 py-2.5 text-[13.5px] font-medium transition-all"
+            style={isActive(item.href) ? { background: "#C8F04A", color: "#1A1A1A", fontWeight: 700 } : { color: "#555" }}>
+            <Icon name={item.icon} size="sm" />{item.label}
           </Link>
         ))}
 

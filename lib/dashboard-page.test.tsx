@@ -79,8 +79,32 @@ function coverRef(id: string, scope: "global" | "ip", ipId: string | null, creat
 
 async function renderDashboard() {
   const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
   const Home = (await import("../app/page")).default;
-  return render(<Home />);
+  return render(<IPProvider><Home /></IPProvider>);
+}
+
+async function renderDashboardWithLayout() {
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const AppLayout = (await import("../components/layout/AppLayout")).default;
+  const Home = (await import("../app/page")).default;
+  return render(
+    <IPProvider>
+      <AppLayout><Home /></AppLayout>
+    </IPProvider>,
+  );
+}
+
+async function renderAppLayout() {
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const AppLayout = (await import("../components/layout/AppLayout")).default;
+  return render(
+    <IPProvider>
+      <AppLayout><div>页面内容</div></AppLayout>
+    </IPProvider>,
+  );
 }
 
 async function getAssetCard(
@@ -139,6 +163,61 @@ test("当前IP知识只统计并展示当前IP的数据", async () => {
   assert.ok(await card.findByText("1", { exact: true }));
   assert.ok(view.getByText("当前IP知识"));
   assert.equal(Boolean(view.queryByText("其他IP私有知识")), false);
+});
+
+test("从IP A切换到IP B后工作台立即改为展示IP B的数据", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    knowledgeEntry("current", "IP A知识", "IP表达语料", currentIP.id),
+    knowledgeEntry("other", "IP B知识", "IP表达语料", otherIP.id),
+  ]));
+
+  const view = await renderDashboardWithLayout();
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const user = userEvent.setup({ document });
+
+  assert.ok(await view.findByText("IP A知识"));
+  await user.click(view.getByRole("button", { name: /当前操盘IP.*当前IP-A/ }));
+  await user.click(view.getByRole("button", { name: "其他IP-B" }));
+
+  assert.ok(await view.findByText("IP B知识"));
+  assert.equal(Boolean(view.queryByText("IP A知识")), false);
+});
+
+test("工作台保留大号资产总览设计", async () => {
+  const view = await renderDashboard();
+
+  assert.ok(await view.findByText("知识资产合计"));
+  assert.ok(view.getByText("条方法、知识、素材与校准样本"));
+  assert.ok(view.getByText("最近新增"));
+});
+
+test("工作台展示当前生产流程和新增功能入口", async () => {
+  const view = await renderDashboard();
+
+  assert.ok(await view.findByText("核心生产流程"));
+  assert.ok(view.getByRole("link", { name: /文案整合/ }));
+  assert.ok(view.getByRole("link", { name: /直播切片/ }));
+  assert.ok(view.getByRole("link", { name: /智能知识入库/ }));
+  assert.ok(view.getByRole("link", { name: /内容判断库/ }));
+  assert.ok(view.getByText("内容再生产与运营"));
+  assert.equal(Boolean(view.queryByRole("link", { name: /录音转逐字稿/ })), false);
+});
+
+test("左侧导航按核心生产流程和运营工具分组且不再展示录音转逐字稿", async () => {
+  const view = await renderAppLayout();
+
+  assert.ok(await view.findByText("内容生产流程"));
+  assert.ok(view.getByText("运营工具"));
+  assert.ok(view.getByRole("link", { name: /文案整合.*01/ }));
+  assert.ok(view.getByRole("link", { name: /AI 选题董事会.*02/ }));
+  assert.ok(view.getByRole("link", { name: /AI IP脚本工厂.*03/ }));
+  assert.ok(view.getByRole("link", { name: /AI 拍摄作战室.*04/ }));
+  assert.ok(view.getByRole("link", { name: /发布复盘.*05/ }));
+  assert.ok(view.getByRole("link", { name: "智能知识入库" }));
+  assert.ok(view.getByRole("link", { name: "评论区需求雷达" }));
+  assert.ok(view.getByRole("link", { name: "爆款分析" }));
+  assert.ok(view.getByRole("link", { name: "文案优化" }));
+  assert.equal(Boolean(view.queryByRole("link", { name: /录音转逐字稿/ })), false);
 });
 
 test("通用方法库只统计并展示明确全局的方法知识", async () => {
@@ -236,4 +315,24 @@ test("完全没有当前IP时只显示通用知识且不暴露任何IP私有数�
   assert.ok(await ipCard.findByText("0", { exact: true }));
   assert.ok(await coverCard.findByText("1", { exact: true }));
   assert.ok(await calibrationCard.findByText("0", { exact: true }));
+});
+
+test("完全没有当前IP时不统计任何IP的复盘记录", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([]));
+  localStorage.removeItem("ipwr:activeIpId");
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+    {
+      id: "review-private",
+      ipId: otherIP.id,
+      title: "其他IP复盘",
+      createdAt: "2026-08-08T00:00:00.000Z",
+      analysis: null,
+    },
+  ]));
+
+  const view = await renderDashboard();
+  const reviewCard = await getAssetCard(view, "/review", "复盘记录");
+
+  assert.ok(await reviewCard.findByText("0", { exact: true }));
+  assert.equal(Boolean(view.queryByText("待复盘记录")), false);
 });
