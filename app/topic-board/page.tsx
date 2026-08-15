@@ -4,18 +4,20 @@ import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import {
   getKnowledgeEntries,
-  getActiveIPId,
   getTopicAssets,
   recordKnowledgeUsage,
   getLatestPersonas,
   updateTopicAssetStatus,
 } from "@/lib/ip-store";
-import { KnowledgeEntry, TopicAsset, TopicAssetStatus } from "@/lib/types";
+import { IPProfile, KnowledgeEntry, TopicAsset, TopicAssetStatus } from "@/lib/types";
 import { CitationSummary } from "@/components/ui/citation-summary";
 import { useIP } from "@/lib/ip-context";
+import { searchKnowledgeEntries, KnowledgeSearchMatch } from "@/lib/knowledge-search-utils";
+import { getNormalizedCategory, isGlobalMethodCategory, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
 import { buildTopicReviewRequestPayload } from "@/lib/topic-review-request";
 import { TopicBoardContractError, type TopicBoardResult } from "@/lib/topic-board-contract";
 import { saveTopicBoardEvaluation, TopicBoardOwnershipError } from "@/lib/topic-board-history";
+import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 
 // ── Constants ──
 const PHASES = [
@@ -76,6 +78,20 @@ function ScoreCircle({ score, color, size = 56 }: { score: number; color: string
   );
 }
 
+function getBoardKnowledgeEntries(activeIP: IPProfile | null): KnowledgeEntry[] {
+  return filterKnowledgeVisibleToIP(getKnowledgeEntries(), activeIP?.id ?? null).filter(e => {
+    const category = getNormalizedCategory(e);
+    return isGlobalMethodCategory(category) || isIPKnowledgeCategory(category);
+  });
+}
+
+function collectKnowledgeContext(topic: string, activeIP: IPProfile | null): {
+  id: string; title: string; category: string; reason: string; relevanceTier: string; relevanceReason: string; matchScore: number;
+  matchedFields: string[]; matchedKeywords: string[]; methodMatches: string[]; methodAdvice: string;
+}[] {
+  return searchKnowledgeEntries(topic, getBoardKnowledgeEntries(activeIP), { limit: 8, minScore: 2 }).results;
+}
+
 // ── Phase loader ──
 function PhaseLoader({ phase }: { phase: number }) {
   return (
@@ -100,7 +116,10 @@ function PhaseLoader({ phase }: { phase: number }) {
 }
 
 // ── 参考知识面板：选题输入变化后自动检索知识库，展示引用内容/原因/相关度档位 ──
-interface KnowledgeRef { id: string; reason: string; relevanceTier: string; relevanceReason: string; entry: KnowledgeEntry }
+interface KnowledgeRef {
+  id: string; reason: string; relevanceTier: string; relevanceReason: string; entry: KnowledgeEntry;
+  matchedFields?: string[]; matchedKeywords?: string[]; methodMatches?: string[]; methodAdvice?: string; matchScore?: number;
+}
 const REL_COLOR: Record<string, { bg: string; text: string }> = {
   "高度相关": { bg: "#EAF3DE", text: "#3B6D11" },
   "中度相关": { bg: "#FBF3D6", text: "#7A5C00" },
@@ -218,14 +237,17 @@ export default function TopicBoardPage() {
   const [result, setResult] = useState<TopicBoardResult | null>(null);
   const [topicHistory, setTopicHistory] = useState<TopicAsset[]>([]);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
 
   // 参考知识：选题输入停止变化800ms后自动检索，不是实时每个按键都查
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const knowledgeRequestSeqRef = useRef(0);
 
   useEffect(() => {
+    activeIPIdRef.current = activeIP?.id ?? null;
     setTopicHistory(activeIP ? getTopicAssets(activeIP.id) : []);
     setResult(null);
     setSaveNotice(null);
@@ -233,49 +255,91 @@ export default function TopicBoardPage() {
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (topic.trim().length < 5) { setKnowledgeSearched(false); setKnowledgeRefs([]); return; }
-    debounceRef.current = setTimeout(() => { searchKnowledge(topic); }, 800);
+    const requestSeq = knowledgeRequestSeqRef.current + 1;
+    knowledgeRequestSeqRef.current = requestSeq;
+    const requestIP = activeIP;
+    setKnowledgeRefs([]);
+    if (topic.trim().length < 5) {
+      setKnowledgeLoading(false);
+      setKnowledgeSearched(false);
+      return;
+    }
+    setKnowledgeLoading(true);
+    setKnowledgeSearched(true);
+    debounceRef.current = setTimeout(() => {
+      searchKnowledge(topic, requestIP, requestSeq);
+    }, 800);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topic]);
+  }, [topic, activeIP?.id]);
 
-  async function searchKnowledge(query: string) {
-    const allEntries = [
-      ...getKnowledgeEntries("爆款案例"), ...getKnowledgeEntries("方法论"),
-      ...getKnowledgeEntries("评论需求"), ...getKnowledgeEntries("选题案例"),
-    ];
-    if (allEntries.length === 0) { setKnowledgeSearched(true); setKnowledgeRefs([]); return; }
+  function refsFromMatches(matches: KnowledgeSearchMatch[], allEntries: KnowledgeEntry[]): KnowledgeRef[] {
+    const entryMap = new Map(allEntries.map(e => [e.id, e]));
+    return matches
+      .map(r => {
+        const entry = entryMap.get(r.id);
+        if (!entry) return null;
+        const ref: KnowledgeRef = {
+          id: r.id,
+          reason: r.reason,
+          relevanceTier: r.relevanceTier,
+          relevanceReason: r.relevanceReason,
+          matchedFields: r.matchedFields,
+          matchedKeywords: r.matchedKeywords,
+          methodMatches: r.methodMatches,
+          methodAdvice: r.methodAdvice,
+          matchScore: r.matchScore,
+          entry,
+        };
+        return ref;
+      })
+      .filter((r: KnowledgeRef | null): r is KnowledgeRef => r !== null);
+  }
+
+  async function searchKnowledge(query: string, requestIP: IPProfile | null, requestSeq: number) {
+    const isCurrentRequest = () => (
+      knowledgeRequestSeqRef.current === requestSeq &&
+      activeIPIdRef.current === (requestIP?.id ?? null)
+    );
+    const allEntries = getBoardKnowledgeEntries(requestIP);
+    if (allEntries.length === 0) {
+      if (!isCurrentRequest()) return;
+      setKnowledgeLoading(false);
+      setKnowledgeSearched(true);
+      setKnowledgeRefs([]);
+      return;
+    }
     setKnowledgeLoading(true); setKnowledgeSearched(true);
     try {
       const res = await apiFetch("/api/knowledge-search", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           query,
-          entries: allEntries.map(e => ({ id: e.id, category: e.category, title: e.title, tags: e.tags, keywords: e.keywords })),
+          entries: allEntries.map(e => ({
+            id: e.id,
+            category: e.category,
+            normalizedCategory: getNormalizedCategory(e),
+            title: e.title,
+            tags: e.tags,
+            keywords: e.keywords,
+            rawContent: e.rawContent,
+            summary: e.note,
+            referenceReason: e.sourceTierReason,
+            note: e.note,
+            metadata: { sourcePlatform: e.sourcePlatform, contentDirection: e.contentDirection, viralEvaluation: e.viralEvaluation },
+          })),
         }),
       });
       const data = await res.json();
+      if (!isCurrentRequest()) return;
       if (!res.ok) { setKnowledgeRefs([]); return; }
-      const entryMap = new Map(allEntries.map(e => [e.id, e]));
-      const refs: KnowledgeRef[] = (data.results ?? [])
-        .map((r: { id: string; reason: string; relevanceTier: string; relevanceReason: string }) => {
-          const entry = entryMap.get(r.id);
-          return entry ? { ...r, entry } : null;
-        })
-        .filter((r: KnowledgeRef | null): r is KnowledgeRef => r !== null);
+      const refs = refsFromMatches(data.results ?? [], allEntries);
       setKnowledgeRefs(refs);
-      // 检索到的每一条都记一次引用——这就是"知识库→AI模块"调用链里真实发生的那一步
-      refs.forEach(r => {
-        recordKnowledgeUsage(r.id, {
-          module: "选题董事会", usedAt: new Date().toISOString(),
-          reason: r.reason, relevanceTier: r.relevanceTier as "高度相关" | "中度相关" | "低度相关",
-          relevanceReason: r.relevanceReason, context: query,
-        }, "已用于选题");
-      });
     } catch {
+      if (!isCurrentRequest()) return;
       setKnowledgeRefs([]);
     } finally {
-      setKnowledgeLoading(false);
+      if (isCurrentRequest()) setKnowledgeLoading(false);
     }
   }
 
@@ -295,9 +359,18 @@ export default function TopicBoardPage() {
 
     try {
       const personas = getLatestPersonas(requestIP.id);
+      const stableKnowledgeContext = collectKnowledgeContext(requestedTopic, requestIP);
+      const allEntries = getBoardKnowledgeEntries(requestIP);
+      const stableRefs = refsFromMatches(stableKnowledgeContext as KnowledgeSearchMatch[], allEntries);
+      setKnowledgeRefs(stableRefs);
+      setKnowledgeSearched(true);
       const res = await apiFetch("/api/topic-review", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildTopicReviewRequestPayload({ topic: requestedTopic, userPersonas: personas }, requestIP)),
+        body: JSON.stringify(buildTopicReviewRequestPayload({
+          topic: requestedTopic,
+          userPersonas: personas,
+          knowledgeContext: stableKnowledgeContext,
+        }, requestIP)),
       });
       let data: unknown = null;
       try { data = await res.json(); } catch { throw new Error(`接口返回非JSON（${res.status}）`); }
@@ -311,7 +384,17 @@ export default function TopicBoardPage() {
 
       const saved = saveTopicBoardEvaluation(requestIP, data);
       if (!saved.boardResult) throw new Error("选题评估保存失败");
-      const currentIPId = getActiveIPId();
+      stableRefs.forEach(ref => {
+        recordKnowledgeUsage(ref.id, {
+          module: "选题董事会",
+          usedAt: new Date().toISOString(),
+          reason: ref.reason,
+          relevanceTier: ref.relevanceTier as "高度相关" | "中度相关" | "低度相关",
+          relevanceReason: ref.relevanceReason,
+          context: requestedTopic,
+        }, "已用于选题");
+      });
+      const currentIPId = activeIPIdRef.current;
       setTopicHistory(currentIPId ? getTopicAssets(currentIPId) : []);
       setSaveNotice(
         currentIPId === requestIP.id
@@ -346,7 +429,7 @@ export default function TopicBoardPage() {
     try {
       const updated = updateTopicAssetStatus(asset.id, status);
       if (!updated) throw new Error("没有找到这条选题记录");
-      const currentIPId = getActiveIPId();
+      const currentIPId = activeIPIdRef.current;
       setTopicHistory(currentIPId ? getTopicAssets(currentIPId) : []);
       setError(null);
     } catch (statusError) {

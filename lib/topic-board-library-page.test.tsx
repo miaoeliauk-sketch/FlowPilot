@@ -5,7 +5,6 @@ import React from "react";
 import {
   addTopicAsset,
   getTopicAssets,
-  setActiveIPId,
   updateTopicAssetEvaluation,
 } from "./ip-store";
 import {
@@ -199,14 +198,13 @@ test("董事会自动保存到发起请求的IP并按当前IP管理历史状态"
     const currentIPLabel = await screen.findByText("当前操盘IP");
     const currentIPButton = currentIPLabel.closest("button");
     assert.ok(currentIPButton);
-    await act(async () => {
-      setActiveIPId(shikong.id);
-      releaseBoardResponse();
-    });
-    await screen.findByText("评估已保存到水木然的选题库；当前IP已切换，可切回查看。");
-
     await user.click(currentIPButton);
     await user.click(screen.getByRole("button", { name: /设计师石空/ }));
+
+    await act(async () => {
+      releaseBoardResponse();
+    });
+    await screen.findByText(/评估已保存到水木然的选题库/);
 
     assert.equal(getTopicAssets(shuimuran.id).some(asset => asset.title === newTopic), true);
     assert.equal(getTopicAssets(shikong.id).some(asset => asset.title === newTopic), false);
