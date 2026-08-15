@@ -189,8 +189,14 @@ test("知识只被检索展示时不写入选题使用记录", async () => {
 
     globalThis.fetch = async (input) => {
       if (String(input) === "/api/knowledge-search") {
+        const result = knowledgeSearchResult(knowledge.id);
         return new Response(JSON.stringify({
-          results: [knowledgeSearchResult(knowledge.id)],
+          results: [{
+            ...result,
+            matchedFields: ["标题", "标签"],
+            methodMatches: ["反常识结构"],
+            methodAdvice: "先呈现大众判断，再给出相反解释。",
+          }],
           debug: null,
         }), {
           status: 200,
@@ -214,6 +220,9 @@ test("知识只被检索展示时不写入选题使用记录", async () => {
     );
 
     await page.findByText(`[选题方法库] ${knowledge.title}`);
+    assert.ok(page.getByText("命中字段：标题、标签"));
+    assert.ok(page.getByText("调用方法：反常识结构。先呈现大众判断，再给出相反解释。"));
+    assert.equal(page.queryByText("检索调试"), null);
     const stored = getKnowledgeEntries().find(entry => entry.id === knowledge.id);
     usageCountAfterSearch = stored?.usageRecords.length ?? -1;
     statusAfterSearch = stored?.status ?? "";

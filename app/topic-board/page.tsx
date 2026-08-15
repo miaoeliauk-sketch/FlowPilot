@@ -358,6 +358,14 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
                   <span className="rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ background: c.bg, color: c.text }}>{r.relevanceTier}</span>
                 </div>
                 <p className="text-[11.5px] leading-5 text-[#555]">引用原因：{r.reason}</p>
+                {r.matchedFields && r.matchedFields.length > 0 && (
+                  <p className="mt-0.5 text-[11px] leading-5 text-[#888]">命中字段：{r.matchedFields.join("、")}</p>
+                )}
+                {r.methodMatches && r.methodMatches.length > 0 && (
+                  <p className="mt-0.5 text-[11px] leading-5 text-[#3B6D11]">
+                    调用方法：{r.methodMatches.join("、")}{r.methodAdvice ? `。${r.methodAdvice}` : ""}
+                  </p>
+                )}
               </div>
             );
           })}

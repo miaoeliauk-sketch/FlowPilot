@@ -41,6 +41,7 @@ const SHUIMURAN: IPProfile = {
 
 test("当前操盘IP会进入董事会的每一次AI评审", async () => {
   const originalFetch = globalThis.fetch;
+  const capturedSystemPrompts: string[] = [];
   const capturedUserPrompts: string[] = [];
 
   globalThis.fetch = async (_input, init) => {
@@ -48,6 +49,7 @@ test("当前操盘IP会进入董事会的每一次AI评审", async () => {
       messages?: { role: string; content: string }[];
     };
     const systemPrompt = requestBody.messages?.[0]?.content ?? "";
+    capturedSystemPrompts.push(systemPrompt);
     capturedUserPrompts.push(requestBody.messages?.[1]?.content ?? "");
     const content = systemPrompt.includes("内容安全合规官")
       ? JSON.stringify({
@@ -106,6 +108,26 @@ test("当前操盘IP会进入董事会的每一次AI评审", async () => {
       && prompt.includes("目标受众：关注商业趋势和个人成长的人")
       && !prompt.includes("IP名称：设计师石空")
       && !prompt.includes("目标受众：准备装修")
+    )));
+    assert.ok(capturedSystemPrompts.some(prompt => (
+      prompt.includes("执行容易度")
+      && prompt.includes("素材易得度")
+      && prompt.includes("差异化程度")
+      && prompt.includes("分数越高代表对该IP越有利")
+    )));
+    assert.ok(capturedSystemPrompts.some(prompt => (
+      prompt.includes("赛道宽松度")
+      && prompt.includes("竞争越不激烈分越高")
+    )));
+    assert.ok(capturedSystemPrompts.some(prompt => (
+      prompt.includes("戏剧感")
+      && prompt.includes("不许硬编")
+    )));
+    assert.ok(capturedUserPrompts.some(prompt => (
+      prompt.includes("失败概率百分比")
+      && prompt.includes("低风险<30")
+      && prompt.includes("中风险30-60")
+      && prompt.includes("高风险>60")
     )));
   } finally {
     globalThis.fetch = originalFetch;
