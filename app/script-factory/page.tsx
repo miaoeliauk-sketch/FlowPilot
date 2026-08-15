@@ -15,7 +15,10 @@ import {
   savePartialScriptDraft,
 } from "@/lib/script-factory-draft";
 import type {
+  ScriptAttributionAudit,
+  ScriptFactAudit,
   ScriptGenerationStatus,
+  ScriptOutputStatus,
   ScriptPartialFailure,
   ScriptQualityCheck,
 } from "@/lib/script-factory-contract";
@@ -62,6 +65,15 @@ interface ScriptResult {
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
   evidenceAudit?: EvidenceAudit;
+  attributionAudit?: ScriptAttributionAudit;
+  factAudit?: ScriptFactAudit;
+  generationApproval?: {
+    coverage: CoverageAssessment["coverage"];
+    outputStatus: ScriptOutputStatus;
+    confirmationType: "evidence_confirmed" | "limitations_acknowledged";
+    missingDimensions: string[];
+    confirmedAt: string;
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -204,6 +216,74 @@ function IPContextModal({ ip, onClose }: { ip: IPProfile; onClose: () => void })
   );
 }
 
+const ATTRIBUTION_LABELS = {
+  teacher_explicit: "老师明确表达",
+  faithful_rewrite: "基于原意重组",
+  ai_reasoning: "AI推理补充",
+  case_fact: "案例事实补充",
+} as const;
+
+const OUTPUT_STATUS_LABELS: Record<ScriptOutputStatus, string> = {
+  formal: "正式稿",
+  review: "待审核稿",
+  exploratory: "探索稿",
+};
+
+const CONFIDENCE_LABELS = { high: "高", medium: "中", low: "低" } as const;
+
+function TeamReviewPanel({ data }: { data: ScriptResult }) {
+  const attribution = data.attributionAudit;
+  const fact = data.factAudit;
+  if (!attribution) {
+    return (
+      <div className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-4">
+        <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
+        <p className="mt-2 text-[12.5px] text-[#8A6515]">历史稿未记录观点归属信息</p>
+        <p className="mt-1 text-[11.5px] leading-5 text-[#777]">这不代表高置信度，正式发布前请人工核对观点来源和事实。</p>
+      </div>
+    );
+  }
+  return (
+    <section aria-label="团队审核信息" className="rounded-[12px] border border-[#D9E8C7] bg-[#FBFEF7] p-4">
+      <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div className="rounded-[10px] bg-white p-3">
+          <div className="text-[11px] font-bold text-[#888]">整篇观点归属</div>
+          <div className="mt-1 text-[13px] font-semibold text-[#1C1C1B]">
+            {OUTPUT_STATUS_LABELS[attribution.outputStatus]} · 置信度{CONFIDENCE_LABELS[attribution.confidenceLevel]}
+          </div>
+          {attribution.missingDimensions.length > 0 && <p className="mt-2 text-[11.5px] leading-5 text-[#8A6515]">具体缺口：{attribution.missingDimensions.join("、")}</p>}
+          <p className="mt-2 text-[11.5px] leading-5 text-[#666]">{attribution.recommendation}</p>
+        </div>
+        <div className="rounded-[10px] bg-white p-3 md:col-span-2">
+          <div className="text-[11px] font-bold text-[#888]">段落来源</div>
+          <div className="mt-2 flex flex-col gap-2">
+            {attribution.paragraphAttributions.length > 0 ? attribution.paragraphAttributions.map((paragraph, index) => (
+              <div key={`${paragraph.sectionIndex}-${paragraph.paragraphIndex}-${index}`} className="rounded-[8px] bg-[#F7F6F2] px-3 py-2">
+                <div className="text-[11.5px] font-bold text-[#3B6D11]">{ATTRIBUTION_LABELS[paragraph.attributionType]}</div>
+                <p className="mt-1 text-[11.5px] leading-5 text-[#444]">{paragraph.excerpt}</p>
+                <p className="mt-1 text-[11px] leading-5 text-[#777]">{paragraph.reason}</p>
+              </div>
+            )) : <p className="text-[11.5px] text-[#777]">段落归属审计未完成，请人工逐段核对。</p>}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 rounded-[10px] bg-white p-3">
+        <div className="text-[11px] font-bold text-[#888]">事实核验状态</div>
+        {fact ? (
+          <>
+            <p className="mt-1 text-[12px] font-semibold text-[#1C1C1B]">
+              {fact.overallStatus === "user_confirmed" ? "用户已确认" : fact.overallStatus === "pending" ? "存在待核验内容" : "系统未核验"}
+            </p>
+            <p className="mt-1 text-[11px] text-[#777]">系统联网核验：未执行</p>
+            {fact.pendingItems.length > 0 && <ul className="mt-2 list-disc pl-5 text-[11.5px] leading-5 text-[#8A6515]">{fact.pendingItems.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+          </>
+        ) : <p className="mt-1 text-[11.5px] text-[#777]">历史稿未记录事实核验状态。</p>}
+      </div>
+    </section>
+  );
+}
+
 // ── 结果展示：outline按通用结构渲染，标签随内容形式动态变化 ──
 function ResultView({
   data,
@@ -216,11 +296,28 @@ function ResultView({
   draftSavedAt?: string | null;
   onClearDraft?: () => void;
 }) {
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const copySpokenScript = async () => {
+    const title = data.titles[0]?.title?.trim();
+    const script = data.outline.map(section => section.content).join("\n\n");
+    const text = [title ? `标题：${title}` : "", script].filter(Boolean).join("\n\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus("正文已复制");
+    } catch {
+      setCopyStatus("复制失败，请手动选择正文");
+    }
+  };
+  const reviewPanel = data.attributionAudit || data.factAudit || data.generationMode === "ip" || data.generationMode === undefined
+    ? <TeamReviewPanel data={data} />
+    : null;
+
   if (data.outputMode === "shuimuran-confirmed") {
     const fullScript = data.outline.map(section => section.content).join("\n\n");
     const pendingVerification = data.pendingVerification ?? [];
     return (
       <div className="flex flex-col gap-5">
+        {reviewPanel}
         <div>
           <div className="mb-2 text-[12px] font-bold text-[#888]">标题：</div>
           <div className="rounded-[10px] bg-[#F7F6F2] p-3 text-[13.5px] font-semibold text-[#1C1C1B]">
@@ -228,10 +325,14 @@ function ResultView({
           </div>
         </div>
         <div>
-          <div className="mb-2 text-[12px] font-bold text-[#888]">完整口播文案：</div>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[12px] font-bold text-[#888]">完整口播文案：</div>
+            <button type="button" onClick={() => void copySpokenScript()} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">复制正文</button>
+          </div>
           <div className="whitespace-pre-wrap rounded-[10px] border border-[#F0EFE9] p-4 text-[13px] leading-7 text-[#333]">
             {fullScript}
           </div>
+          {copyStatus && <div className="mt-2 text-[11.5px] text-[#666]">{copyStatus}</div>}
         </div>
         <div>
           <div className="mb-2 text-[12px] font-bold text-[#888]">待核验内容：</div>
@@ -249,6 +350,7 @@ function ResultView({
 
   return (
     <div className="flex flex-col gap-5">
+      {reviewPanel}
       {data.evidenceAudit && (
         <div className="rounded-[12px] border border-[#C8F04A] bg-[#FBFEF2] p-4">
           <div className="text-[12.5px] font-bold text-[#3B6D11]">本次脚本观点来源</div>
@@ -354,7 +456,10 @@ function ResultView({
       )}
 
       <div>
-        <div className="mb-2 text-[12px] font-bold text-[#888]">{data.outputLabels.outline}（{data.outline.length}个阶段）</div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[12px] font-bold text-[#888]">{data.outputLabels.outline}（{data.outline.length}个阶段）</div>
+          {!compact && <button type="button" onClick={() => void copySpokenScript()} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">复制正文</button>}
+        </div>
         <div className="flex flex-col gap-2">
           {(compact ? data.outline.slice(0, 3) : data.outline).map((seg, i) => (
             <div key={i} className="rounded-[10px] border border-[#F0EFE9] p-3">
@@ -371,6 +476,7 @@ function ResultView({
             </div>
           ))}
         </div>
+        {copyStatus && <div className="mt-2 text-[11.5px] text-[#666]">{copyStatus}</div>}
       </div>
 
       {!compact && data.storyboard.length > 0 && (
@@ -511,6 +617,7 @@ export default function ScriptFactoryPage() {
   const [manualCaseSource, setManualCaseSource] = useState("");
   const [manualCaseVerified, setManualCaseVerified] = useState(false);
   const [evidenceConfirmed, setEvidenceConfirmed] = useState(false);
+  const [limitationsAcknowledged, setLimitationsAcknowledged] = useState(false);
   const [showInterviewOutline, setShowInterviewOutline] = useState(false);
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
@@ -598,7 +705,7 @@ export default function ScriptFactoryPage() {
     ipName: activeIP?.name,
     profileId: activeIP?.scriptDirectorProfileId,
   });
-  const permission = resolveGenerationPermission(coverage, caseDecision, evidenceConfirmed);
+  const permission = resolveGenerationPermission(coverage, caseDecision, evidenceConfirmed, limitationsAcknowledged);
   const canGenerate = generationMode === "standard" || permission.allowed;
 
   function switchGenerationMode(nextMode: GenerationMode) {
@@ -634,6 +741,7 @@ export default function ScriptFactoryPage() {
     setManualCaseSource("");
     setManualCaseVerified(false);
     setEvidenceConfirmed(false);
+    setLimitationsAcknowledged(false);
     setShowInterviewOutline(false);
   }, [topic, angle, activeIP?.id, generationMode]);
 
@@ -645,6 +753,7 @@ export default function ScriptFactoryPage() {
     setCoverage(null);
     setCaseDecision(null);
     setEvidenceConfirmed(false);
+    setLimitationsAcknowledged(false);
     try {
       const response = await apiFetch("/api/script-factory/coverage", {
         method: "POST",
@@ -698,6 +807,12 @@ export default function ScriptFactoryPage() {
     }
     setCoverageError(null);
     setEvidenceConfirmed(true);
+  }
+
+  function confirmLimitations() {
+    if (!coverage || coverage.coverage === "FULL") return;
+    setCoverageError(null);
+    setLimitationsAcknowledged(true);
   }
 
   function handleFormatChange(id: string) {
@@ -875,10 +990,13 @@ export default function ScriptFactoryPage() {
           evidenceGate: generationMode === "ip" && coverage ? {
             coverage: coverage.coverage,
             reason: coverage.reason,
+            coveredDimensions: coverage.coveredDimensions,
+            missingDimensions: coverage.missingDimensions,
             sourceReferences: coverage.sourceReferences,
             caseNeed: coverage.caseNeed,
             caseDecision,
-            evidenceConfirmed,
+            evidenceConfirmed: coverage.coverage === "FULL" ? evidenceConfirmed : false,
+            limitationsAcknowledged: coverage.coverage !== "FULL" ? limitationsAcknowledged : false,
             caseEvidence: caseDecision === "knowledge" && selectedKnowledgeCase ? {
               title: selectedKnowledgeCase.title,
               content: selectedKnowledgeCase.rawContent,
@@ -955,7 +1073,19 @@ export default function ScriptFactoryPage() {
     }
     setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setLoading(true);
     try {
-      const data = await generateFor(requestIP, requestedTopic);
+      const generatedData = await generateFor(requestIP, requestedTopic);
+      const data: ScriptResult = generationMode === "ip" && coverage && generatedData.attributionAudit
+        ? {
+            ...generatedData,
+            generationApproval: {
+              coverage: coverage.coverage,
+              outputStatus: generatedData.attributionAudit.outputStatus,
+              confirmationType: coverage.coverage === "FULL" ? "evidence_confirmed" : "limitations_acknowledged",
+              missingDimensions: [...coverage.missingDimensions],
+              confirmedAt: new Date().toISOString(),
+            },
+          }
+        : generatedData;
       if (data.ipId !== requestIP.id) {
         throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
       }
@@ -1138,6 +1268,13 @@ export default function ScriptFactoryPage() {
                 </span>
               </div>
               <p className="mt-2 text-[13px] leading-6 text-[#444]">{coverage.reason}</p>
+              <p className="mt-2 rounded-[9px] bg-white px-3 py-2 text-[12.5px] font-semibold leading-5 text-[#444]">
+                {coverage.coverage === "FULL"
+                  ? "观点归属置信度：高，允许生成IP专属正式稿"
+                  : coverage.coverage === "PARTIAL"
+                    ? `观点归属置信度：中，当前缺口：${coverage.missingDimensions.join("、") || "部分论证依据"}，生成结果将作为待审核稿`
+                    : "观点归属置信度：低，当前没有找到老师的明确观点依据，生成结果仅作为AI探索稿"}
+              </p>
               {coverage.missingDimensions.length > 0 && (
                 <p className="mt-2 text-[12px] text-[#8A6515]">当前缺口：{coverage.missingDimensions.join("、")}</p>
               )}
@@ -1154,10 +1291,18 @@ export default function ScriptFactoryPage() {
               )}
 
               {coverage.coverage !== "FULL" && (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <a href="/knowledge-intake/original" className="rounded-[9px] bg-[#1C1C1B] px-3.5 py-2 text-[12px] font-semibold text-white">补充IP原始内容</a>
-                  <button type="button" onClick={() => { setTopic(""); setAngle(""); }} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">修改选题角度</button>
-                  <button type="button" onClick={() => setShowInterviewOutline(true)} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">生成采访提纲</button>
+                <div className="mt-4">
+                  <div className="flex flex-wrap gap-2">
+                    <a href="/knowledge-intake/original" className="rounded-[9px] bg-[#1C1C1B] px-3.5 py-2 text-[12px] font-semibold text-white">补充IP原始内容</a>
+                    <button type="button" onClick={() => { setTopic(""); setAngle(""); }} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">修改选题角度</button>
+                    <button type="button" onClick={() => setShowInterviewOutline(true)} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">生成采访提纲</button>
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <button type="button" onClick={confirmLimitations} className="rounded-[10px] bg-[#639922] px-4 py-2.5 text-[12.5px] font-semibold text-white">
+                      {coverage.coverage === "PARTIAL" ? "确认缺口并生成待审核稿" : "确认并生成探索稿"}
+                    </button>
+                  </div>
+                  {limitationsAcknowledged && <div className="mt-3 rounded-[9px] bg-[#FFF0C2] px-3 py-2 text-[12px] font-semibold text-[#7A5C00]">已记录本次风险确认，可以继续设置内容形式。</div>}
                 </div>
               )}
               {showInterviewOutline && coverage.coverage !== "FULL" && (
@@ -1220,9 +1365,9 @@ export default function ScriptFactoryPage() {
             </div>
           )}
 
-          {(generationMode === "standard" || evidenceConfirmed) && <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />}
+          {(generationMode === "standard" || evidenceConfirmed || limitationsAcknowledged) && <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />}
 
-          {(generationMode === "standard" || evidenceConfirmed) && (<>
+          {(generationMode === "standard" || evidenceConfirmed || limitationsAcknowledged) && (<>
           <div>
             <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">内容形式</label>
             <div className="flex flex-wrap gap-2">
@@ -1277,7 +1422,15 @@ export default function ScriptFactoryPage() {
               onClick={handleGenerate} disabled={loading || !canGenerate}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
-              {loading ? "生成中…" : generationMode === "standard" ? "生成完整内容" : "依据确认后生成脚本"}
+              {loading
+                ? "生成中…"
+                : generationMode === "standard"
+                  ? "生成完整内容"
+                  : coverage?.coverage === "PARTIAL"
+                    ? "生成待审核稿"
+                    : coverage?.coverage === "NONE"
+                      ? "生成探索稿"
+                      : "依据确认后生成脚本"}
             </button>
           </div>
           </>)}

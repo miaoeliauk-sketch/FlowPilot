@@ -216,6 +216,7 @@ test("脚本工厂兼容恢复没有生成状态字段的旧版完整草稿", as
   );
 
   assert.ok(await view.findByText("这是应该恢复的脚本正文"));
+  assert.ok(view.getByText("历史稿未记录观点归属信息"));
   assert.equal(view.queryByText(/保存的脚本数据不完整/), null);
 });
 

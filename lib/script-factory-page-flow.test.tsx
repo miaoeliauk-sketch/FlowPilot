@@ -145,9 +145,10 @@ test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
 });
 
-test("覆盖度为NONE时不允许直接生成", async () => {
+test("覆盖度为NONE时确认风险后生成探索稿并分层展示审核信息", async () => {
   const originalFetch = globalThis.fetch;
   let generationCalled = false;
+  const generationBodies: Record<string, unknown>[] = [];
 
   globalThis.fetch = async (input, init) => {
     if (String(input) === "/api/script-factory/coverage") {
@@ -163,6 +164,62 @@ test("覆盖度为NONE时不允许直接生成", async () => {
     }
     if (String(input) === "/api/script-factory") {
       generationCalled = true;
+      generationBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({
+        generationMode: "ip",
+        generationStatus: "complete",
+        partialFailure: null,
+        ipId: SHUIMURAN.id,
+        ipName: SHUIMURAN.name,
+        topic: "普通人如何判断下一轮行业变化",
+        platform: "抖音",
+        formatCategory: "short",
+        formatLabel: "短视频",
+        durationSeconds: 60,
+        durationLabel: "60秒",
+        goal: "建立信任",
+        videoType: "口播",
+        outputLabels: { cover: "封面文案", outline: "口播逐字稿", shooting: "拍摄建议", comment: "互动引导" },
+        titles: [{ title: "行业变化的真正信号", formula: "判断", platform: "抖音", whyFitsIP: "探索性表达" }],
+        coverCopy: ["行业变化的真正信号"],
+        outline: [{ label: "探索判断", timeRange: "0-60秒", content: "这是一段仅供讨论的探索正文。" }],
+        commentGuidance: { interactionPrompt: "", keywordReplies: [], dmGuidance: "", materialPackGuidance: "" },
+        ipStyleExplanation: "",
+        storyboard: [],
+        shootingSuggestions: [],
+        shotPrompts: [],
+        editingRhythm: { subtitleHighlights: [], soundEffects: [], screenRecordingCuts: [], caseInserts: [], pauses: [] },
+        apiMeta: { apiCalled: true, calledAt: "2026-08-15T00:00:00.000Z", model: "test", ipUsed: SHUIMURAN.name, mockHit: false },
+        evidenceAudit: {
+          coverage: "NONE",
+          reason: "当前IP没有表达过这个观点。",
+          sourceReferences: [],
+          caseNeed: "NOT_ASSESSED",
+          caseEvidence: null,
+        },
+        attributionAudit: {
+          outputStatus: "exploratory",
+          confidenceLevel: "low",
+          coveredDimensions: [],
+          missingDimensions: ["核心判断", "推理过程"],
+          recommendation: "请老师确认核心判断后再转为正式稿。",
+          auditStatus: "completed",
+          paragraphAttributions: [{
+            sectionIndex: 0,
+            paragraphIndex: 0,
+            excerpt: "这是一段仅供讨论的探索正文。",
+            attributionType: "ai_reasoning",
+            sourceReferences: [],
+            reason: "没有找到老师原始表达。",
+          }],
+        },
+        factAudit: {
+          overallStatus: "not_checked",
+          systemVerified: false,
+          pendingItems: ["文中行业趋势判断尚未核验"],
+          caseEvidence: null,
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     return new Response(JSON.stringify({ results: [], debug: null }), {
       status: 200,
@@ -199,10 +256,79 @@ test("覆盖度为NONE时不允许直接生成", async () => {
 
     await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
     assert.ok(await view.findByText("没有覆盖"));
+    assert.ok(view.getByText(/观点归属置信度：低/));
+    assert.ok(view.getByText(/生成结果仅作为AI探索稿/));
     assert.ok(view.getByRole("link", { name: "补充IP原始内容" }));
     assert.ok(view.getByRole("button", { name: "生成采访提纲" }));
-    assert.equal(view.queryByRole("button", { name: "依据确认后生成脚本" }), null);
-    assert.equal(generationCalled, false);
+    await user.click(view.getByRole("button", { name: "确认并生成探索稿" }));
+    await user.click(view.getByRole("button", { name: "生成探索稿" }));
+    assert.ok(await view.findByText("团队审核信息"));
+    assert.ok(view.getByText(/探索稿 · 置信度低/));
+    assert.ok(view.getByText("AI推理补充"));
+    assert.ok(view.getByText("文中行业趋势判断尚未核验"));
+    assert.ok(view.getAllByText("这是一段仅供讨论的探索正文。").length >= 1);
+    assert.equal(generationCalled, true);
+    const evidenceGate = generationBodies[0]?.evidenceGate as Record<string, unknown> | undefined;
+    assert.equal(evidenceGate?.limitationsAcknowledged, true);
+    assert.deepEqual(evidenceGate?.missingDimensions, ["核心判断", "推理过程"]);
+    const savedScripts = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
+    const approval = savedScripts[0]?.scriptResult?.generationApproval as Record<string, unknown> | undefined;
+    assert.equal(approval?.coverage, "NONE");
+    assert.equal(approval?.outputStatus, "exploratory");
+    assert.equal(approval?.confirmationType, "limitations_acknowledged");
+
+    let copiedText = "";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => { copiedText = text; } },
+    });
+    await user.click(view.getByRole("button", { name: "复制正文" }));
+    assert.match(copiedText, /这是一段仅供讨论的探索正文/);
+    assert.doesNotMatch(copiedText, /团队审核信息|AI推理补充|文中行业趋势判断尚未核验/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("覆盖度为PARTIAL时明确缺口并以待审核稿继续", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/coverage") {
+      return new Response(JSON.stringify({ assessment: {
+        coverage: "PARTIAL",
+        reason: "老师表达过核心判断，但缺少推理过程。",
+        coveredDimensions: ["核心判断"],
+        missingDimensions: ["推理过程"],
+        sourceReferences: [{
+          sourceId: "source-1", sourceTitle: "老师直播", itemId: "claim-1", kind: "claim",
+          content: "变化先从认知发生。", originalExcerpt: "真正的变化，往往先从认知发生。", extractionStatus: "人工确认",
+        }],
+        caseNeed: "NOT_ASSESSED",
+        caseReason: "观点链尚不完整。",
+      } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"), "变化为什么先从认知发生？");
+    await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
+
+    assert.ok(await view.findByText(/观点归属置信度：中/));
+    assert.ok(view.getAllByText(/当前缺口：推理过程/).length >= 1);
+    assert.ok(view.getByText(/生成结果将作为待审核稿/));
+    await user.click(view.getByRole("button", { name: "确认缺口并生成待审核稿" }));
+    assert.ok(view.getByRole("button", { name: "生成待审核稿" }));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -243,6 +369,8 @@ test("充分覆盖并确认依据后才显示脚本生成按钮", async () => {
     await user.type(view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"), "为什么持续更新仍会被忘记？");
     await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
     assert.ok(await view.findByText("充分覆盖"));
+    assert.ok(view.getByText(/观点归属置信度：高/));
+    assert.ok(view.getByText(/允许生成IP专属正式稿/));
     assert.equal(view.queryByRole("button", { name: "依据确认后生成脚本" }), null);
     await user.click(view.getByRole("button", { name: "确认观点依据与案例边界" }));
     assert.ok(view.getByRole("button", { name: "依据确认后生成脚本" }));
@@ -283,6 +411,23 @@ test("重新打开IP专属脚本时恢复对应生成模式", async () => {
       outline: [{ label: "判断", timeRange: "0-60秒", content: "完整正文。" }],
       commentGuidance: { interactionPrompt: "", keywordReplies: [], dmGuidance: "", materialPackGuidance: "" },
       ipStyleExplanation: "",
+      attributionAudit: {
+        outputStatus: "exploratory",
+        confidenceLevel: "low",
+        coveredDimensions: [],
+        missingDimensions: ["核心判断"],
+        recommendation: "请老师补充核心判断。",
+        auditStatus: "completed",
+        paragraphAttributions: [{ sectionIndex: 0, paragraphIndex: 0, excerpt: "完整正文。", attributionType: "ai_reasoning", sourceReferences: [], reason: "没有老师原始表达。" }],
+      },
+      factAudit: { overallStatus: "not_checked", systemVerified: false, pendingItems: [], caseEvidence: null },
+      generationApproval: {
+        coverage: "NONE",
+        outputStatus: "exploratory",
+        confirmationType: "limitations_acknowledged",
+        missingDimensions: ["核心判断"],
+        confirmedAt: "2026-08-13T00:00:00.000Z",
+      },
       storyboard: [],
       shootingSuggestions: [],
       shotPrompts: [],
@@ -299,7 +444,12 @@ test("重新打开IP专属脚本时恢复对应生成模式", async () => {
 
   const modeButton = await view.findByRole("button", { name: "IP专属生成" });
   assert.equal(modeButton.getAttribute("aria-pressed"), "true");
+  assert.ok(view.getByText(/探索稿 · 置信度低/));
+  assert.equal(view.queryByText(/正式稿 · 置信度高/), null);
   assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
+  await (await import("@testing-library/user-event")).default.setup({ document }).click(view.getByRole("button", { name: "固定脚本生成" }));
+  assert.equal(view.queryByText("完整正文。"), null);
+  assert.equal(view.queryByText(/探索稿 · 置信度低/), null);
   window.history.replaceState({}, "", "/script-factory");
 });
 
