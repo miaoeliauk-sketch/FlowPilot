@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildScriptDirectorBlock, isScriptDirectorProfileId } from "./script-director-profile";
+import { buildScriptDirectorBlock, isScriptDirectorProfileId, shouldUseShuimuranDirector } from "./script-director-profile";
 
 test("水木然老师确认版规则包含时效、悬念、压缩和最终输出约束", () => {
   const block = buildScriptDirectorBlock("shuimuran-v1");
@@ -13,6 +13,37 @@ test("水木然老师确认版规则包含时效、悬念、压缩和最终输�
   assert.match(block, /强制进行一次20%至30%的精简/);
   assert.match(block, /只输出以下内容/);
   assert.match(block, /标题：[\s\S]*完整口播文案：[\s\S]*待核验内容：/);
+});
+
+test("水木然增量修正规则追加在原规则之后且只允许IP专属模式启用", () => {
+  const block = buildScriptDirectorBlock("shuimuran-v1");
+
+  assert.ok(
+    block.indexOf("【水木然IP专属脚本生成规则｜老师确认版】")
+      < block.indexOf("【水木然IP专属生成｜增量修正规则】"),
+  );
+  assert.match(block, /老师最新修改意见和已通过文案＞本增量规则＞原有水木然规则＞通用脚本规则/);
+  assert.match(block, /胖东来不依赖低价竞争/);
+  assert.match(block, /胖东来不少门店实行周二闭店/);
+  assert.match(block, /胖东来看似退出了规模竞争，实际上守住了品质、信任和口碑/);
+  assert.match(block, /最终只能输出：[\s\S]*标题[\s\S]*完整口播文案[\s\S]*待核实信息/);
+  assert.match(block, /任何一项不符合，都必须修改后再输出/);
+
+  assert.equal(shouldUseShuimuranDirector({
+    generationMode: "ip",
+    ipName: "水木然",
+    profileId: "shuimuran-v1",
+  }), true);
+  assert.equal(shouldUseShuimuranDirector({
+    generationMode: "standard",
+    ipName: "水木然",
+    profileId: "shuimuran-v1",
+  }), false);
+  assert.equal(shouldUseShuimuranDirector({
+    generationMode: "ip",
+    ipName: "其他IP",
+    profileId: "shuimuran-v1",
+  }), false);
 });
 
 test("未设置专属编导规则时不注入水木然母题", () => {
