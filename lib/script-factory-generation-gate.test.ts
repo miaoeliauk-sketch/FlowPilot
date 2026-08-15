@@ -14,7 +14,7 @@ const IP: IPProfile = {
   sampleViralTitles: [], styleNotes: "", bio: "", color: "#000000", createdAt: "2026-01-01", updatedAt: "2026-01-01",
 };
 
-test("新版脚本请求没有充分覆盖和人工确认时在调用模型前被阻断", async () => {
+test("NONE没有明确确认探索稿边界时在调用模型前被阻断", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => {
@@ -29,16 +29,98 @@ test("新版脚本请求没有充分覆盖和人工确认时在调用模型前�
         generationMode: "ip",
         ipProfile: IP,
         topic: "测试选题",
-        evidenceGate: { coverage: "NONE", evidenceConfirmed: true },
+        evidenceGate: { coverage: "NONE", limitationsAcknowledged: false },
       }),
     }));
     const body = await response.json();
     assert.equal(response.status, 400);
-    assert.match(body.error, /观点覆盖度/);
+    assert.match(body.error, /探索稿|老师立场/);
     assert.equal(called, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("PARTIAL即使确认风险也必须保留老师的claim原文引用", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response("{}"); };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        generationMode: "ip", ipProfile: IP, topic: "测试选题",
+        evidenceGate: {
+          coverage: "PARTIAL",
+          limitationsAcknowledged: true,
+          coveredDimensions: ["核心判断"],
+          missingDimensions: ["推理过程"],
+          caseNeed: "NOT_ASSESSED",
+          sourceReferences: [{
+            sourceId: "s1", sourceTitle: "原文", itemId: "r1", kind: "reasoning",
+            content: "推理", originalExcerpt: "推理", extractionStatus: "人工确认",
+          }],
+        },
+      }),
+    }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /核心判断/);
+    assert.equal(called, false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("PARTIAL保留claim并确认风险后可以进入待审核稿生成", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response("{}"); };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        generationMode: "ip", ipProfile: IP, topic: "测试选题",
+        evidenceGate: {
+          coverage: "PARTIAL",
+          limitationsAcknowledged: true,
+          coveredDimensions: ["核心判断"],
+          missingDimensions: ["推理过程"],
+          caseNeed: "NOT_ASSESSED",
+          sourceReferences: [{
+            sourceId: "s1", sourceTitle: "原文", itemId: "c1", kind: "claim",
+            content: "观点", originalExcerpt: "老师明确表达过的观点", extractionStatus: "人工确认",
+          }],
+        },
+      }),
+    }));
+    assert.notEqual(response.status, 400);
+    assert.equal(called, true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("NONE确认不代表老师立场后可以进入探索稿生成", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response("{}"); };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify({
+        generationMode: "ip", ipProfile: IP, topic: "测试选题",
+        evidenceGate: {
+          coverage: "NONE",
+          limitationsAcknowledged: true,
+          coveredDimensions: [],
+          missingDimensions: ["核心判断", "推理过程"],
+          caseNeed: "NOT_ASSESSED",
+          sourceReferences: [],
+        },
+      }),
+    }));
+    assert.notEqual(response.status, 400);
+    assert.equal(called, true);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("IP专属生成显式选择后不能绕过观点覆盖度", async () => {

@@ -1,6 +1,54 @@
 export type ScriptFactoryStage = "content" | "storyboard" | "execution";
 export type PartialScriptFailedStage = Exclude<ScriptFactoryStage, "content">;
 export type ScriptGenerationStatus = "complete" | "partial";
+export type ScriptOutputStatus = "formal" | "review" | "exploratory";
+export type AttributionConfidenceLevel = "high" | "medium" | "low";
+export type AttributionAuditStatus = "completed" | "unavailable";
+export type ParagraphAttributionType =
+  | "teacher_explicit"
+  | "faithful_rewrite"
+  | "ai_reasoning"
+  | "case_fact";
+
+export interface AttributionSourceReference {
+  sourceId: string;
+  itemId: string;
+}
+
+export interface ParagraphAttribution {
+  sectionIndex: number;
+  paragraphIndex: number;
+  excerpt: string;
+  attributionType: ParagraphAttributionType;
+  sourceReferences: AttributionSourceReference[];
+  reason: string;
+}
+
+export interface ScriptAttributionAudit {
+  outputStatus: ScriptOutputStatus;
+  confidenceLevel: AttributionConfidenceLevel;
+  coveredDimensions: string[];
+  missingDimensions: string[];
+  recommendation: string;
+  auditStatus: AttributionAuditStatus;
+  paragraphAttributions: ParagraphAttribution[];
+}
+
+export interface ScriptFactCaseEvidence {
+  title: string;
+  content?: string;
+  sourceType: string;
+  verificationStatus: string;
+  sourceUrl?: string;
+  occurredAt?: string;
+}
+
+export interface ScriptFactAudit {
+  overallStatus: "not_checked" | "pending" | "user_confirmed";
+  systemVerified: false;
+  pendingItems: string[];
+  caseEvidence: ScriptFactCaseEvidence | null;
+}
 
 export interface ScriptPartialFailure {
   stage: PartialScriptFailedStage;

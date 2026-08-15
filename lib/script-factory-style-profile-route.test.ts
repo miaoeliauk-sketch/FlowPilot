@@ -137,6 +137,24 @@ const DENSE_CLOSING_CONTENT = {
 
 const VALID_ARGUMENT_REVIEW = { issues: [] };
 
+const VALID_ATTRIBUTION_AUDIT = {
+  paragraphs: VALID_CONTENT.outline.map((_, index) => ({
+    paragraphId: `S${index + 1}-P1`,
+    attributionType: "faithful_rewrite",
+    sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+    reason: "忠实承接老师原始表达。",
+  })),
+};
+
+const VALID_SHUIMURAN_ATTRIBUTION_AUDIT = {
+  paragraphs: [{
+    paragraphId: "S1-P1",
+    attributionType: "faithful_rewrite",
+    sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+    reason: "忠实承接老师原始表达。",
+  }],
+};
+
 const INVALID_ANALOGY_CONTENT = {
   ...VALID_CONTENT,
   outline: VALID_CONTENT.outline.map(section => section.label === "核心方法"
@@ -252,6 +270,7 @@ test("其他IP即使误带水木然规则编号也不注入老师确认版规则
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
     if (calls === 1) return deepSeekResponse(JSON.stringify(VALID_CONTENT), "other-content");
     if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "other-review");
+    if (calls === 3) return deepSeekResponse(JSON.stringify(VALID_ATTRIBUTION_AUDIT), "other-attribution");
     return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "other-storyboard");
   };
 
@@ -289,7 +308,7 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
     if (calls === 3) {
       return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-review");
     }
-    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "director-storyboard");
+    return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_ATTRIBUTION_AUDIT), "director-attribution");
   };
 
   try {
@@ -339,7 +358,8 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
     if (calls === 4) {
       return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
     }
-    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    if (calls === 5) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_ATTRIBUTION_AUDIT), "attribution-audit");
   };
 
   try {
@@ -349,7 +369,7 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
     }));
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 5);
+    assert.equal(calls, 6);
     assert.match(prompts[2], /标题直接公布了核心答案/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -382,7 +402,8 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     if (calls === 5) {
       return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
     }
-    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    if (calls === 6) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_ATTRIBUTION_AUDIT), "attribution-audit");
   };
 
   try {
@@ -392,7 +413,7 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     }));
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 6);
+    assert.equal(calls, 7);
     assert.match(prompts[3], /标题直接公布了核心答案/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -417,6 +438,9 @@ test("水木然已学习的风格画像同时进入核心脚本和分镜提示�
     if (calls === 2) {
       return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "quality-review-request");
     }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify(VALID_ATTRIBUTION_AUDIT), "attribution-audit-request");
+    }
     return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
   };
 
@@ -426,10 +450,10 @@ test("水木然已学习的风格画像同时进入核心脚本和分镜提示�
 
     assert.equal(response.status, 200);
     assert.equal(result.generationStatus, "complete");
-    assert.equal(calls, 3);
-    assert.equal(outboundPrompts.length, 3);
+    assert.equal(calls, 4);
+    assert.equal(outboundPrompts.length, 4);
 
-    for (const prompt of [outboundPrompts[0], outboundPrompts[2]]) {
+    for (const prompt of [outboundPrompts[0], outboundPrompts[3]]) {
       assert.match(prompt, /IP名称：水木然/);
       assert.match(prompt, /IP定位：商业认知作者/);
       assert.match(prompt, /目标受众：关注商业趋势和个人成长的人/);
@@ -465,6 +489,9 @@ test("经典脚本结尾密集堆叠强调式口头禅时只重生成一次再�
     if (calls === 3) {
       return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "quality-review-request");
     }
+    if (calls === 4) {
+      return deepSeekResponse(JSON.stringify(VALID_ATTRIBUTION_AUDIT), "attribution-audit-request");
+    }
     return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
   };
 
@@ -474,7 +501,7 @@ test("经典脚本结尾密集堆叠强调式口头禅时只重生成一次再�
 
     assert.equal(response.status, 200);
     assert.equal(result.generationStatus, "complete");
-    assert.equal(calls, 4);
+    assert.equal(calls, 5);
     assert.match(outboundPrompts[0], /自然、选择性使用/);
     assert.doesNotMatch(outboundPrompts[0], /要主动使用这个IP的常用口头禅/);
     assert.match(outboundPrompts[0], /结尾最多使用一个强调式口头禅或反问/);
@@ -499,6 +526,9 @@ test("独立论证复核发现类比机制不一致时标记待核对但不改�
     if (calls === 2) {
       return deepSeekResponse(JSON.stringify(INVALID_ANALOGY_REVIEW), "quality-review-request");
     }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify(VALID_ATTRIBUTION_AUDIT), "attribution-audit-request");
+    }
     return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
   };
 
@@ -508,7 +538,7 @@ test("独立论证复核发现类比机制不一致时标记待核对但不改�
 
     assert.equal(response.status, 200);
     assert.equal(result.generationStatus, "complete");
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
     assert.equal(result.qualityCheck.status, "needs_review");
     assert.deepEqual(result.qualityCheck.warnings, [{
       category: "argument",
