@@ -28,6 +28,19 @@ export interface TopicBoardExpert {
 
 export interface TopicBoardResult {
   contractVersion: typeof TOPIC_BOARD_CONTRACT_VERSION;
+  decisionStatus?: "evaluated" | "blocked";
+  aiBaseScore?: number | null;
+  evidenceAdjustment?: number;
+  evidenceAdjustmentItems?: Array<{
+    sampleId: string;
+    title: string;
+    performanceLevel: string;
+    adjustment: number;
+    reason: string;
+  }>;
+  finalReferenceScore?: number | null;
+  confidenceLevel?: "高" | "中" | "低" | null;
+  confidenceReason?: string;
   topic: string;
   ipId: string;
   ipName: string;
@@ -38,7 +51,7 @@ export interface TopicBoardResult {
     riskLevel: string;
     failProbability: number;
     dismissalSuggestion: string;
-  };
+  } | null;
   challenges: Array<{
     from: string;
     to: string;
@@ -71,10 +84,10 @@ export interface TopicBoardResult {
     weight: number;
     contribution: number;
   }>;
-  totalScore: number;
+  totalScore: number | null;
   level: string;
-  finalRecommendation: string;
-  scoreDisplay: string;
+  finalRecommendation: string | null;
+  scoreDisplay: string | null;
   beginnerAdvice: {
     canDo: string;
     why: string;
@@ -83,7 +96,7 @@ export interface TopicBoardResult {
     shouldTest: string;
   };
   confidenceNotice: string;
-  riskLevel: "低" | "中" | "高";
+  riskLevel: "低" | "中" | "高" | null;
   riskExplanation: string;
   scoreBreakdown: Array<{
     label: string;
@@ -160,12 +173,13 @@ export interface TopicBoardResult {
 
 export interface TopicEvaluationSummary {
   evaluatedAt: string;
-  totalScore: number;
-  scoreDisplay: string;
+  decisionStatus?: "evaluated" | "blocked";
+  totalScore: number | null;
+  scoreDisplay: string | null;
   level: string;
-  finalRecommendation: string;
+  finalRecommendation: string | null;
   verdict: string;
-  riskLevel: "低" | "中" | "高";
+  riskLevel: "低" | "中" | "高" | null;
   safetyVeto: boolean;
   confidenceNotice: string;
 }
@@ -213,6 +227,10 @@ function contractNumber(value: unknown, field: string): void {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TopicBoardContractError("INVALID_FIELD", field, `${field}必须是有效数字`);
   }
+}
+
+function contractNullableNumber(value: unknown, field: string): void {
+  if (value !== null) contractNumber(value, field);
 }
 
 function contractBoolean(value: unknown, field: string): void {
@@ -310,37 +328,103 @@ export function parseTopicBoardResult(value: unknown): TopicBoardResult {
     );
   }
 
+  const hasDecisionContract = Object.prototype.hasOwnProperty.call(result, "decisionStatus");
+  const decisionStatus = hasDecisionContract ? contractField(result, "decisionStatus") : undefined;
+  if (hasDecisionContract && decisionStatus !== "evaluated" && decisionStatus !== "blocked") {
+    throw new TopicBoardContractError("INVALID_FIELD", "decisionStatus", "decisionStatus必须是evaluated或blocked");
+  }
+  const isBlocked = decisionStatus === "blocked";
+
+  if (hasDecisionContract) {
+    contractNullableNumber(contractField(result, "aiBaseScore"), "aiBaseScore");
+    contractNumber(contractField(result, "evidenceAdjustment"), "evidenceAdjustment");
+    contractNullableNumber(contractField(result, "finalReferenceScore"), "finalReferenceScore");
+    contractString(contractField(result, "confidenceReason"), "confidenceReason", true);
+
+    const adjustment = result.evidenceAdjustment as number;
+    if (adjustment < -10 || adjustment > 10) {
+      throw new TopicBoardContractError("INVALID_FIELD", "evidenceAdjustment", "evidenceAdjustment必须在-10到10之间");
+    }
+    const confidenceLevel = contractField(result, "confidenceLevel");
+    if (confidenceLevel !== null && !["高", "中", "低"].includes(String(confidenceLevel))) {
+      throw new TopicBoardContractError("INVALID_FIELD", "confidenceLevel", "confidenceLevel必须是高、中、低或null");
+    }
+    contractArray(contractField(result, "evidenceAdjustmentItems"), "evidenceAdjustmentItems", (item, field) => {
+      const adjustmentItem = contractObject(item, field);
+      for (const key of ["sampleId", "title", "performanceLevel", "reason"] as const) {
+        contractString(contractField(adjustmentItem, key, field), `${field}.${key}`, true);
+      }
+      contractNumber(contractField(adjustmentItem, "adjustment", field), `${field}.adjustment`);
+    });
+
+    if (isBlocked) {
+      if (result.aiBaseScore !== null || result.finalReferenceScore !== null || confidenceLevel !== null) {
+        throw new TopicBoardContractError("INVALID_FIELD", "decisionStatus", "已阻断结果不能包含普通评分或可信度评级");
+      }
+      if (result.safetyVeto !== true) {
+        throw new TopicBoardContractError("INVALID_FIELD", "safetyVeto", "已阻断结果必须来自安全否决");
+      }
+    } else {
+      if (result.safetyVeto !== false) {
+        throw new TopicBoardContractError("INVALID_FIELD", "safetyVeto", "已评估结果不能同时包含安全否决");
+      }
+      if (
+        result.aiBaseScore === null
+        || result.finalReferenceScore === null
+        || confidenceLevel === null
+      ) {
+        throw new TopicBoardContractError("INVALID_FIELD", "decisionStatus", "已评估结果必须包含完整评分与可信度评级");
+      }
+    }
+  }
+
   for (const key of [
     "topic",
     "ipId",
     "ipName",
     "level",
-    "finalRecommendation",
-    "scoreDisplay",
     "confidenceNotice",
     "riskExplanation",
   ] as const) {
     contractString(contractField(result, key), key, key === "topic" || key === "ipId" || key === "ipName");
   }
-  contractNumber(contractField(result, "totalScore"), "totalScore");
+  if (isBlocked) {
+    contractNullableNumber(contractField(result, "totalScore"), "totalScore");
+    contractNullableString(contractField(result, "finalRecommendation"), "finalRecommendation");
+    contractNullableString(contractField(result, "scoreDisplay"), "scoreDisplay");
+    if (result.totalScore !== null || result.finalRecommendation !== null || result.scoreDisplay !== null) {
+      throw new TopicBoardContractError("INVALID_FIELD", "decisionStatus", "已阻断结果不能包含普通总分或推荐");
+    }
+  } else {
+    contractNumber(contractField(result, "totalScore"), "totalScore");
+    contractString(contractField(result, "finalRecommendation"), "finalRecommendation");
+    contractString(contractField(result, "scoreDisplay"), "scoreDisplay");
+  }
   contractNumber(contractField(result, "credScore"), "credScore");
   contractBoolean(contractField(result, "safetyVeto"), "safetyVeto");
   contractNullableString(contractField(result, "safetyVetoReason"), "safetyVetoReason");
   contractBoolean(contractField(result, "hasPersonas"), "hasPersonas");
 
   const riskLevel = contractField(result, "riskLevel");
-  if (riskLevel !== "低" && riskLevel !== "中" && riskLevel !== "高") {
-    throw new TopicBoardContractError("INVALID_FIELD", "riskLevel", "riskLevel必须是低、中或高");
+  if (isBlocked ? riskLevel !== null : riskLevel !== "低" && riskLevel !== "中" && riskLevel !== "高") {
+    throw new TopicBoardContractError("INVALID_FIELD", "riskLevel", "riskLevel与决策状态不一致");
   }
 
   contractArray(contractField(result, "experts"), "experts", validateExpert);
 
-  const chief = contractObject(contractField(result, "chiefOfficer"), "chiefOfficer");
-  for (const key of ["role", "riskLevel", "dismissalSuggestion"] as const) {
-    contractString(contractField(chief, key, "chiefOfficer"), `chiefOfficer.${key}`);
+  const chiefValue = contractField(result, "chiefOfficer");
+  if (isBlocked) {
+    if (chiefValue !== null) {
+      throw new TopicBoardContractError("INVALID_FIELD", "chiefOfficer", "已阻断结果不能包含首席反对官占位结论");
+    }
+  } else {
+    const chief = contractObject(chiefValue, "chiefOfficer");
+    for (const key of ["role", "riskLevel", "dismissalSuggestion"] as const) {
+      contractString(contractField(chief, key, "chiefOfficer"), `chiefOfficer.${key}`);
+    }
+    contractStringArray(contractField(chief, "reasons", "chiefOfficer"), "chiefOfficer.reasons");
+    contractNumber(contractField(chief, "failProbability", "chiefOfficer"), "chiefOfficer.failProbability");
   }
-  contractStringArray(contractField(chief, "reasons", "chiefOfficer"), "chiefOfficer.reasons");
-  contractNumber(contractField(chief, "failProbability", "chiefOfficer"), "chiefOfficer.failProbability");
 
   contractArray(contractField(result, "challenges"), "challenges", (item, field) => {
     const challenge = contractObject(item, field);
@@ -449,6 +533,7 @@ export function createTopicEvaluationSummary(
 ): TopicEvaluationSummary {
   return {
     evaluatedAt,
+    decisionStatus: result.decisionStatus,
     totalScore: result.totalScore,
     scoreDisplay: result.scoreDisplay,
     level: result.level,

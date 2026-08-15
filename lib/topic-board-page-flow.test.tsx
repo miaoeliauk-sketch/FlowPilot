@@ -642,3 +642,65 @@ test("用户从页面选中水木然之后，董事会请求携带完整的水�
     restoreBrowser();
   }
 });
+
+test("董事会评审只发送通用和当前IP可见的历史证据", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  let resolveRequest!: (body: Record<string, unknown>) => void;
+  const capturedRequest = new Promise<Record<string, unknown>>(resolve => {
+    resolveRequest = resolve;
+  });
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/topic-review") {
+      resolveRequest(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return new Response(JSON.stringify({ error: "测试已截获请求" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [], debug: null }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN, SHIKONG]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+
+    const globalEvidence = addBoardKnowledge({ idLabel: "通用", ipId: null, category: "爆款案例" });
+    const currentIPEvidence = addBoardKnowledge({ idLabel: "水木然", ipId: SHUIMURAN.id, category: "爆款案例" });
+    const otherIPEvidence = addBoardKnowledge({ idLabel: "石空", ipId: SHIKONG.id, category: "爆款案例" });
+
+    const { act, cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const user = userEvent.setup({ document });
+
+    const page = render(
+      <IPProvider>
+        <TopicBoardPage />
+      </IPProvider>,
+    );
+
+    const requestBody = await act(async () => {
+      await user.click(page.getByRole("button", { name: "召开董事会" }));
+      return waitWithTimeout(capturedRequest, 7000);
+    });
+    const evidence = requestBody.historicalData as Array<{ id?: string }> | undefined;
+    const evidenceIds = evidence?.map(item => item.id).sort();
+
+    assert.deepEqual(evidenceIds, [globalEvidence.id, currentIPEvidence.id].sort());
+    assert.equal(evidenceIds?.includes(otherIPEvidence.id), false);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});

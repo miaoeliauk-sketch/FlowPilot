@@ -5,6 +5,7 @@ import { useState, useEffect, useRef } from "react";
 import {
   getKnowledgeEntries,
   getTopicAssets,
+  getVideoReviews,
   recordKnowledgeUsage,
   getLatestPersonas,
   updateTopicAssetStatus,
@@ -18,6 +19,7 @@ import { buildTopicReviewRequestPayload } from "@/lib/topic-review-request";
 import { TopicBoardContractError, type TopicBoardResult } from "@/lib/topic-board-contract";
 import { saveTopicBoardEvaluation, TopicBoardOwnershipError } from "@/lib/topic-board-history";
 import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
+import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 
 // ── Constants ──
 const PHASES = [
@@ -90,6 +92,140 @@ function collectKnowledgeContext(topic: string, activeIP: IPProfile | null): {
   matchedFields: string[]; matchedKeywords: string[]; methodMatches: string[]; methodAdvice: string;
 }[] {
   return searchKnowledgeEntries(topic, getBoardKnowledgeEntries(activeIP), { limit: 8, minScore: 2 }).results;
+}
+
+interface HistoricalEvidenceItem {
+  id: string;
+  title: string;
+  source: string;
+  content: string;
+  metrics: Record<string, number | boolean | string | null>;
+  performanceLevel: string;
+  createdAt?: string;
+  matchScore: number;
+}
+
+function getHistoricalMatchScore(
+  topic: string,
+  item: { id: string; title: string; content: string; tags?: string[]; keywords?: string[] },
+): number | null {
+  const match = searchKnowledgeEntries(topic, [{
+    id: item.id,
+    title: item.title,
+    rawContent: item.content,
+    tags: item.tags,
+    keywords: item.keywords,
+  }], { limit: 1, minScore: 2 }).results[0];
+  return match?.matchScore ?? null;
+}
+
+function collectHistoricalData(topic: string, activeIP: IPProfile | null): HistoricalEvidenceItem[] {
+  if (!activeIP) return [];
+
+  const visibleViralCases = filterKnowledgeVisibleToIP(
+    getKnowledgeEntries("爆款案例"),
+    activeIP.id,
+  );
+  const viralCaseById = new Map(visibleViralCases.map(entry => [entry.id, entry]));
+  const viralCases = searchKnowledgeEntries(topic, visibleViralCases, { limit: 8, minScore: 2 }).results
+    .flatMap(match => {
+      const entry = viralCaseById.get(match.id);
+      if (!entry) return [];
+      const grade = entry.viralEvaluation?.grade;
+      const performanceLevel = grade === "S" || grade === "A"
+        ? `${grade}类高表现`
+        : grade === "B"
+        ? "B类中等表现"
+        : entry.metrics?.aboveAccountAverage
+        ? "高表现"
+        : "未分级";
+      return [{
+        id: entry.id,
+        title: entry.title,
+        source: "爆款案例库",
+        content: entry.rawContent.slice(0, 220),
+        metrics: {
+          likes: entry.metrics?.likes ?? null,
+          comments: entry.metrics?.comments ?? null,
+          shares: entry.metrics?.shares ?? null,
+          favorites: entry.metrics?.favorites ?? null,
+          aboveAccountAverage: entry.metrics?.aboveAccountAverage ?? false,
+        },
+        performanceLevel,
+        createdAt: entry.createdAt,
+        matchScore: match.matchScore,
+      }];
+    });
+
+  const reviews = getVideoReviews(activeIP.id).flatMap(review => {
+    const matchScore = getHistoricalMatchScore(topic, {
+      id: review.id,
+      title: review.title,
+      content: review.scriptText,
+      tags: [review.contentDirection],
+    });
+    if (matchScore === null) return [];
+    const reviewType = review.analysis?.layer1.performanceType;
+    const performanceLevel = reviewType === "爆款" || reviewType === "潜力款"
+      ? "高表现"
+      : reviewType === "失败款"
+      ? "低表现"
+      : reviewType === "普通款"
+      ? "中表现"
+      : "未分级";
+    return [{
+      id: review.id,
+      title: review.title,
+      source: "发布复盘",
+      content: review.scriptText.slice(0, 220),
+      metrics: {
+        views: review.metrics.views,
+        likes: review.metrics.likes,
+        comments: review.metrics.comments,
+        favorites: review.metrics.favorites,
+        shares: review.metrics.shares,
+        newFollowers: review.metrics.newFollowers,
+      },
+      performanceLevel,
+      createdAt: review.createdAt,
+      matchScore,
+    }];
+  });
+
+  const calibrationSamples = getTopicCalibrationSamples(activeIP).flatMap(sample => {
+    const matchScore = getHistoricalMatchScore(topic, {
+      id: sample.id,
+      title: sample.title,
+      content: sample.content,
+      tags: sample.tags,
+    });
+    if (matchScore === null) return [];
+    return [{
+      id: sample.id,
+      title: sample.title,
+      source: sample.source,
+      content: sample.content.slice(0, 220),
+      metrics: {
+        likes: sample.likes,
+        comments: sample.comments,
+        favorites: sample.collects,
+        shares: sample.shares,
+        interactionScore: sample.interactionScore,
+        calibrationPerformanceLevel: sample.performanceLevel,
+      },
+      performanceLevel: sample.performanceLevel === "high"
+        ? "高表现校准样本"
+        : sample.performanceLevel === "medium"
+        ? "中等表现校准样本"
+        : "低表现校准样本",
+      createdAt: sample.createdAt,
+      matchScore,
+    }];
+  });
+
+  return [...viralCases, ...reviews, ...calibrationSamples]
+    .sort((a, b) => b.matchScore - a.matchScore || a.id.localeCompare(b.id))
+    .slice(0, 8);
 }
 
 // ── Phase loader ──
@@ -189,7 +325,9 @@ function TopicHistoryPanel({
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[#8A8A86]">
                     <span>{asset.status}</span>
                     {asset.evaluationSummary && (
-                      <><span>总分{asset.evaluationSummary.scoreDisplay}</span><span>{asset.evaluationSummary.finalRecommendation}</span></>
+                      asset.evaluationSummary.decisionStatus === "blocked"
+                        ? <span className="font-semibold text-[#A32D2D]">已阻断</span>
+                        : <><span>总分{asset.evaluationSummary.scoreDisplay}</span><span>{asset.evaluationSummary.finalRecommendation}</span></>
                     )}
                   </div>
                   {asset.evaluationIssue && <p className="mt-1.5 text-[11.5px] text-[#A32D2D]">{asset.evaluationIssue.message}</p>}
@@ -360,6 +498,7 @@ export default function TopicBoardPage() {
     try {
       const personas = getLatestPersonas(requestIP.id);
       const stableKnowledgeContext = collectKnowledgeContext(requestedTopic, requestIP);
+      const historicalData = collectHistoricalData(requestedTopic, requestIP);
       const allEntries = getBoardKnowledgeEntries(requestIP);
       const stableRefs = refsFromMatches(stableKnowledgeContext as KnowledgeSearchMatch[], allEntries);
       setKnowledgeRefs(stableRefs);
@@ -370,6 +509,7 @@ export default function TopicBoardPage() {
           topic: requestedTopic,
           userPersonas: personas,
           knowledgeContext: stableKnowledgeContext,
+          historicalData,
         }, requestIP)),
       });
       let data: unknown = null;
@@ -559,6 +699,7 @@ export default function TopicBoardPage() {
             </Card>
           </section>
 
+          {result.decisionStatus !== "blocked" && result.totalScore !== null && (
           <section>
             <STitle num="00" sub="统一评分明细，每项都有一句解释">透明评分</STitle>
             <Card>
@@ -591,6 +732,7 @@ export default function TopicBoardPage() {
               </div>
             </Card>
           </section>
+          )}
 
           {(result.safetyVeto || result.finalRecommendation === "不建议") && (
             <section>
@@ -627,9 +769,13 @@ export default function TopicBoardPage() {
             <div className="text-[21px] font-semibold text-white">「{result.topic}」</div>
             <div className="mt-3 flex flex-wrap gap-2">
               <span className="text-[13px] text-[#8A8A86]">9位专家 · 7阶段评审 · 完整推理链</span>
-              <span className="rounded-full px-3 py-1 text-[12px] font-bold" style={{ background: levelColor(result.totalScore) + "22", color: levelColor(result.totalScore) }}>
-                {result.safetyVeto ? "安全否决" : result.level}
-              </span>
+              {result.decisionStatus === "blocked" ? (
+                <span className="rounded-full bg-[#FCEBEB] px-3 py-1 text-[12px] font-bold text-[#A32D2D]">已阻断</span>
+              ) : result.totalScore !== null ? (
+                <span className="rounded-full px-3 py-1 text-[12px] font-bold" style={{ background: levelColor(result.totalScore) + "22", color: levelColor(result.totalScore) }}>
+                  {result.level}
+                </span>
+              ) : null}
             </div>
           </div>
 
@@ -700,6 +846,7 @@ export default function TopicBoardPage() {
           </section>
 
           {/* ③ 首席反对官 */}
+          {result.decisionStatus !== "blocked" && result.chiefOfficer && (
           <section>
             <STitle num="02" sub="专门寻找失败理由，永远站在反对立场">首席反对官</STitle>
             <div className="rounded-[14px] border-2 border-[#E0608E] bg-white p-5">
@@ -710,15 +857,15 @@ export default function TopicBoardPage() {
                 </div>
                 <div className="flex items-center gap-3">
                   <span className={`rounded-full px-3 py-1 text-[12px] font-bold ${
-                  (result.safetyVeto ? "高风险" : result.chiefOfficer.riskLevel) === "高风险" ? "bg-[#FCEBEB] text-[#A32D2D]"
+                  result.chiefOfficer.riskLevel === "高风险" ? "bg-[#FCEBEB] text-[#A32D2D]"
                   : result.chiefOfficer.riskLevel === "中风险" ? "bg-[#FBF3D6] text-[#7A5C00]"
                   : "bg-[#EAF3DE] text-[#3B6D11]"
-                  }`}>{result.safetyVeto ? "高风险" : result.chiefOfficer.riskLevel}</span>
-                  <span className="text-[13px] text-[#8A8A86]">失败概率 <span className="font-bold text-[#E0608E]">{result.safetyVeto ? 100 : result.chiefOfficer.failProbability}%</span></span>
+                  }`}>{result.chiefOfficer.riskLevel}</span>
+                  <span className="text-[13px] text-[#8A8A86]">失败概率 <span className="font-bold text-[#E0608E]">{result.chiefOfficer.failProbability}%</span></span>
                 </div>
               </div>
               <div className="mb-3 space-y-2">
-                {(result.safetyVeto ? [safetyBlockReason ?? "存在不可控的言行或合规风险。"] : result.chiefOfficer.reasons).map((r, i) => (
+                {result.chiefOfficer.reasons.map((r, i) => (
                   <div key={i} className="flex items-start gap-2">
                     <span className="mt-0.5 text-[#E0608E]">✗</span>
                     <span className="text-[13.5px] text-[#1C1C1B]">{r}</span>
@@ -727,10 +874,11 @@ export default function TopicBoardPage() {
               </div>
               <div className="rounded-[10px] bg-[#FBF3D6] px-4 py-3">
                 <span className="text-[11px] font-bold text-[#7A5C00]">驳回建议 </span>
-                <span className="text-[13px] text-[#1C1C1B]">{result.safetyVeto ? "当前版本不得制作或测试；完成安全改写后重新评估。" : result.chiefOfficer.dismissalSuggestion}</span>
+                <span className="text-[13px] text-[#1C1C1B]">{result.chiefOfficer.dismissalSuggestion}</span>
               </div>
             </div>
           </section>
+          )}
 
           {/* ④ 第二轮：质疑对话 */}
           <section>
@@ -826,6 +974,7 @@ export default function TopicBoardPage() {
           </section>
 
           {/* ⑦ 评分计算 */}
+          {result.decisionStatus !== "blocked" && result.totalScore !== null && (
           <section>
             <STitle num="06" sub="加权模型，每分都有出处">综合评分计算</STitle>
             <Card>
@@ -848,8 +997,10 @@ export default function TopicBoardPage() {
               </div>
             </Card>
           </section>
+          )}
 
           {/* ⑧ 可信度仪表盘 */}
+          {result.decisionStatus !== "blocked" && (
           <section>
             <STitle num="07" sub="本次评审结论的可靠程度">可信度仪表盘</STitle>
             <Card>
@@ -878,8 +1029,10 @@ export default function TopicBoardPage() {
               </div>
             </Card>
           </section>
+          )}
 
           {/* ⑨ 最终决议 */}
+          {result.decisionStatus !== "blocked" && result.totalScore !== null && (
           <section>
             <STitle num="08">最终董事会决议</STitle>
             <div className="rounded-[16px] bg-[#1C1C1B] p-6">
@@ -907,6 +1060,7 @@ export default function TopicBoardPage() {
               </div>
             </div>
           </section>
+          )}
 
           {/* ⑩ 风险 */}
           <section>

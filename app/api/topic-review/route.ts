@@ -547,6 +547,25 @@ interface UserPersonaItem {
   representativeComments: string[];
 }
 
+interface HistoricalDataItem {
+  id: string;
+  title: string;
+  source: string;
+  content: string;
+  metrics: Record<string, number | boolean | string | null>;
+  performanceLevel: string;
+  createdAt?: string;
+  matchScore?: number;
+}
+
+interface EvidenceAdjustmentItem {
+  sampleId: string;
+  title: string;
+  performanceLevel: string;
+  adjustment: number;
+  reason: string;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -636,6 +655,77 @@ function invalidRequest(errorField: string) {
   }, { status: 400 });
 }
 
+function clampScore(score: number): number {
+  return Math.max(0, Math.min(100, Math.round(score * 100) / 100));
+}
+
+function evidenceDirection(item: HistoricalDataItem): "high" | "medium" | "low" | "unknown" {
+  const calibrationLevel = item.metrics.calibrationPerformanceLevel;
+  if (calibrationLevel === "high" || calibrationLevel === "medium" || calibrationLevel === "low") {
+    return calibrationLevel;
+  }
+
+  const level = item.performanceLevel.toLowerCase();
+  if (["高表现", "爆款", "潜力款", "high", "a类", "s类"].some(label => level.includes(label))) return "high";
+  if (["中表现", "中等", "medium", "b类"].some(label => level.includes(label))) return "medium";
+  if (["低表现", "低效", "low", "c类"].some(label => level.includes(label))) return "low";
+  return "unknown";
+}
+
+function buildEvidenceAdjustment(historicalData: HistoricalDataItem[]) {
+  const sorted = [...historicalData].sort((a, b) =>
+    (b.matchScore ?? 0) - (a.matchScore ?? 0) || a.id.localeCompare(b.id),
+  );
+  const items: EvidenceAdjustmentItem[] = [];
+  let total = 0;
+
+  for (const sample of sorted) {
+    const direction = evidenceDirection(sample);
+    const requestedAdjustment = direction === "high" ? 3 : direction === "low" ? -3 : 0;
+    if (direction === "unknown") continue;
+
+    const nextTotal = Math.max(-10, Math.min(10, total + requestedAdjustment));
+    const adjustment = nextTotal - total;
+    total = nextTotal;
+    const reason = direction === "high"
+      ? adjustment === 3
+        ? "相似选题属于高表现样本，提供有限正向校准。"
+        : "相似选题属于高表现样本，但累计调整已接近10分上限。"
+      : direction === "low"
+      ? adjustment === -3
+        ? "相似选题属于低表现样本，提供有限负向校准。"
+        : "相似选题属于低表现样本，但累计调整已接近负10分下限。"
+      : "相似选题属于中等表现样本，仅增加判断依据，不调整分数。";
+
+    items.push({
+      sampleId: sample.id,
+      title: sample.title,
+      performanceLevel: sample.performanceLevel,
+      adjustment,
+      reason,
+    });
+  }
+
+  const directions = new Set(items.map(item => Math.sign(item.adjustment)).filter(sign => sign !== 0));
+  const confidenceLevel = items.length >= 3 && directions.size <= 1
+    ? "高"
+    : items.length > 0
+    ? "中"
+    : "低";
+  const confidenceReason = confidenceLevel === "高"
+    ? `已有${items.length}条方向一致的历史样本，参考可信度较高。`
+    : confidenceLevel === "中"
+    ? `已有${items.length}条历史样本，但数量或表现一致性有限，建议继续小范围测试。`
+    : "可信度较低，建议小范围测试。";
+
+  return {
+    adjustment: total,
+    items,
+    confidenceLevel,
+    confidenceReason,
+  } as const;
+}
+
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
   let body: unknown;
@@ -664,6 +754,7 @@ export async function POST(req: NextRequest) {
 
   const ipBlock = buildIPContextBlock(ip);
   const personas = (body.userPersonas ?? []) as UserPersonaItem[];
+  const historicalData = (body.historicalData ?? []) as HistoricalDataItem[];
 
   try {
     // ── 第一步：9位专家并行调用，每位专家都拿到同一份IP上下文 ──
@@ -743,13 +834,7 @@ export async function POST(req: NextRequest) {
       "object",
     );
 
-    const chiefOfficer = safetyVeto ? {
-      role: "首席反对官",
-      reasons: [safetyVetoReason],
-      riskLevel: "高风险",
-      failProbability: 100,
-      dismissalSuggestion: "当前版本不得制作或测试；完成安全改写后重新评估。",
-    } : {
+    const chiefOfficer = safetyVeto ? null : {
       role: "首席反对官",
       reasons: chiefParsed?.reasons ?? [],
       riskLevel: chiefParsed?.riskLevel ?? "中风险",
@@ -774,7 +859,7 @@ export async function POST(req: NextRequest) {
       "array",
     );
 
-    // ── 第四步：修正评分（基于质疑微调） ──
+    // ── 第四步：保留质疑记录，不用随机数改写AI评审分 ──
     const responses = expertResults.map(e => {
       if (e.veto) {
         return {
@@ -788,19 +873,15 @@ export async function POST(req: NextRequest) {
         };
       }
       const beingChallenged = challenges.find(c => c.to === e.role);
-      const change = beingChallenged ? Math.round((Math.random() - 0.55) * 8) : 0;
-      const finalScore = Math.max(40, Math.min(98, e.initialScore + change));
       return {
         role: e.role,
         challenge: beingChallenged?.challenge ?? null,
-        response: change < 0
-          ? `质疑成立，重新审视后下调评分。`
-          : change > 0
-          ? `质疑促使深入分析，发现价值被低估，上调评分。`
-          : `充分考虑质疑后维持原判，评分依据充分。`,
+        response: beingChallenged
+          ? "已记录该质疑，基础分仍以AI多角色评审的原始判断为准。"
+          : "未收到定向质疑，维持AI评审原分。",
         initialScore: e.initialScore,
-        finalScore,
-        scoreChange: change,
+        finalScore: e.initialScore,
+        scoreChange: 0,
         finalFormula: e.dimData.formula,
       };
     });
@@ -812,30 +893,38 @@ export async function POST(req: NextRequest) {
     });
 
     // ── 第五步：投票统计 ──
-    const votes = [
-      ...expertResults.map(e => ({ role: e.role, vote: e.vote })),
-      { role: "首席反对官", vote: "反对" },
-    ];
+    const votes = safetyVeto
+      ? expertResults.map(e => ({ role: e.role, vote: e.vote }))
+      : [
+          ...expertResults.map(e => ({ role: e.role, vote: e.vote })),
+          { role: "首席反对官", vote: "反对" },
+        ];
     const supportCount = votes.filter(v => v.vote === "支持").length;
     const reserveCount = votes.filter(v => v.vote === "保留意见").length;
     const opposeCount = votes.filter(v => v.vote === "反对").length;
     const verdict = safetyVeto
-      ? "安全否决"
+      ? "已阻断"
       : supportCount > opposeCount + Math.floor(reserveCount / 2)
       ? "通过"
       : supportCount + Math.floor(reserveCount / 2) > opposeCount
       ? "有条件通过"
       : "暂缓";
 
-    // ── 第六步：加权综合评分 ──
-    const weights = expertResults.map(e => ({
+    // ── 第六步：AI内容价值基础分（安全角色只审查，不参与平均） ──
+    const contentExperts = expertResults.filter(e => e.role !== "安全合规官");
+    const weights = safetyVeto ? [] : contentExperts.map(e => ({
       role: e.role,
       score: e.finalScore,
       weight: e.weight,
       contribution: Math.round(e.finalScore * e.weight * 100) / 100,
     }));
-    const totalScore = Math.round(weights.reduce((s, w) => s + w.contribution, 0) * 100) / 100;
-    const level = safetyVeto ? "安全否决" : scoreLevel(totalScore);
+    const calculatedAIBaseScore = Math.round(weights.reduce((s, w) => s + w.contribution, 0) * 100) / 100;
+    const evidence = buildEvidenceAdjustment(historicalData);
+    const aiBaseScore = safetyVeto ? null : calculatedAIBaseScore;
+    const evidenceAdjustment = safetyVeto ? 0 : evidence.adjustment;
+    const finalReferenceScore = aiBaseScore === null ? null : clampScore(aiBaseScore + evidenceAdjustment);
+    const totalScore = finalReferenceScore;
+    const level = safetyVeto ? "已阻断" : scoreLevel(totalScore ?? 0);
 
     // ── 第七步：综合决议 ──
     const verdictParsed = safetyVeto ? {
@@ -853,7 +942,7 @@ export async function POST(req: NextRequest) {
     }>(
       "verdict",
       VERDICT_SYSTEM,
-      VERDICT_PROMPT(topic, ipBlock, totalScore, level, expertSummary),
+      VERDICT_PROMPT(topic, ipBlock, totalScore ?? 0, level, expertSummary),
       1600,
       apiKey,
       "object",
@@ -912,14 +1001,14 @@ ${personas.map((p, i) => `
     }
 
     const normalizedRiskLevel = safetyVeto
+      ? null
+      : chiefOfficer?.riskLevel.includes("高")
       ? "高"
-      : chiefOfficer.riskLevel.includes("高")
-      ? "高"
-      : chiefOfficer.riskLevel.includes("低")
+      : chiefOfficer?.riskLevel.includes("低")
       ? "低"
       : "中";
     const finalRecommendation = safetyVeto
-      ? "不建议"
+      ? null
       : verdict === "通过"
       ? "建议做"
       : verdict === "有条件通过"
@@ -938,11 +1027,20 @@ ${personas.map((p, i) => `
       voteResult: { supportCount, reserveCount, opposeCount, verdict },
       safetyVeto,
       safetyVetoReason: safetyVeto ? safetyVetoReason : null,
+      decisionStatus: safetyVeto ? "blocked" : "evaluated",
+      aiBaseScore,
+      evidenceAdjustment,
+      evidenceAdjustmentItems: safetyVeto ? [] : evidence.items,
+      finalReferenceScore,
+      confidenceLevel: safetyVeto ? null : evidence.confidenceLevel,
+      confidenceReason: safetyVeto
+        ? "安全边界已触发，不进行内容价值评分。"
+        : evidence.confidenceReason,
       weights,
       totalScore,
       level,
       finalRecommendation,
-      scoreDisplay: String(totalScore),
+      scoreDisplay: safetyVeto ? null : String(totalScore),
       beginnerAdvice: {
         canDo: safetyVeto ? "不能做当前版本。" : finalRecommendation,
         why: safetyVeto
@@ -950,10 +1048,10 @@ ${personas.map((p, i) => `
           : `董事会表决结果为${verdict}。`,
         biggestProblem: safetyVeto
           ? safetyVetoReason
-          : chiefOfficer.reasons[0] ?? "需要先用低成本内容验证。",
+          : chiefOfficer?.reasons[0] ?? "需要先用低成本内容验证。",
         howToImprove: safetyVeto
           ? "先移除不可控风险并重新评估，不要直接发布当前版本。"
-          : chiefOfficer.dismissalSuggestion || "先缩小人群和场景，再进行测试。",
+          : chiefOfficer?.dismissalSuggestion || "先缩小人群和场景，再进行测试。",
         shouldTest: safetyVeto
           ? "不要测试当前版本，完成安全改写后重新评估。"
           : verdict === "暂缓"
@@ -966,7 +1064,7 @@ ${personas.map((p, i) => `
       riskLevel: normalizedRiskLevel,
       riskExplanation: safetyVeto
         ? safetyVetoReason
-        : chiefOfficer.reasons[0] ?? "暂无额外风险说明。",
+        : chiefOfficer?.reasons[0] ?? "暂无额外风险说明。",
       scoreBreakdown: weights.map(weight => ({
         label: weight.role,
         score: weight.score,
@@ -998,12 +1096,12 @@ ${personas.map((p, i) => `
         historicalData: [],
         ipInfo: [`当前IP：${ip.name}`, `定位：${ip.positioning}`, `受众：${ip.audience}`],
         positiveFactors: [],
-        negativeFactors: chiefOfficer.reasons,
+        negativeFactors: chiefOfficer?.reasons ?? [safetyVetoReason],
       },
       optimizationPlan: {
         coreReason: safetyVeto
           ? safetyVetoReason
-          : chiefOfficer.reasons[0] ?? "需要进一步验证选题角度。",
+          : chiefOfficer?.reasons[0] ?? "需要进一步验证选题角度。",
         keepParts: safetyVeto ? [] : [topic],
         weakenParts: safetyVeto ? [safetyVetoReason] : [],
         rewrittenDirections: safetyVeto ? [] : verdictParsed.upgradedTopics ?? [],

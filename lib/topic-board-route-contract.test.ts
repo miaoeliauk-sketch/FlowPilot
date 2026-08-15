@@ -211,19 +211,21 @@ test("安全合规官主动否决时强制覆盖所有最终结论", async () =>
     assert.match(safetyExpert.conclusion, /安全否决/);
     assert.equal(result.safetyVeto, true);
     assert.equal(result.safetyVetoReason, "存在不可控的合规风险。");
-    assert.equal(result.voteResult.verdict, "安全否决");
-    assert.equal(result.finalRecommendation, "不建议");
+    assert.equal(result.decisionStatus, "blocked");
+    assert.equal(result.voteResult.verdict, "已阻断");
+    assert.equal(result.finalRecommendation, null);
+    assert.equal(result.totalScore, null);
+    assert.equal(result.scoreDisplay, null);
     assert.equal(result.beginnerAdvice.canDo, "不能做当前版本。");
     assert.equal(result.beginnerAdvice.shouldTest, "不要测试当前版本，完成安全改写后重新评估。");
-    assert.equal(result.riskLevel, "高");
-    assert.equal(result.chiefOfficer.riskLevel, "高风险");
+    assert.equal(result.riskLevel, null);
+    assert.equal(result.chiefOfficer, null);
     assert.equal(result.optimizationPlan.retestSuggestion, "当前版本不得测试；完成安全改写后重新评估。");
     assert.deepEqual(result.optimizationPlan.keepParts, []);
     assert.deepEqual(result.optimizationPlan.rewrittenDirections, []);
     assert.deepEqual(result.upgradedTopics, []);
     assert.deepEqual(result.titles, []);
     assert.equal(result.personaPreview, null);
-    assert.equal(result.finalRecommendation.includes("建议做"), false);
     assert.equal(result.beginnerAdvice.canDo.includes("建议做"), false);
     assert.equal(JSON.stringify(result).includes("建议先小规模测试"), false);
     assert.equal(JSON.stringify(result).includes("建议做升级选题"), false);
@@ -354,10 +356,13 @@ test("安全维度或总分过低时即使AI未主动否决也会强制拦截", 
 
       assert.equal(response.status, 200, testCase.name);
       assert.equal(result.safetyVeto, true, testCase.name);
-      assert.equal(result.voteResult.verdict, "安全否决", testCase.name);
-      assert.equal(result.finalRecommendation, "不建议", testCase.name);
+      assert.equal(result.decisionStatus, "blocked", testCase.name);
+      assert.equal(result.voteResult.verdict, "已阻断", testCase.name);
+      assert.equal(result.finalRecommendation, null, testCase.name);
+      assert.equal(result.totalScore, null, testCase.name);
       assert.equal(result.beginnerAdvice.canDo, "不能做当前版本。", testCase.name);
-      assert.equal(result.riskLevel, "高", testCase.name);
+      assert.equal(result.riskLevel, null, testCase.name);
+      assert.equal(result.chiefOfficer, null, testCase.name);
     }
   } finally {
     globalThis.fetch = originalFetch;
