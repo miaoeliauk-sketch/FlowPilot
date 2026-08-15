@@ -67,7 +67,7 @@ after(() => {
   restoreBrowser?.();
 });
 
-test("未选择IP时禁用观点覆盖度检查且不发送请求", async () => {
+test("未选择IP时禁用直接生成且不发送请求", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = async () => {
@@ -90,11 +90,11 @@ test("未选择IP时禁用观点覆盖度检查且不发送请求", async () => 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
 
     await user.type(
-      view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？"),
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "测试选题",
     );
-    const checkButton = view.getByRole("button", { name: "检查观点覆盖度" }) as HTMLButtonElement;
-    assert.equal(checkButton.disabled, true);
+    const generateButton = view.getByRole("button", { name: "生成IP专属内容" }) as HTMLButtonElement;
+    assert.equal(generateButton.disabled, true);
     assert.match(view.container.textContent ?? "", /未选择IP/);
     assert.equal(called, false);
   } finally {

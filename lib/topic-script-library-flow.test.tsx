@@ -132,30 +132,12 @@ function readRequestIPId(requestBody: Record<string, unknown>): string | null {
   return isRecord(ipProfile) && typeof ipProfile.id === "string" ? ipProfile.id : null;
 }
 
-function fullCoverageResponse() {
-  return new Response(JSON.stringify({ assessment: {
-    coverage: "FULL",
-    reason: "当前IP原始内容包含核心判断和推理。",
-    coveredDimensions: ["核心判断", "推理过程"],
-    missingDimensions: [],
-    sourceReferences: [{
-      sourceId: "source-1", sourceTitle: "测试原始内容", itemId: "claim-1", kind: "claim",
-      content: "测试核心判断", originalExcerpt: "测试核心判断和推理过程。", extractionStatus: "人工确认",
-    }],
-    caseNeed: "NOT_NEEDED",
-    caseReason: "原始内容内部论证完整。",
-  } }), { status: 200, headers: { "Content-Type": "application/json" } });
-}
-
 async function unlockGeneration(
   view: ReturnType<typeof import("@testing-library/react").render>,
   user: Awaited<ReturnType<typeof import("@testing-library/user-event").default.setup>>,
 ) {
   await user.click(view.getByRole("button", { name: "IP专属生成" }));
-  await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
-  await view.findByText("充分覆盖");
-  await user.click(view.getByRole("button", { name: "确认观点依据与案例边界" }));
-  return view.getByRole("button", { name: "依据确认后生成脚本" });
+  return view.getByRole("button", { name: "生成IP专属内容" });
 }
 
 before(() => {
@@ -523,7 +505,6 @@ test("生成失败后也拒绝恢复外层IP与内部结果IP不一致的损坏�
   }), true);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   globalThis.fetch = async (input) => {
-    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify({ error: "模拟生成失败" }), {
         status: 502,
@@ -587,7 +568,6 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
   });
 
   globalThis.fetch = async (input, init) => {
-    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       const requestBody: unknown = JSON.parse(String(init?.body ?? "{}"));
       if (!isRecord(requestBody)) throw new Error("脚本工厂请求体不是对象");
@@ -651,7 +631,6 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
     markRequested = resolve;
   });
   globalThis.fetch = async (input) => {
-    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       markRequested();
       return new Promise<Response>(resolve => {
@@ -711,7 +690,6 @@ test("接口返回的脚本IP与请求IP不一致时停止保存", async () => {
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
 
   globalThis.fetch = async (input) => {
-    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(createCompleteScriptResponse("ip-wrong", "错误IP", topic.title)), {
         status: 200,
@@ -770,7 +748,6 @@ test("部分成功草稿保存topicId并在刷新后恢复选题关联", async (
   };
 
   globalThis.fetch = async (input) => {
-    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(partialResponse), {
         status: 200,
@@ -846,7 +823,7 @@ test("脚本工厂拒绝通过URL带入其他IP的选题", async () => {
   );
 
   assert.ok(await view.findByText("选题所属IP与当前操盘IP不一致，已阻止关联"));
-  const topicInput = view.getByPlaceholderText("例如：一个正在发生的变化，普通人应该如何判断？") as HTMLTextAreaElement;
+  const topicInput = view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文") as HTMLTextAreaElement;
   assert.equal(topicInput.value, "");
   assert.equal(view.queryByText("当前关联选题"), null);
 });
@@ -866,7 +843,6 @@ test("生成前选题状态失效时不调用接口也不保存脚本", async ()
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   let scriptFactoryCalls = 0;
   globalThis.fetch = async (input) => {
-    if (String(input) === "/api/script-factory/coverage") return fullCoverageResponse();
     if (String(input) === "/api/script-factory") scriptFactoryCalls += 1;
     return new Response(JSON.stringify({ results: [], debug: null }), {
       status: 200,

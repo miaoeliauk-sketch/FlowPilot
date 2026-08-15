@@ -164,20 +164,6 @@ after(() => {
 test("脚本工厂非阻断展示论证待核对提示并保留生成结果", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
-    if (String(input) === "/api/script-factory/coverage") {
-      return new Response(JSON.stringify({ assessment: {
-        coverage: "FULL",
-        reason: "老师原始内容包含核心判断和推理。",
-        coveredDimensions: ["核心判断", "推理过程"],
-        missingDimensions: [],
-        sourceReferences: [{
-          sourceId: "source-1", sourceTitle: "经营课程", itemId: "claim-1", kind: "claim",
-          content: "情绪价值会影响支付意愿。", originalExcerpt: "情绪价值会影响消费者的支付意愿。", extractionStatus: "人工确认",
-        }],
-        caseNeed: "NOT_NEEDED",
-        caseReason: "原文内部论证完整。",
-      } }), { status: 200, headers: { "Content-Type": "application/json" } });
-    }
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(completeResponse()), {
         status: 200,
@@ -205,10 +191,7 @@ test("脚本工厂非阻断展示论证待核对提示并保留生成结果", as
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     const topicInput = view.container.querySelector("textarea") as HTMLTextAreaElement;
     await user.type(topicInput, "Jellycat为什么能卖出情绪溢价");
-    await user.click(view.getByRole("button", { name: "检查观点覆盖度" }));
-    assert.ok(await view.findByText("充分覆盖"));
-    await user.click(view.getByRole("button", { name: "确认观点依据与案例边界" }));
-    await user.click(view.getByRole("button", { name: "依据确认后生成脚本" }));
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText(/论证待核对/));
     assert.ok(view.getByText(/规模效应，不能直接支持情绪溢价带来的定价权/));

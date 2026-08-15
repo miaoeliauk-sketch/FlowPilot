@@ -2,7 +2,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
-import { addScriptAsset, getActiveIPId, getKnowledgeEntries, getScriptAssets, recordKnowledgeUsage, getStyleProfile } from "@/lib/ip-store";
+import { addScriptAsset, getActiveIPId, getKnowledgeEntries, getScriptAssets, recordKnowledgeUsage, getStyleProfile, updateScriptAssetResult } from "@/lib/ip-store";
 import { IPProfile, KnowledgeEntry, ScriptAsset, TopicAsset } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
@@ -20,18 +20,15 @@ import type {
   ScriptGenerationStatus,
   ScriptOutputStatus,
   ScriptPartialFailure,
+  ScriptPostGenerationAudit,
   ScriptQualityCheck,
 } from "@/lib/script-factory-contract";
+import { parseScriptPostGenerationAudit } from "@/lib/script-factory-contract";
 import { addScriptAssetForTopic, resolveTopicForScript, TopicScriptLinkError } from "@/lib/topic-script-link";
-import {
-  resolveGenerationPermission,
-  type CaseDecision,
-  type CoverageAssessment,
-  type CoverageSourceReference,
-} from "@/lib/script-factory-coverage";
+import type { CaseDecision, CoverageAssessment, CoverageSourceReference } from "@/lib/script-factory-coverage";
 import { shouldUseShuimuranDirector } from "@/lib/script-director-profile";
 
-const TOPIC_PLACEHOLDER = "例如：一个正在发生的变化，普通人应该如何判断？";
+const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
 
 // ── Types ──
@@ -51,6 +48,14 @@ interface EvidenceAudit {
   caseNeed: string;
   caseEvidence: { title: string; sourceType: string; verificationStatus: string; sourceUrl?: string; occurredAt?: string } | null;
 }
+interface GenerationCaseEvidence {
+  ipId?: string | null;
+  title: string;
+  content: string;
+  sourceType: string;
+  verificationStatus: string;
+  sourceUrl?: string;
+}
 interface ScriptResult {
   generationMode?: GenerationMode;
   outputMode?: "default" | "shuimuran-confirmed";
@@ -67,6 +72,8 @@ interface ScriptResult {
   evidenceAudit?: EvidenceAudit;
   attributionAudit?: ScriptAttributionAudit;
   factAudit?: ScriptFactAudit;
+  postGenerationAuditStatus?: ScriptPostGenerationAudit["status"];
+  postGenerationAuditMessage?: string;
   generationApproval?: {
     coverage: CoverageAssessment["coverage"];
     outputStatus: ScriptOutputStatus;
@@ -147,6 +154,15 @@ function normalizeStoredCompleteScriptResult(value: unknown): ScriptResult | nul
     ...(value as unknown as Omit<ScriptResult, "generationStatus" | "partialFailure">),
     generationStatus: "complete",
     partialFailure: null,
+  };
+}
+
+function normalizeRestoredAuditState(result: ScriptResult): ScriptResult {
+  if (result.postGenerationAuditStatus !== "pending") return result;
+  return {
+    ...result,
+    postGenerationAuditStatus: "unavailable",
+    postGenerationAuditMessage: "本次归属分析暂未完成，不影响正文使用",
   };
 }
 
@@ -234,6 +250,22 @@ const CONFIDENCE_LABELS = { high: "高", medium: "中", low: "低" } as const;
 function TeamReviewPanel({ data }: { data: ScriptResult }) {
   const attribution = data.attributionAudit;
   const fact = data.factAudit;
+  if (data.postGenerationAuditStatus === "pending") {
+    return (
+      <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-4">
+        <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
+        <p className="mt-2 text-[12.5px] text-[#666]">观点归属分析中，不影响正文使用</p>
+      </section>
+    );
+  }
+  if (data.postGenerationAuditStatus === "unavailable") {
+    return (
+      <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4">
+        <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
+        <p className="mt-2 text-[12.5px] text-[#755700]">{data.postGenerationAuditMessage ?? "本次归属分析暂未完成，不影响正文使用"}</p>
+      </section>
+    );
+  }
   if (!attribution) {
     return (
       <div className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-4">
@@ -607,22 +639,17 @@ export default function ScriptFactoryPage() {
   const [generationMode, setGenerationMode] = useState<GenerationMode>("standard");
   const [topic, setTopic] = useState("");
   const [angle, setAngle] = useState("");
-  const [coverageLoading, setCoverageLoading] = useState(false);
-  const [coverage, setCoverage] = useState<CoverageAssessment | null>(null);
-  const [coverageError, setCoverageError] = useState<string | null>(null);
   const [caseDecision, setCaseDecision] = useState<CaseDecision | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState("");
   const [manualCaseTitle, setManualCaseTitle] = useState("");
   const [manualCaseContent, setManualCaseContent] = useState("");
   const [manualCaseSource, setManualCaseSource] = useState("");
   const [manualCaseVerified, setManualCaseVerified] = useState(false);
-  const [evidenceConfirmed, setEvidenceConfirmed] = useState(false);
-  const [limitationsAcknowledged, setLimitationsAcknowledged] = useState(false);
-  const [showInterviewOutline, setShowInterviewOutline] = useState(false);
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const generationSequenceRef = useRef(0);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -636,7 +663,7 @@ export default function ScriptFactoryPage() {
     const allEntries = getKnowledgeEntries().filter(e => {
       if (e.ipId && e.ipId !== activeIP?.id) return false;
       const category = getNormalizedCategory(e);
-      // 原始内容只通过“观点覆盖度→引用确认”进入生成，不能混入通用方法检索。
+      // 原始内容通过专属上下文进入生成和生成后审计，不能混入通用方法检索。
       if (category === "IP原始内容") return false;
       return isGlobalMethodCategory(category) || isIPKnowledgeCategory(category);
     });
@@ -705,30 +732,13 @@ export default function ScriptFactoryPage() {
     ipName: activeIP?.name,
     profileId: activeIP?.scriptDirectorProfileId,
   });
-  const permission = resolveGenerationPermission(coverage, caseDecision, evidenceConfirmed, limitationsAcknowledged);
-  const canGenerate = generationMode === "standard" || permission.allowed;
-
   function switchGenerationMode(nextMode: GenerationMode) {
+    generationSequenceRef.current += 1;
     setGenerationMode(nextMode);
     setError(null);
     setResult(null);
     setApiMeta(null);
     setPartialDraftSavedAt(null);
-  }
-
-  function getCoverageSources(): CoverageSourceReference[] {
-    if (!activeIP) return [];
-    return getKnowledgeEntries("IP原始内容")
-      .filter(entry => entry.ipId === activeIP.id)
-      .flatMap(entry => (entry.sourceAnalysis?.items ?? []).map(item => ({
-        sourceId: entry.id,
-        sourceTitle: entry.title,
-        itemId: item.id,
-        kind: item.kind,
-        content: item.content,
-        originalExcerpt: item.originalExcerpt,
-        extractionStatus: item.extractionStatus,
-      })));
   }
 
   function getIPSourceContext(ipId: string) {
@@ -747,88 +757,13 @@ export default function ScriptFactoryPage() {
   }
 
   useEffect(() => {
-    setCoverage(null);
-    setCoverageError(null);
     setCaseDecision(null);
     setSelectedCaseId("");
     setManualCaseTitle("");
     setManualCaseContent("");
     setManualCaseSource("");
     setManualCaseVerified(false);
-    setEvidenceConfirmed(false);
-    setLimitationsAcknowledged(false);
-    setShowInterviewOutline(false);
   }, [topic, angle, activeIP?.id, generationMode]);
-
-  async function handleCoverageCheck() {
-    if (!topic.trim()) { setCoverageError("请先填写选题"); return; }
-    if (!activeIP) { setCoverageError("请先在「IP身份中心」选择当前操盘IP"); return; }
-    setCoverageLoading(true);
-    setCoverageError(null);
-    setCoverage(null);
-    setCaseDecision(null);
-    setEvidenceConfirmed(false);
-    setLimitationsAcknowledged(false);
-    try {
-      const response = await apiFetch("/api/script-factory/coverage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic: topic.trim(),
-          angle: angle.trim(),
-          sources: getCoverageSources(),
-        }),
-      });
-      const data = await response.json() as { assessment?: CoverageAssessment; error?: string };
-      if (!response.ok || !data.assessment) throw new Error(data.error ?? "观点覆盖度分析失败");
-      setCoverage(data.assessment);
-      if (data.assessment.caseNeed === "NOT_NEEDED") setCaseDecision("skip");
-    } catch (coverageFailure) {
-      setCoverageError(coverageFailure instanceof Error ? coverageFailure.message : "观点覆盖度分析失败");
-    } finally {
-      setCoverageLoading(false);
-    }
-  }
-
-  function confirmEvidence() {
-    if (!coverage || coverage.coverage !== "FULL") return;
-    if (coverage.caseNeed === "REQUIRED" && !caseDecision) {
-      setCoverageError("这个立意需要案例，请先从知识库选择或人工补充。 ");
-      return;
-    }
-    if (caseDecision === "knowledge" && !selectedKnowledgeCase) {
-      setCoverageError("请先选择一条案例。 ");
-      return;
-    }
-    if (caseDecision === "manual" && !manualCaseContent.trim()) {
-      setCoverageError("请填写案例内容。 ");
-      return;
-    }
-    if (
-      isShuimuranDedicatedMode &&
-      caseDecision === "knowledge" &&
-      selectedKnowledgeCase?.sourceTier !== "高"
-    ) {
-      setCoverageError("这条案例还没有可靠来源，不能进入水木然正式口播稿。请更换案例。 ");
-      return;
-    }
-    if (
-      isShuimuranDedicatedMode &&
-      caseDecision === "manual" &&
-      (!manualCaseSource.trim() || !manualCaseVerified)
-    ) {
-      setCoverageError("请补充案例来源，并确认你已经核对原始来源与事实。 ");
-      return;
-    }
-    setCoverageError(null);
-    setEvidenceConfirmed(true);
-  }
-
-  function confirmLimitations() {
-    if (!coverage || coverage.coverage === "FULL") return;
-    setCoverageError(null);
-    setLimitationsAcknowledged(true);
-  }
 
   function handleFormatChange(id: string) {
     setFormatCategory(id);
@@ -847,6 +782,7 @@ export default function ScriptFactoryPage() {
     draft: PartialScriptDraft<ScriptResult>,
     expectedIPId: string,
   ): string | null {
+    generationSequenceRef.current += 1;
     if (draft.ipId !== expectedIPId || draft.result.ipId !== expectedIPId) {
       return "本地临时草稿数据不完整，已停止自动恢复。";
     }
@@ -860,7 +796,7 @@ export default function ScriptFactoryPage() {
     setVideoType(settings.videoType);
     setNeedsStoryboard(settings.needsStoryboard);
     setNeedsShootingTips(settings.needsShootingTips);
-    setResult(draft.result);
+    setResult(normalizeRestoredAuditState(draft.result));
     setApiMeta(draft.result.apiMeta);
     setPartialDraftSavedAt(draft.savedAt);
     setLinkedTopic(null);
@@ -875,13 +811,15 @@ export default function ScriptFactoryPage() {
   }
 
   function restoreSavedScript(script: ScriptAsset, expectedIPId: string): string | null {
+    generationSequenceRef.current += 1;
     if (script.ipId !== expectedIPId) {
       return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
     }
-    const savedResult = normalizeStoredCompleteScriptResult(script.scriptResult);
-    if (!savedResult) {
+    const storedResult = normalizeStoredCompleteScriptResult(script.scriptResult);
+    if (!storedResult) {
       return "保存的脚本数据不完整，无法恢复到脚本工厂。";
     }
+    const savedResult = normalizeRestoredAuditState(storedResult);
     if (savedResult.ipId !== expectedIPId) {
       return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
     }
@@ -909,6 +847,7 @@ export default function ScriptFactoryPage() {
   }
 
   useEffect(() => {
+    generationSequenceRef.current += 1;
     setLinkedTopic(null);
     setResult(null);
     setApiMeta(null);
@@ -990,46 +929,50 @@ export default function ScriptFactoryPage() {
     setDraftStorageError(null);
   }
 
-  async function generateFor(ip: IPProfile, t: string) {
+  function getGenerationCaseEvidence(): GenerationCaseEvidence | null {
+    if (caseDecision === "knowledge" && selectedKnowledgeCase) {
+      return {
+        ipId: selectedKnowledgeCase.ipId,
+        title: selectedKnowledgeCase.title,
+        content: selectedKnowledgeCase.rawContent,
+        sourceType: "知识库",
+        verificationStatus: selectedKnowledgeCase.sourceTier === "高" ? "有明确来源" : "未核实",
+        sourceUrl: selectedKnowledgeCase.sourceUrl,
+      };
+    }
+    if (caseDecision === "manual" && manualCaseContent.trim()) {
+      return {
+        ipId: null,
+        title: manualCaseTitle.trim() || "人工补充案例",
+        content: manualCaseContent.trim(),
+        sourceType: "用户提供",
+        verificationStatus: manualCaseVerified ? "人工已核实" : "未经系统核验",
+        sourceUrl: manualCaseSource.trim() || undefined,
+      };
+    }
+    return null;
+  }
+
+  async function generateFor(
+    ip: IPProfile,
+    t: string,
+    requestMode: GenerationMode,
+    ipSourceContext: ReturnType<typeof getIPSourceContext>,
+    caseEvidence: GenerationCaseEvidence | null,
+  ) {
     let res: Response;
-    const caseEvidence = caseDecision === "knowledge" && selectedKnowledgeCase ? {
-      ipId: selectedKnowledgeCase.ipId,
-      title: selectedKnowledgeCase.title,
-      content: selectedKnowledgeCase.rawContent,
-      sourceType: "知识库",
-      verificationStatus: selectedKnowledgeCase.sourceTier === "高" ? "有明确来源" : "未核实",
-      sourceUrl: selectedKnowledgeCase.sourceUrl,
-    } : caseDecision === "manual" ? {
-      title: manualCaseTitle.trim() || "人工补充案例",
-      content: manualCaseContent.trim(),
-      sourceType: "用户提供",
-      verificationStatus: manualCaseVerified ? "人工已核实" : "未经系统核验",
-      sourceUrl: manualCaseSource.trim(),
-    } : null;
     try {
       res = await apiFetch("/api/script-factory", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          generationMode,
+          generationMode: requestMode,
           ipProfile: ip, topic: t,
           styleProfile: getStyleProfile(ip.id) ?? null,
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
           formatCategory, durationSeconds: duration, goal, videoType,
           needsStoryboard, needsShootingTips,
-          ipSourceContext: generationMode === "ip" ? getIPSourceContext(ip.id) : undefined,
-          caseEvidence: generationMode === "ip" ? caseEvidence : undefined,
-          evidenceGate: generationMode === "ip" && coverage ? {
-            coverage: coverage.coverage,
-            reason: coverage.reason,
-            coveredDimensions: coverage.coveredDimensions,
-            missingDimensions: coverage.missingDimensions,
-            sourceReferences: coverage.sourceReferences,
-            caseNeed: coverage.caseNeed,
-            caseDecision,
-            evidenceConfirmed: coverage.coverage === "FULL" ? evidenceConfirmed : false,
-            limitationsAcknowledged: coverage.coverage !== "FULL" ? limitationsAcknowledged : false,
-            caseEvidence,
-          } : null,
+          ipSourceContext: requestMode === "ip" ? ipSourceContext : undefined,
+          caseEvidence: requestMode === "ip" ? caseEvidence : undefined,
           voiceSamples: getKnowledgeEntries("IP表达语料")
             .filter(entry => entry.ipId === ip.id)
             .slice(0, 5)
@@ -1073,12 +1016,98 @@ export default function ScriptFactoryPage() {
     return data as ScriptResult;
   }
 
+  async function runPostGenerationAudit({
+    requestSequence,
+    requestIP,
+    requestedTopic,
+    requestedAngle,
+    sources,
+    caseEvidence,
+    generatedData,
+    savedAssetId,
+  }: {
+    requestSequence: number;
+    requestIP: IPProfile;
+    requestedTopic: string;
+    requestedAngle: string;
+    sources: ReturnType<typeof getIPSourceContext>;
+    caseEvidence: GenerationCaseEvidence | null;
+    generatedData: ScriptResult;
+    savedAssetId: string | null;
+  }) {
+    let auditedData: ScriptResult;
+    try {
+      const response = await apiFetch("/api/script-factory/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: requestedTopic,
+          angle: requestedAngle,
+          sources,
+          content: {
+            outline: generatedData.outline.map(section => ({
+              ...section,
+              subPoints: section.subPoints ?? [],
+            })),
+            pendingVerification: generatedData.pendingVerification ?? [],
+          },
+          caseEvidence,
+        }),
+      });
+      const audit = parseScriptPostGenerationAudit(await response.json());
+      if (!response.ok || !audit) throw new Error("审计接口返回异常");
+      if (audit.status === "completed") {
+        auditedData = {
+          ...generatedData,
+          postGenerationAuditStatus: "completed",
+          postGenerationAuditMessage: undefined,
+          attributionAudit: audit.attributionAudit,
+          factAudit: audit.factAudit,
+        };
+      } else {
+        auditedData = {
+          ...generatedData,
+          postGenerationAuditStatus: "unavailable",
+          postGenerationAuditMessage: `${audit.status === "unavailable" ? audit.message : "本次归属分析暂未完成"}，不影响正文使用`,
+          attributionAudit: audit.status === "unavailable" ? audit.attributionAudit : undefined,
+          factAudit: audit.status === "unavailable" ? audit.factAudit : undefined,
+        };
+      }
+    } catch {
+      auditedData = {
+        ...generatedData,
+        postGenerationAuditStatus: "unavailable",
+        postGenerationAuditMessage: "本次归属分析暂未完成，不影响正文使用",
+        attributionAudit: undefined,
+        factAudit: undefined,
+      };
+    }
+
+    if (generationSequenceRef.current !== requestSequence || getActiveIPId() !== requestIP.id) return;
+    setResult(auditedData);
+    if (generatedData.generationStatus === "partial") {
+      const draft = getPartialScriptDraft(requestIP.id);
+      if (draft && isStoredScriptResult(draft.result)) {
+        savePartialScriptDraft({ ...draft, result: auditedData });
+      }
+      return;
+    }
+    if (savedAssetId && !updateScriptAssetResult(savedAssetId, requestIP.id, auditedData)) {
+      setDraftStorageError("正文已经保存，但团队审核信息未能写入历史记录；不影响当前正文使用。");
+    }
+  }
+
   async function handleGenerate() {
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
-    if (generationMode === "ip" && !permission.allowed) { setError(permission.reason); return; }
     const requestIP = activeIP;
     const requestedTopic = topic.trim();
+    const requestedAngle = angle.trim();
+    const requestMode = generationMode;
+    const requestSequence = generationSequenceRef.current + 1;
+    generationSequenceRef.current = requestSequence;
+    const sourceContext = requestMode === "ip" ? getIPSourceContext(requestIP.id) : [];
+    const caseEvidence = requestMode === "ip" ? getGenerationCaseEvidence() : null;
     let linkedTopicAtRequest: TopicAsset | null = null;
     try {
       if (getActiveIPId() !== requestIP.id) {
@@ -1093,29 +1122,26 @@ export default function ScriptFactoryPage() {
     }
     setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setLoading(true);
     try {
-      const generatedData = await generateFor(requestIP, requestedTopic);
-      const data: ScriptResult = generationMode === "ip" && coverage && generatedData.attributionAudit
-        ? {
-            ...generatedData,
-            generationApproval: {
-              coverage: coverage.coverage,
-              outputStatus: generatedData.attributionAudit.outputStatus,
-              confirmationType: coverage.coverage === "FULL" ? "evidence_confirmed" : "limitations_acknowledged",
-              missingDimensions: [...coverage.missingDimensions],
-              confirmedAt: new Date().toISOString(),
-            },
-          }
-        : generatedData;
+      const generatedData = await generateFor(requestIP, requestedTopic, requestMode, sourceContext, caseEvidence);
+      const data: ScriptResult = {
+        ...generatedData,
+        generationMode: requestMode,
+        attributionAudit: undefined,
+        factAudit: undefined,
+        postGenerationAuditStatus: requestMode === "ip" ? "pending" : undefined,
+        postGenerationAuditMessage: undefined,
+      };
       if (data.ipId !== requestIP.id) {
         throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
       }
-      if (getActiveIPId() !== requestIP.id) {
+      if (getActiveIPId() !== requestIP.id || generationSequenceRef.current !== requestSequence) {
         throw new Error("生成期间当前操盘IP已切换，结果未保存；请切回原IP后重新生成。");
       }
       if (linkedTopicAtRequest) {
         linkedTopicAtRequest = resolveTopicForScript(linkedTopicAtRequest.id, requestIP.id);
       }
       setResult(data);
+      let savedAssetId: string | null = null;
       if (data.generationStatus === "partial") {
         if (!data.partialFailure) {
           throw new Error("部分成功响应缺少失败阶段信息，无法安全保存临时草稿");
@@ -1130,7 +1156,7 @@ export default function ScriptFactoryPage() {
           failedStage: data.partialFailure.stage,
           warning: data.partialFailure.message,
           generationSettings: {
-            generationMode,
+            generationMode: requestMode,
             platform,
             formatCategory,
             durationSeconds: duration,
@@ -1158,13 +1184,26 @@ export default function ScriptFactoryPage() {
           throw new Error("保存前检测到当前操盘IP已切换，结果未保存。");
         }
         if (linkedTopicAtRequest) {
-          addScriptAssetForTopic({ ...scriptInput, topicId: linkedTopicAtRequest.id });
+          savedAssetId = addScriptAssetForTopic({ ...scriptInput, topicId: linkedTopicAtRequest.id }).id;
         } else {
-          addScriptAsset(scriptInput);
+          savedAssetId = addScriptAsset(scriptInput).id;
         }
         if (!clearPartialScriptDraft(requestIP.id)) {
           setDraftStorageError("完整脚本已保存，但浏览器未能清除旧的本地临时草稿。");
         }
+      }
+      setLoading(false);
+      if (requestMode === "ip") {
+        void runPostGenerationAudit({
+          requestSequence,
+          requestIP,
+          requestedTopic,
+          requestedAngle,
+          sources: sourceContext,
+          caseEvidence,
+          generatedData: data,
+          savedAssetId,
+        });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "脚本生成失败，请重试");
@@ -1190,7 +1229,7 @@ export default function ScriptFactoryPage() {
           <p className="mt-1.5 max-w-[640px] text-[13.5px] leading-6 text-[#8A8A86]">
             {generationMode === "standard"
               ? "固定脚本生成保留原来的直接产出流程；需要严格依据老师原始观点时，再切换到IP专属生成。"
-              : "先证明这个观点属于当前IP，再调用老师的原始内容、表达语料和必要案例组织成稿。"}
+              : "输入选题或原文后直接生成；观点归属和事实核验会在正文展示后自动补充。"}
           </p>
         </div>
         <span className="whitespace-nowrap rounded-full bg-[#EAF3DE] px-3.5 py-1.5 text-[12px] font-semibold text-[#3B6D11]">02 · 脚本生成</span>
@@ -1250,7 +1289,7 @@ export default function ScriptFactoryPage() {
 
       {/* 主工作流 */}
       <Card className="mb-6">
-        <SectionHead num="①">{generationMode === "standard" ? "输入选题并设置产出" : "输入选题并检查观点覆盖度"}</SectionHead>
+        <SectionHead num="①">输入选题或原文并设置产出</SectionHead>
         <div className="flex flex-col gap-3">
           <textarea
             value={topic} onChange={e => setTopic(e.target.value)}
@@ -1264,100 +1303,19 @@ export default function ScriptFactoryPage() {
             placeholder="本次切入角度，例如：从创作者只追求更新频率切入"
             className="rounded-[12px] border border-[#E5E4DE] bg-white px-4 py-3 text-[13.5px] text-[#1C1C1B] outline-none focus:border-[#639922]"
           />}
-
-          {generationMode === "ip" && <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-[12px] leading-5 text-[#888]">系统只检查当前IP知识库中的“IP原始内容”，IP人设和表达风格不能代替老师的真实观点。</p>
-            <button
-              type="button"
-              onClick={handleCoverageCheck}
-              disabled={coverageLoading || !topic.trim() || !activeIP}
-              className="rounded-[11px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40"
-            >
-              {coverageLoading ? "检查中…" : "检查观点覆盖度"}
-            </button>
-          </div>}
-
-          {generationMode === "ip" && coverageError && <div className="rounded-[10px] bg-[#FCEBEB] px-4 py-3 text-[12.5px] text-[#A32D2D]">{coverageError}</div>}
-
-          {generationMode === "ip" && coverage && (
-            <div className="rounded-[14px] border border-[#D9E8C7] bg-[#FBFEF7] p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[13px] font-bold text-[#1C1C1B]">观点覆盖度</div>
-                <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${coverage.coverage === "FULL" ? "bg-[#EAF3DE] text-[#3B6D11]" : coverage.coverage === "PARTIAL" ? "bg-[#FFF0C2] text-[#7A5C00]" : "bg-[#FCEBEB] text-[#A32D2D]"}`}>
-                  {coverage.coverage === "FULL" ? "充分覆盖" : coverage.coverage === "PARTIAL" ? "部分覆盖" : "没有覆盖"}
-                </span>
-              </div>
-              <p className="mt-2 text-[13px] leading-6 text-[#444]">{coverage.reason}</p>
-              <p className="mt-2 rounded-[9px] bg-white px-3 py-2 text-[12.5px] font-semibold leading-5 text-[#444]">
-                {coverage.coverage === "FULL"
-                  ? "观点归属置信度：高，允许生成IP专属正式稿"
-                  : coverage.coverage === "PARTIAL"
-                    ? `观点归属置信度：中，当前缺口：${coverage.missingDimensions.join("、") || "部分论证依据"}，生成结果将作为待审核稿`
-                    : "观点归属置信度：低，当前没有找到老师的明确观点依据，生成结果仅作为AI探索稿"}
-              </p>
-              {coverage.missingDimensions.length > 0 && (
-                <p className="mt-2 text-[12px] text-[#8A6515]">当前缺口：{coverage.missingDimensions.join("、")}</p>
-              )}
-              {coverage.sourceReferences.length > 0 && (
-                <div className="mt-3 flex flex-col gap-2">
-                  <div className="text-[11.5px] font-bold text-[#639922]">找到的老师原始表达</div>
-                  {coverage.sourceReferences.map(reference => (
-                    <div key={`${reference.sourceId}-${reference.itemId}`} className="rounded-[10px] bg-white p-3">
-                      <div className="text-[11px] font-semibold text-[#888]">《{reference.sourceTitle}》· {reference.extractionStatus}</div>
-                      <p className="mt-1 text-[12.5px] leading-5 text-[#333]">{reference.originalExcerpt}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {coverage.coverage !== "FULL" && (
-                <div className="mt-4">
-                  <div className="flex flex-wrap gap-2">
-                    <a href="/knowledge-intake/original" className="rounded-[9px] bg-[#1C1C1B] px-3.5 py-2 text-[12px] font-semibold text-white">补充IP原始内容</a>
-                    <button type="button" onClick={() => { setTopic(""); setAngle(""); }} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">修改选题角度</button>
-                    <button type="button" onClick={() => setShowInterviewOutline(true)} className="rounded-[9px] border border-[#D9D8D2] bg-white px-3.5 py-2 text-[12px] font-semibold text-[#555]">生成采访提纲</button>
-                  </div>
-                  <div className="mt-3 flex justify-end">
-                    <button type="button" onClick={confirmLimitations} className="rounded-[10px] bg-[#639922] px-4 py-2.5 text-[12.5px] font-semibold text-white">
-                      {coverage.coverage === "PARTIAL" ? "确认缺口并生成待审核稿" : "确认并生成探索稿"}
-                    </button>
-                  </div>
-                  {limitationsAcknowledged && <div className="mt-3 rounded-[9px] bg-[#FFF0C2] px-3 py-2 text-[12px] font-semibold text-[#7A5C00]">已记录本次风险确认，可以继续设置内容形式。</div>}
-                </div>
-              )}
-              {showInterviewOutline && coverage.coverage !== "FULL" && (
-                <div className="mt-3 rounded-[10px] bg-[#F7F6F2] p-3 text-[12.5px] leading-6 text-[#444]">
-                  <div className="font-bold text-[#1C1C1B]">建议追问老师</div>
-                  <div>1. 对“{topic}”，您最核心的判断是什么？</div>
-                  <div>2. 您为什么这样判断？中间最关键的一层原因是什么？</div>
-                  <div>3. 哪个真实经历、案例或反例最能说明这个判断？</div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {generationMode === "ip" && coverage?.coverage === "FULL" && (
+          {generationMode === "ip" && (
             <div className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[13px] font-bold text-[#1C1C1B]">② 判断是否需要案例</div>
-                <span className="rounded-full bg-[#F2F1ED] px-2.5 py-1 text-[11px] font-semibold text-[#555]">
-                  {coverage.caseNeed === "NOT_NEEDED" ? "不需要案例" : coverage.caseNeed === "ENHANCEMENT" ? "案例可增强" : "案例为论证必需"}
-                </span>
+              <div className="mb-2 text-[13px] font-bold text-[#1C1C1B]">案例补充（可选）</div>
+              <p className="text-[12px] leading-5 text-[#777]">案例可以帮助讲清楚观点，但不会作为生成前的门槛。人工提供的案例仍会在生成后单独提示核验状态。</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => setCaseDecision("skip")} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "skip" || caseDecision === null ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>不使用案例</button>
+                <button type="button" onClick={() => setCaseDecision("knowledge")} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "knowledge" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>从知识库选择</button>
+                <button type="button" onClick={() => setCaseDecision("manual")} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "manual" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>人工补充案例</button>
               </div>
-              <p className="text-[12.5px] leading-5 text-[#555]">{coverage.caseReason}</p>
-              {coverage.caseNeed !== "NOT_NEEDED" && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {coverage.caseNeed === "ENHANCEMENT" && (
-                    <button type="button" onClick={() => { setCaseDecision("skip"); setEvidenceConfirmed(false); }} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "skip" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>本次不使用案例</button>
-                  )}
-                  <button type="button" onClick={() => { setCaseDecision("knowledge"); setEvidenceConfirmed(false); }} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "knowledge" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>从知识库选择</button>
-                  <button type="button" onClick={() => { setCaseDecision("manual"); setEvidenceConfirmed(false); }} className={`rounded-[9px] px-3 py-2 text-[12px] font-semibold ${caseDecision === "manual" ? "bg-[#1C1C1B] text-white" : "bg-[#F2F1ED] text-[#555]"}`}>人工补充案例</button>
-                </div>
-              )}
               {caseDecision === "knowledge" && (
                 <div className="mt-3">
                   {caseCandidates.length > 0 ? (
-                    <select aria-label="知识库案例" value={selectedCaseId} onChange={event => { setSelectedCaseId(event.target.value); setEvidenceConfirmed(false); }} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]">
+                    <select aria-label="知识库案例" value={selectedCaseId} onChange={event => setSelectedCaseId(event.target.value)} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]">
                       <option value="">请选择案例</option>
                       {caseCandidates.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}
                     </select>
@@ -1366,28 +1324,20 @@ export default function ScriptFactoryPage() {
               )}
               {caseDecision === "manual" && (
                 <div className="mt-3 grid gap-2">
-                  <input aria-label="案例名称" value={manualCaseTitle} onChange={event => { setManualCaseTitle(event.target.value); setEvidenceConfirmed(false); }} placeholder="案例人物或事件" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  <textarea aria-label="案例内容" value={manualCaseContent} onChange={event => { setManualCaseContent(event.target.value); setEvidenceConfirmed(false); }} placeholder="只填写你能确认的事实。人工提供不代表已经核实。" className="min-h-[90px] rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setManualCaseVerified(false); setEvidenceConfirmed(false); }} placeholder={isShuimuranDedicatedMode ? "来源链接或明确出处（必填）" : "来源链接或出处（可选）"} className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
-                  {isShuimuranDedicatedMode && (
-                    <label className="flex items-start gap-2 rounded-[9px] bg-[#F7F6F2] px-3 py-2 text-[11.5px] leading-5 text-[#555]">
-                      <input type="checkbox" checked={manualCaseVerified} onChange={event => { setManualCaseVerified(event.target.checked); setEvidenceConfirmed(false); }} className="mt-1" />
-                      <span>我已核对案例原始来源与事实。此确认只代表人工核对，不代表系统联网核验。</span>
-                    </label>
-                  )}
-                  <p className="text-[11.5px] text-[#A36C16]">来源状态：用户提供·{manualCaseVerified ? "人工已核实" : "未经系统核验"}。案例不能替老师生成从未表达过的核心观点。</p>
+                  <input aria-label="案例名称" value={manualCaseTitle} onChange={event => setManualCaseTitle(event.target.value)} placeholder="案例人物或事件" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  <textarea aria-label="案例内容" value={manualCaseContent} onChange={event => setManualCaseContent(event.target.value)} placeholder="只填写你能确认的事实。人工提供不代表已经核实。" className="min-h-[90px] rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  <input aria-label="案例来源" value={manualCaseSource} onChange={event => { setManualCaseSource(event.target.value); setManualCaseVerified(false); }} placeholder="来源链接或明确出处（可选）" className="rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[12.5px]" />
+                  <label className="flex items-start gap-2 rounded-[9px] bg-[#F7F6F2] px-3 py-2 text-[11.5px] leading-5 text-[#555]">
+                    <input type="checkbox" checked={manualCaseVerified} onChange={event => setManualCaseVerified(event.target.checked)} className="mt-1" />
+                    <span>我已人工核对该案例。此确认不代表系统已联网核验。</span>
+                  </label>
                 </div>
               )}
-              <div className="mt-4 flex justify-end">
-                <button type="button" onClick={confirmEvidence} className="rounded-[10px] bg-[#639922] px-4 py-2.5 text-[12.5px] font-semibold text-white">确认观点依据与案例边界</button>
-              </div>
-              {evidenceConfirmed && <div className="mt-3 rounded-[9px] bg-[#EAF3DE] px-3 py-2 text-[12px] font-semibold text-[#3B6D11]">依据已确认，可以设置内容形式并生成。</div>}
             </div>
           )}
 
-          {(generationMode === "standard" || evidenceConfirmed || limitationsAcknowledged) && <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />}
+          <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />
 
-          {(generationMode === "standard" || evidenceConfirmed || limitationsAcknowledged) && (<>
           <div>
             <label className="mb-1.5 block text-[11.5px] font-semibold text-[#888]">内容形式</label>
             <div className="flex flex-wrap gap-2">
@@ -1439,21 +1389,12 @@ export default function ScriptFactoryPage() {
               需要{formatCategory === "live" ? "直播间布置建议" : "拍摄/呈现建议"}
             </label>
             <button
-              onClick={handleGenerate} disabled={loading || !canGenerate}
+              onClick={handleGenerate} disabled={loading || !topic.trim() || !activeIP}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
-              {loading
-                ? "生成中…"
-                : generationMode === "standard"
-                  ? "生成完整内容"
-                  : coverage?.coverage === "PARTIAL"
-                    ? "生成待审核稿"
-                    : coverage?.coverage === "NONE"
-                      ? "生成探索稿"
-                      : "依据确认后生成脚本"}
+              {loading ? "生成中…" : generationMode === "standard" ? "生成完整内容" : "生成IP专属内容"}
             </button>
           </div>
-          </>)}
         </div>
       </Card>
 
@@ -1472,8 +1413,8 @@ export default function ScriptFactoryPage() {
 
       {!loading && !result && !error && (
         <div className="py-16 text-center text-[#8A8A86]">
-          <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">{generationMode === "standard" ? "还没有生成结果" : "先确认老师是否表达过这个观点"}</h3>
-          <p className="text-[13.5px]">{generationMode === "standard" ? "输入选题、设置内容形式和时长后，即可生成完整内容包。" : "填写选题和切入角度，系统会先从当前IP的原始内容中寻找观点依据。"}</p>
+          <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">还没有生成结果</h3>
+          <p className="text-[13.5px]">{generationMode === "standard" ? "输入选题、设置内容形式和时长后，即可生成完整内容包。" : "输入选题或原文后即可直接生成；观点归属和事实核验会在生成后补充。"}</p>
         </div>
       )}
 

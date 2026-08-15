@@ -655,6 +655,16 @@ export function addScriptAsset(input: Omit<ScriptAsset, "id" | "createdAt">): Sc
   return asset;
 }
 
+export function updateScriptAssetResult(id: string, ipId: string, scriptResult: unknown): boolean {
+  const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
+  const target = all.find(asset => asset.id === id);
+  if (!target || target.ipId !== ipId) return false;
+  writeJSON(KEY_SCRIPT_ASSETS, all.map(asset =>
+    asset.id === id ? { ...asset, scriptResult } : asset
+  ));
+  return true;
+}
+
 export function deleteScriptAsset(id: string): void {
   const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
   writeJSON(KEY_SCRIPT_ASSETS, all.filter(a => a.id !== id));
