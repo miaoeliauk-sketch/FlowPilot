@@ -10,10 +10,8 @@ import type {
   IPSourceAnalysisItem,
 } from "@/lib/types";
 
-interface RequestBody {
-  sourceId?: string;
-  activeIPId?: string;
-  rawContent?: string;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface RawAnalysisItem {
@@ -184,10 +182,13 @@ function offsetItems(items: IPSourceAnalysisItem[], offset: number): IPSourceAna
 
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
-  let body: RequestBody;
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
+    return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
+  }
+  if (!isRecord(body)) {
     return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
   }
   const sourceId = typeof body.sourceId === "string" ? body.sourceId.trim() : "";

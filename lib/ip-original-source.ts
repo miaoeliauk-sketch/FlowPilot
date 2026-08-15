@@ -22,6 +22,19 @@ export interface AddIPOriginalSourceInput {
   analysis: IPSourceAnalysis;
 }
 
+export function deriveIPOriginalSourceTitle(
+  originalContent: string,
+  analysis: IPSourceAnalysis,
+): string {
+  const candidate = analysis.items.find(item => item.kind === "claim")?.content
+    ?? analysis.items[0]?.content
+    ?? originalContent.split(/\r?\n/).find(line => line.trim())
+    ?? "";
+  const normalized = candidate.replace(/\s+/g, " ").trim().replace(/[。！？；，、：]+$/u, "");
+  if (normalized.length <= 30) return normalized;
+  return `${normalized.slice(0, 30)}…`;
+}
+
 function assertSourceInput(input: AddIPOriginalSourceInput) {
   if (!input.ipId.trim()) throw new Error("IP原始内容必须绑定当前IP");
   if (!input.title.trim()) throw new Error("请填写原始内容标题");

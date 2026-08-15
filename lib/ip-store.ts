@@ -88,6 +88,33 @@ function writeJSON<T>(key: string, value: T) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore quota errors */ }
 }
 
+function readKnowledgeEntriesStrict(): KnowledgeEntry[] {
+  if (typeof window === "undefined") return [];
+  const raw = localStorage.getItem(KEY_KNOWLEDGE_ENTRIES);
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("知识库数据已损坏，请先恢复备份；系统已阻止继续写入");
+  }
+  if (
+    !Array.isArray(parsed)
+    || parsed.some(entry => (
+      typeof entry !== "object"
+      || entry === null
+      || Array.isArray(entry)
+      || typeof (entry as Record<string, unknown>).id !== "string"
+      || typeof (entry as Record<string, unknown>).category !== "string"
+      || typeof (entry as Record<string, unknown>).title !== "string"
+      || typeof (entry as Record<string, unknown>).createdAt !== "string"
+    ))
+  ) {
+    throw new Error("知识库数据已损坏，请先恢复备份；系统已阻止继续写入");
+  }
+  return parsed as KnowledgeEntry[];
+}
+
 const COLORS = ["#7C6EE6", "#5BA4D6", "#E66E8E", "#5BC192", "#C99A1E", "#9B7ED9"];
 
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2,8)}`; }
@@ -288,7 +315,7 @@ export function migrateVoiceSamplesToKnowledge(): void {
     writeJSON(KEY_VOICE_SAMPLES_MIGRATED, true);
     return;
   }
-  const existing = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []);
+  const existing = readKnowledgeEntriesStrict();
   const existingIds = new Set(existing.map(e => e.id));
   // 用旧id作为新KnowledgeEntry的id，确保重复迁移时不会产生重复条目
   const newEntries: KnowledgeEntry[] = legacy
@@ -651,38 +678,38 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
 }
 
 export function getKnowledgeEntries(category?: KnowledgeCategory): KnowledgeEntry[] {
-  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []).map(migrateKnowledgeEntry);
+  const all = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
   const filtered = category ? all.filter((e) => e.category === category) : all;
   return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt">): KnowledgeEntry {
-  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []);
+  const all = readKnowledgeEntriesStrict();
   const entry: KnowledgeEntry = { ...input, id: genId(), createdAt: new Date().toISOString() };
   writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
   return entry;
 }
 
 export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">): KnowledgeEntry {
-  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []);
+  const all = readKnowledgeEntriesStrict();
   if (all.some(entry => entry.id === input.id)) {
     throw new Error("知识条目编号重复，未保存任何内容");
   }
   const entry: KnowledgeEntry = { ...input, createdAt: new Date().toISOString() };
   writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
-  const persisted = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, [])
+  const persisted = readKnowledgeEntriesStrict()
     .find(saved => saved.id === entry.id);
   if (!persisted) throw new Error("IP原始内容写入失败，未保存半成品");
   return migrateKnowledgeEntry(persisted);
 }
 
 export function updateKnowledgeEntry(id: string, patch: Partial<KnowledgeEntry>): void {
-  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []);
+  const all = readKnowledgeEntriesStrict();
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 }
 
 export function deleteKnowledgeEntry(id: string): void {
-  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []);
+  const all = readKnowledgeEntriesStrict();
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.filter((e) => e.id !== id));
 }
 
@@ -690,7 +717,7 @@ export function deleteKnowledgeEntry(id: string): void {
 // 不单独维护计数字段，避免两边数字对不上。newStatus可选：只有真正进入下一阶段时才推进状态，
 // 单纯被检索到、还没被实际采用，不强制变更status。
 export function recordKnowledgeUsage(entryId: string, usage: Omit<KnowledgeUsageRecord, "id">, newStatus?: KnowledgeStatus): void {
-  const all = readJSON<KnowledgeEntry[]>(KEY_KNOWLEDGE_ENTRIES, []).map(migrateKnowledgeEntry);
+  const all = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => {
     if (e.id !== entryId) return e;
     const record: KnowledgeUsageRecord = { ...usage, id: genId() };

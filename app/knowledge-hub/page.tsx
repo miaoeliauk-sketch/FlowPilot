@@ -1446,6 +1446,7 @@ export default function KnowledgeHubPage() {
     }
   }
   useEffect(() => {
+    setDetail(null);
     setCoverDetail(null);
     setShowAddCover(false);
     void refreshCovers();

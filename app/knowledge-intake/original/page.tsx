@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { useIP } from "@/lib/ip-context";
-import { addIPOriginalSource } from "@/lib/ip-original-source";
+import { addIPOriginalSource, deriveIPOriginalSourceTitle } from "@/lib/ip-original-source";
 import type {
   IPOriginalSourceKind,
   IPSourceAnalysis,
@@ -35,6 +35,7 @@ export default function IPOriginalContentIntakePage() {
   const [sourceUrl, setSourceUrl] = useState("");
   const [rawContent, setRawContent] = useState("");
   const [analysis, setAnalysis] = useState<IPSourceAnalysis | null>(null);
+  const [analysisIPId, setAnalysisIPId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedId, setSavedId] = useState("");
@@ -53,6 +54,7 @@ export default function IPOriginalContentIntakePage() {
     setRawContent(text);
     if (!title.trim()) setTitle(file.name.replace(/\.[^.]+$/, ""));
     setAnalysis(null);
+    setAnalysisIPId(null);
   }
 
   async function handleAnalyze() {
@@ -64,16 +66,18 @@ export default function IPOriginalContentIntakePage() {
       setError("请先粘贴或上传老师的原始内容");
       return;
     }
+    const requestedIPId = activeIP.id;
     setLoading(true);
     setError("");
     setAnalysis(null);
+    setAnalysisIPId(null);
     try {
       const response = await apiFetch("/api/ip-source-analysis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceId: draftId,
-          activeIPId: activeIP.id,
+          activeIPId: requestedIPId,
           rawContent,
         }),
       });
@@ -82,7 +86,12 @@ export default function IPOriginalContentIntakePage() {
         setError(data.error ?? "原始内容解析失败");
         return;
       }
-      setAnalysis(data.analysis);
+      const nextAnalysis = data.analysis as IPSourceAnalysis;
+      setAnalysis(nextAnalysis);
+      setAnalysisIPId(requestedIPId);
+      setTitle(current => current.trim()
+        ? current
+        : deriveIPOriginalSourceTitle(rawContent, nextAnalysis));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "网络错误");
     } finally {
@@ -92,6 +101,10 @@ export default function IPOriginalContentIntakePage() {
 
   function handleSave() {
     if (!activeIP || !analysis) return;
+    if (analysisIPId !== activeIP.id) {
+      setError("当前IP已切换，请重新理解内容后再保存");
+      return;
+    }
     if (!title.trim()) {
       setError("请填写原始内容标题");
       return;
@@ -165,7 +178,7 @@ export default function IPOriginalContentIntakePage() {
             当前IP：<b>{activeIP?.name ?? "尚未选择"}</b>。这份内容只会归入当前IP，不会作为通用方法使用。
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-[12.5px] font-semibold text-[#555]">标题
+            <label className="text-[12.5px] font-semibold text-[#555]">标题（保存必填）
               <input value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
             </label>
             <label className="text-[12.5px] font-semibold text-[#555]">资料类型
@@ -185,7 +198,7 @@ export default function IPOriginalContentIntakePage() {
               event.target.value = "";
             }} />
           </label>
-          <textarea value={rawContent} onChange={event => { setRawContent(event.target.value); setAnalysis(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
+          <textarea value={rawContent} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisIPId(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
           <div className="mt-3 flex items-center justify-between gap-3">
             <span className="text-[11.5px] text-[#AAA]">{rawContent.length}字。原文将在确认保存时完整写入，不会被AI改写。</span>
             <button onClick={handleAnalyze} disabled={loading || !rawContent.trim() || !activeIP} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">{loading ? "正在理解原始内容……" : "开始理解内容"}</button>
@@ -223,7 +236,8 @@ export default function IPOriginalContentIntakePage() {
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => setAnalysis(null)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555]">返回修改原文</button>
-              <button onClick={handleSave} disabled={saving || !title.trim()} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
+              {!title.trim() && <span className="self-center text-[11.5px] text-[#A32D2D]">请先填写标题</span>}
+              <button onClick={handleSave} disabled={saving} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
             </div>
           </section>
         )}

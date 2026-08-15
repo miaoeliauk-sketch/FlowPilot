@@ -128,3 +128,22 @@ test("长逐字稿分段解析后仍统一回溯到完整Source位置", async ()
     globalThis.fetch = originalFetch;
   }
 });
+
+test("请求体是null等非法结构时返回请求格式错误且不调用AI", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify({ items: [] }));
+  };
+
+  try {
+    const response = await POST(analysisRequest(null));
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "请求格式错误" });
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
