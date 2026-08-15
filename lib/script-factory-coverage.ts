@@ -4,6 +4,7 @@ export type CoverageLevel = "FULL" | "PARTIAL" | "NONE";
 export type CoverageDimension = "核心判断" | "推理过程" | "事实证据" | "案例" | "概念解释";
 export type CaseNeed = "NOT_ASSESSED" | "NOT_NEEDED" | "ENHANCEMENT" | "REQUIRED";
 export type CaseDecision = "skip" | "knowledge" | "manual";
+export type GenerationTier = "formal" | "review" | "exploratory";
 
 export interface CoverageSourceReference {
   sourceId: string;
@@ -101,6 +102,12 @@ export function parseCoverageAssessment(
   if (coverage === "FULL" && !coveredDimensions.includes("核心判断")) {
     throw new Error("充分覆盖必须包含核心判断依据");
   }
+  if (coverage === "PARTIAL") {
+    const hasClaim = sourceReferences.some(reference => reference.kind === "claim");
+    if (!coveredDimensions.includes("核心判断") || !hasClaim) {
+      throw new Error("PARTIAL必须引用老师明确表达的核心判断");
+    }
+  }
   if (coverage === "FULL") {
     const hasClaim = sourceReferences.some(reference => reference.kind === "claim");
     const hasReasoning = sourceReferences.some(reference => reference.kind === "reasoning" || reference.kind === "concept");
@@ -130,18 +137,37 @@ export function resolveGenerationPermission(
   assessment: CoverageAssessment | null,
   caseDecision: CaseDecision | null,
   evidenceConfirmed: boolean,
-): { allowed: boolean; reason: string } {
-  if (!assessment || assessment.coverage !== "FULL") {
-    return { allowed: false, reason: "当前IP的观点覆盖度尚未达到充分覆盖。" };
+  limitationsAcknowledged = false,
+): { allowed: boolean; tier: GenerationTier | null; reason: string } {
+  if (!assessment) {
+    return { allowed: false, tier: null, reason: "请先检查当前IP的观点覆盖度。" };
+  }
+  if (assessment.coverage === "PARTIAL") {
+    return limitationsAcknowledged
+      ? { allowed: true, tier: "review", reason: "已确认观点缺口，可以生成待审核稿。" }
+      : {
+          allowed: false,
+          tier: "review",
+          reason: "请先确认：当前缺失的推理需要老师审核，生成结果只能作为待审核稿。",
+        };
+  }
+  if (assessment.coverage === "NONE") {
+    return limitationsAcknowledged
+      ? { allowed: true, tier: "exploratory", reason: "已确认当前没有老师观点依据，可以生成探索稿。" }
+      : {
+          allowed: false,
+          tier: "exploratory",
+          reason: "请先确认：当前没有老师的观点依据，生成结果只能作为探索稿，不能代表老师立场。",
+        };
   }
   if (assessment.caseNeed === "REQUIRED" && caseDecision !== "knowledge" && caseDecision !== "manual") {
-    return { allowed: false, reason: "这个立意必须先补充能够支撑论证的案例。" };
+    return { allowed: false, tier: "formal", reason: "这个立意必须先补充能够支撑论证的案例。" };
   }
   if (assessment.caseNeed === "ENHANCEMENT" && !caseDecision) {
-    return { allowed: false, reason: "请先选择使用案例，或明确本次不使用案例。" };
+    return { allowed: false, tier: "formal", reason: "请先选择使用案例，或明确本次不使用案例。" };
   }
   if (!evidenceConfirmed) {
-    return { allowed: false, reason: "请先确认本次使用的观点依据和案例边界。" };
+    return { allowed: false, tier: "formal", reason: "请先确认本次使用的观点依据和案例边界。" };
   }
-  return { allowed: true, reason: "观点依据和案例边界已确认。" };
+  return { allowed: true, tier: "formal", reason: "观点依据和案例边界已确认，可以生成正式稿。" };
 }

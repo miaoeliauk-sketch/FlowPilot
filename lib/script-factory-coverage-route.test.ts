@@ -85,3 +85,37 @@ test("覆盖度接口只返回当前IP资料中存在的原文引用", async () 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("覆盖度接口允许有核心判断但缺少推理时返回PARTIAL", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => deepSeekResponse(JSON.stringify({
+    coverage: "PARTIAL",
+    reason: "原文有核心判断，但缺少具体推理。",
+    coveredDimensions: ["核心判断"],
+    missingDimensions: ["推理过程"],
+    sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+    caseNeed: "NOT_ASSESSED",
+    caseReason: "覆盖度未通过前不判断案例需求。",
+  }));
+  try {
+    const response = await POST(request({
+      topic: "为什么持续更新仍会被忘记？",
+      angle: "从内容方向切入",
+      sources: [{
+        sourceId: "source-1",
+        sourceTitle: "课程复盘",
+        itemId: "claim-1",
+        kind: "claim",
+        content: "持续输出不是每天更换话题。",
+        originalExcerpt: "持续输出不是每天换一个新话题。",
+        extractionStatus: "人工确认",
+      }],
+    }));
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.assessment.coverage, "PARTIAL");
+    assert.equal(body.assessment.sourceReferences[0].kind, "claim");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
