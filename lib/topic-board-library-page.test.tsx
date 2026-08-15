@@ -12,6 +12,48 @@ import {
   createValidTopicBoardResult,
 } from "./topic-board-contract.fixture";
 
+function createEvaluatedResult(topic: string) {
+  const result = createValidTopicBoardResult();
+  result.topic = topic;
+  result.decisionStatus = "evaluated";
+  result.aiBaseScore = 74;
+  result.evidenceAdjustment = 6;
+  result.evidenceAdjustmentItems = [{
+    sampleId: "sample-water-01",
+    title: "水木然历史高表现选题",
+    performanceLevel: "高表现",
+    adjustment: 6,
+    reason: "同类认知选题在当前IP下有过高表现记录。",
+  }];
+  result.finalReferenceScore = 80;
+  result.confidenceLevel = "中";
+  result.confidenceReason = "目前只有1条同类历史证据，建议先小范围测试。";
+  result.totalScore = 80;
+  result.scoreDisplay = "80";
+  return result;
+}
+
+function createBlockedResult(topic: string) {
+  const result = createValidTopicBoardResult();
+  result.topic = topic;
+  result.decisionStatus = "blocked";
+  result.aiBaseScore = null;
+  result.evidenceAdjustment = 0;
+  result.evidenceAdjustmentItems = [];
+  result.finalReferenceScore = null;
+  result.confidenceLevel = null;
+  result.confidenceReason = "安全边界已触发，本次不进行内容评分。";
+  result.safetyVeto = true;
+  result.safetyVetoReason = "存在不可控的合规风险。";
+  result.chiefOfficer = null;
+  result.totalScore = null;
+  result.scoreDisplay = null;
+  result.finalRecommendation = null;
+  result.riskLevel = null;
+  result.level = "已阻断";
+  return result;
+}
+
 function installBrowserEnvironment() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "http://localhost/topic-board",
@@ -97,7 +139,7 @@ test("董事会自动保存到发起请求的IP并按当前IP管理历史状态"
       resolveCapturedRequest(body);
       return new Promise<Response>(resolve => {
         releaseBoardResponse = () => {
-          const result = createValidTopicBoardResult();
+          const result = createEvaluatedResult(newTopic);
           const expertRoles = [
             "用户需求专家",
             "流量运营总监",
@@ -127,14 +169,8 @@ test("董事会自动保存到发起请求的IP并按当前IP管理历史状态"
             ...result.experts.map(expert => ({ role: expert.role, vote: expert.vote })),
             { role: "首席反对官", vote: "反对" },
           ];
-          result.topic = newTopic;
           result.ipId = shuimuran.id;
           result.ipName = shuimuran.name;
-          result.experts[8].veto = true;
-          result.experts[8].vetoReason = "存在不可控的合规风险。";
-          result.safetyVeto = true;
-          result.safetyVetoReason = "存在不可控的合规风险。";
-          result.optimizationPlan.retestSuggestion = "建议先小规模测试。";
           resolve(new Response(JSON.stringify(result), {
             status: 200,
             headers: { "Content-Type": "application/json" },
@@ -165,6 +201,10 @@ test("董事会自动保存到发起请求的IP并按当前IP管理历史状态"
     shikongHistoryResult.ipName = shikong.name;
     const shikongHistory = addTopicAsset({ ipId: shikong.id, title: oldShikongTopic, source: "manual" });
     updateTopicAssetEvaluation(shikongHistory.id, shikongHistoryResult);
+
+    const blockedTopic = "存在合规风险的选题";
+    const blockedAsset = addTopicAsset({ ipId: shuimuran.id, title: blockedTopic, source: "manual" });
+    updateTopicAssetEvaluation(blockedAsset.id, createBlockedResult(blockedTopic));
 
     const { act, cleanup, render, screen, within } = await import("@testing-library/react");
     cleanupPage = cleanup;
@@ -217,30 +257,37 @@ test("董事会自动保存到发起请求的IP并按当前IP管理历史状态"
 
     await user.click(screen.getByRole("button", { name: `查看选题“${newTopic}”完整评估` }));
     assert.ok(await screen.findByText("小白决策建议"));
-    const safetyBannerHeading = screen.getByText("安全合规官行使一票否决权", { exact: false });
-    const safetyBanner = safetyBannerHeading.parentElement;
-    assert.ok(safetyBanner);
-    assert.ok(within(safetyBanner).getByText("存在不可控的合规风险。"));
-    const transparentScoreHeading = screen.getByText("透明评分");
-    const transparentScoreSection = transparentScoreHeading.closest("section");
-    assert.ok(transparentScoreSection);
-    assert.ok(within(transparentScoreSection).getByText("风险：高"));
-    assert.ok(within(transparentScoreSection).getByText("不建议"));
-    assert.ok(screen.getByText("不能做当前版本。"));
-    assert.ok(screen.getByText("9位专家 · 7阶段评审 · 完整推理链"));
-    assert.ok(screen.getByText("9位专家＋1位首席反对官，共10位成员最终表态"));
-    const safetyExpertCard = screen.getAllByText("安全合规官")
-      .map(element => element.closest("div.cursor-pointer"))
-      .find((element): element is HTMLElement => element !== null);
-    assert.ok(safetyExpertCard);
-    const safetyScore = safetyExpertCard.querySelector("span[style]") as HTMLElement | null;
-    assert.ok(safetyScore);
-    assert.notEqual(safetyScore.style.color, "");
-    assert.ok(screen.getByText("不建议后的优化方案"));
-    assert.ok(screen.getByText("当前版本不得测试；完成安全改写后重新评估。", { exact: false }));
-    assert.equal(screen.queryByText("建议先小规模测试。", { exact: false }), null);
-    assert.equal(screen.queryByText("发布1-2条测试视频后带真实数据回来重新评审", { exact: false }), null);
-    assert.equal(screen.queryByText("建议做"), null);
+    assert.ok(screen.getByText("AI评审基础分"));
+    assert.ok(screen.getByText("74"));
+    assert.ok(screen.getByText("证据调整"));
+    assert.ok(screen.getByText("+6"));
+    assert.ok(screen.getByText("水木然历史高表现选题"));
+    assert.ok(screen.getByText(/sample-water-01/));
+    assert.ok(screen.getByText("最终参考分"));
+    assert.ok(screen.getByText("80"));
+    assert.ok(screen.getByText("可信度评级"));
+    assert.ok(screen.getByText("中"));
+    assert.ok(screen.getByText("目前只有1条同类历史证据，建议先小范围测试。"));
+    assert.ok(screen.getByText("AI负责内容价值判断"));
+    assert.ok(screen.getByText("历史证据只做有限调整，范围不超过±10分"));
+    assert.ok(screen.getByText("固定规则只负责边界和阻断，不参与内容打分"));
+    assert.ok(screen.getByText("AI多角色评审团 · 7阶段评审 · 完整推理链"));
+    assert.equal(screen.queryByText(/9位专家/), null);
+
+    await user.click(screen.getByRole("button", { name: `查看选题“${oldWaterTopic}”完整评估` }));
+    assert.ok(await screen.findByText("透明评分"));
+    assert.equal(screen.queryByText("AI评审基础分"), null);
+
+    await user.click(screen.getByRole("button", { name: `查看选题“${blockedTopic}”完整评估` }));
+    assert.ok(await screen.findByText("本次评审已阻断"));
+    assert.ok(screen.getByText("存在不可控的合规风险。"));
+    assert.ok(screen.getByText("安全边界已触发，本次不进行内容评分。"));
+    assert.equal(screen.queryByText("AI评审基础分"), null);
+    assert.equal(screen.queryByText("证据调整"), null);
+    assert.equal(screen.queryByText("可信度评级"), null);
+    assert.equal(screen.queryByText("透明评分"), null);
+    assert.equal(screen.queryByText("综合评分计算"), null);
+    assert.equal(screen.queryByText("首席反对官"), null);
 
     await user.click(screen.getByRole("button", { name: `将选题“${newTopic}”标记为已采用` }));
     assert.equal(getTopicAssets(shuimuran.id).find(asset => asset.title === newTopic)?.status, "已采用");

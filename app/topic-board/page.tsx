@@ -24,9 +24,9 @@ import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 // ── Constants ──
 const PHASES = [
   { id: 1, desc: "召集董事会成员…" },
-  { id: 2, desc: "9位专家独立评审中…" },
-  { id: 3, desc: "专家互相质疑辩论中…" },
-  { id: 4, desc: "各专家根据质疑修正评分…" },
+  { id: 2, desc: "AI多角色独立评审中…" },
+  { id: 3, desc: "各评审角色互相质疑中…" },
+  { id: 4, desc: "各评审角色根据质疑修正判断…" },
   { id: 5, desc: "首席反对官发表驳回意见…" },
   { id: 6, desc: "全员投票表决中…" },
   { id: 7, desc: "生成最终董事会决议…" },
@@ -77,6 +77,82 @@ function ScoreCircle({ score, color, size = 56 }: { score: number; color: string
         transform={`rotate(-90 ${size/2} ${size/2})`}/>
       <text x={size/2} y={size/2+5} textAnchor="middle" fontSize={size > 70 ? "18" : "13"} fontWeight="700" fill="#1C1C1B">{score}</text>
     </svg>
+  );
+}
+
+function DecisionScorePanel({ result }: { result: TopicBoardResult }) {
+  if (
+    result.decisionStatus !== "evaluated"
+    || result.aiBaseScore === undefined
+    || result.aiBaseScore === null
+    || result.evidenceAdjustment === undefined
+    || result.finalReferenceScore === undefined
+    || result.finalReferenceScore === null
+    || result.confidenceLevel === undefined
+    || result.confidenceLevel === null
+  ) return null;
+
+  const adjustmentText = result.evidenceAdjustment > 0
+    ? `+${result.evidenceAdjustment}`
+    : String(result.evidenceAdjustment);
+
+  return (
+    <section aria-label="评分依据与可信度">
+      <STitle num="00" sub="分数与证据分开呈现，避免把规则打分伪装成评审结论">评分依据与可信度</STitle>
+      <div className="mb-3 grid grid-cols-1 gap-2 rounded-[14px] bg-[#F7F6F2] p-4 text-[12px] leading-5 text-[#555] md:grid-cols-3">
+        <p><span className="font-bold text-[#1C1C1B]">AI负责内容价值判断</span><br />多角色评审先给出内容基础分。</p>
+        <p><span className="font-bold text-[#1C1C1B]">历史证据只做有限调整，范围不超过±10分</span><br />每项调整都展示对应样本和原因。</p>
+        <p><span className="font-bold text-[#1C1C1B]">固定规则只负责边界和阻断，不参与内容打分</span><br />触发安全边界时直接停止普通评分。</p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <Card>
+          <div className="text-[12px] font-bold text-[#8A8A86]">AI评审基础分</div>
+          <div className="mt-2 text-[34px] font-bold text-[#1C1C1B]">{result.aiBaseScore}</div>
+          <p className="mt-1 text-[12px] leading-5 text-[#666]">由AI多角色评审团对内容价值作出的基础判断。</p>
+        </Card>
+        <Card>
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[12px] font-bold text-[#8A8A86]">证据调整</div>
+            <div className={`text-[24px] font-bold ${result.evidenceAdjustment >= 0 ? "text-[#3B6D11]" : "text-[#A32D2D]"}`}>{adjustmentText}</div>
+          </div>
+          {result.evidenceAdjustmentItems && result.evidenceAdjustmentItems.length > 0 ? (
+            <div className="mt-3 space-y-2">
+              {result.evidenceAdjustmentItems.map(item => (
+                <div key={`${item.sampleId}-${item.title}`} className="rounded-[10px] bg-[#F7F6F2] p-3">
+                  <div className="text-[12.5px] font-semibold text-[#1C1C1B]">{item.title}</div>
+                  <div className="mt-1 text-[11px] text-[#8A8A86]">来源编号：{item.sampleId} · {item.performanceLevel} · 调整{item.adjustment > 0 ? `+${item.adjustment}` : item.adjustment}分</div>
+                  <p className="mt-1 text-[12px] leading-5 text-[#555]">{item.reason}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-[12px] leading-5 text-[#666]">本次没有可用于调整的历史证据，调整为0分。</p>
+          )}
+        </Card>
+        <Card>
+          <div className="text-[12px] font-bold text-[#8A8A86]">最终参考分</div>
+          <div className="mt-2 text-[34px] font-bold" style={{ color: levelColor(result.finalReferenceScore) }}>{result.finalReferenceScore}</div>
+          <div className="mt-3 border-t border-[#E5E4DE] pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[12px] font-bold text-[#8A8A86]">可信度评级</span>
+              <span className="rounded-full bg-[#FBF3D6] px-2.5 py-1 text-[12px] font-bold text-[#7A5C00]">{result.confidenceLevel}</span>
+            </div>
+            <p className="mt-2 text-[12px] leading-5 text-[#555]">{result.confidenceReason}</p>
+          </div>
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function BlockedDecisionPanel({ result }: { result: TopicBoardResult }) {
+  return (
+    <section aria-label="阻断结果" className="rounded-[16px] border border-[#F3C6C6] bg-white p-6">
+      <div className="mb-2 inline-flex rounded-full bg-[#FCEBEB] px-3 py-1 text-[12px] font-bold text-[#A32D2D]">已阻断</div>
+      <h2 className="text-[19px] font-semibold text-[#1C1C1B]">本次评审已阻断</h2>
+      <p className="mt-2 text-[13px] leading-6 text-[#555]">{result.confidenceReason || "安全边界已触发，本次不进行内容评分。"}</p>
+      <p className="mt-3 rounded-[10px] bg-[#F7F6F2] px-3 py-2 text-[12.5px] leading-5 text-[#555]">请先处理安全合规问题，再重新发起AI多角色评审。</p>
+    </section>
   );
 }
 
@@ -589,6 +665,7 @@ export default function TopicBoardPage() {
   const displayedSupportCount = displayedVotes.filter(vote => vote.vote === "支持").length;
   const displayedReserveCount = displayedVotes.filter(vote => vote.vote === "保留意见").length;
   const displayedOpposeCount = displayedVotes.filter(vote => vote.vote === "反对").length;
+  const isBlockedResult = result?.decisionStatus === "blocked" || result?.safetyVeto === true;
 
   return (
     <div className="min-h-screen p-6 md:p-8">
@@ -600,7 +677,7 @@ export default function TopicBoardPage() {
           </div>
           <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">AI 选题董事会 <span className="text-[14px] font-normal text-[#8A8A86]">V2.0</span></h1>
           <p className="mt-1.5 max-w-[600px] text-[13.5px] leading-6 text-[#8A8A86]">
-            完整推理链 · 子维度计算 · 专家辩论 · 首席反对官 · 全员投票 · 可信度评分
+            AI多角色评审 · 完整推理链 · 交叉质疑 · 安全阻断 · 可信度评级
           </p>
         </div>
         <span className="whitespace-nowrap rounded-full bg-[#EAF3DE] px-3.5 py-1.5 text-[12px] font-semibold text-[#3B6D11]">01 · 选题评估</span>
@@ -649,7 +726,7 @@ export default function TopicBoardPage() {
         <div className="py-16 text-center text-[#8A8A86]">
           <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">等待召开董事会</h3>
           <p className="mx-auto max-w-[460px] text-[13.5px] leading-6">
-            输入选题后点击「召开董事会」，9位专家将经过7个阶段的完整推理、辩论和投票，给出有据可查的最终决议。
+            输入选题后点击「召开董事会」，AI多角色评审团将经过完整推理、交叉质疑和投票，给出有据可查的最终决议。
           </p>
         </div>
       )}
@@ -658,13 +735,13 @@ export default function TopicBoardPage() {
         <div className="flex flex-col gap-8">
 
           {/* 安全合规官一票否决横幅 */}
-          {result.safetyVeto && (
+          {isBlockedResult && (
             <div className="rounded-[14px] border border-[#F3C6C6] bg-[#FCEBEB] px-5 py-4">
               <div className="text-[14px] font-bold text-[#A32D2D]">⚠ 安全合规官行使一票否决权</div>
               {result.safetyVetoReason && (
                 <p className="mt-1 text-[13px] leading-6 text-[#A32D2D]">{result.safetyVetoReason}</p>
               )}
-              <p className="mt-1 text-[12px] text-[#8A8A86]">该选题存在不可控的言行或合规风险，无论其他维度得分多高，均不建议制作。可参考下方专家意见调整方向后重新评审。</p>
+              <p className="mt-1 text-[12px] text-[#8A8A86]">该选题存在不可控的言行或合规风险，本次不再展示普通评分。请根据阻断原因调整方向后重新评审。</p>
             </div>
           )}
 
@@ -675,6 +752,13 @@ export default function TopicBoardPage() {
             searched={knowledgeSearched}
             label="本次选题分析参考了"
           />
+
+          {isBlockedResult ? (
+            <BlockedDecisionPanel result={result} />
+          ) : (
+          <>
+
+          <DecisionScorePanel result={result} />
 
           <section>
             <STitle num="00">小白决策建议</STitle>
@@ -699,7 +783,7 @@ export default function TopicBoardPage() {
             </Card>
           </section>
 
-          {result.decisionStatus !== "blocked" && result.totalScore !== null && (
+          {result.decisionStatus !== "evaluated" && result.decisionStatus !== "blocked" && result.totalScore !== null && (
           <section>
             <STitle num="00" sub="统一评分明细，每项都有一句解释">透明评分</STitle>
             <Card>
@@ -768,7 +852,7 @@ export default function TopicBoardPage() {
             <div className="mb-1 text-[11px] font-semibold tracking-widest text-[#6B6B68]">BOARD MEETING · 董事会议题</div>
             <div className="text-[21px] font-semibold text-white">「{result.topic}」</div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <span className="text-[13px] text-[#8A8A86]">9位专家 · 7阶段评审 · 完整推理链</span>
+              <span className="text-[13px] text-[#8A8A86]">AI多角色评审团 · 7阶段评审 · 完整推理链</span>
               {result.decisionStatus === "blocked" ? (
                 <span className="rounded-full bg-[#FCEBEB] px-3 py-1 text-[12px] font-bold text-[#A32D2D]">已阻断</span>
               ) : result.totalScore !== null ? (
@@ -781,7 +865,7 @@ export default function TopicBoardPage() {
 
           {/* ② 第一轮：推理链 */}
           <section>
-            <STitle num="01" sub="点击专家卡展开完整推理链和子维度计算">第一轮 · 专家独立评审</STitle>
+            <STitle num="01" sub="点击评审卡展开完整推理链和子维度计算">第一轮 · AI角色独立评审</STitle>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
               {result.experts.map((e, i) => (
                 <div key={e.role} className={`cursor-pointer rounded-[14px] border p-4 transition ${expanded[i] ? "border-[#1C1C1B] bg-white shadow-md" : "border-[#E5E4DE] bg-white hover:border-[#1C1C1B]"}`}
@@ -842,7 +926,7 @@ export default function TopicBoardPage() {
                 </div>
               ))}
             </div>
-            <p className="mt-2 text-[12px] text-[#8A8A86]">← 点击卡片展开：观察→推理→结论 + 子维度计算过程</p>
+            <p className="mt-2 text-[12px] text-[#8A8A86]">← 点击评审卡展开：观察→推理→结论＋子维度计算过程</p>
           </section>
 
           {/* ③ 首席反对官 */}
@@ -882,7 +966,7 @@ export default function TopicBoardPage() {
 
           {/* ④ 第二轮：质疑对话 */}
           <section>
-            <STitle num="03" sub="专家之间基于具体评分展开质疑">第二轮 · 专家质疑辩论</STitle>
+            <STitle num="03" sub="评审角色之间基于具体判断展开质疑">第二轮 · 交叉质疑</STitle>
             <div className="space-y-3">
               {result.challenges.map((c, i) => (
                 <Card key={i}>
@@ -903,7 +987,7 @@ export default function TopicBoardPage() {
 
           {/* ⑤ 第三轮：修正评分 */}
           <section>
-            <STitle num="04" sub="专家回应质疑，展示修正后计算结果">第三轮 · 回应与修正评分</STitle>
+            <STitle num="04" sub="评审角色回应质疑，展示修正后计算结果">第三轮 · 回应与修正评分</STitle>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {result.responses.map((r, i) => (
                 <Card key={i}>
@@ -934,7 +1018,7 @@ export default function TopicBoardPage() {
 
           {/* ⑥ 投票 */}
           <section>
-            <STitle num="05" sub="9位专家＋1位首席反对官，共10位成员最终表态">全员投票表决</STitle>
+            <STitle num="05" sub="AI多角色评审团与首席反对官共同表态">全员投票表决</STitle>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto]">
               <Card>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -974,7 +1058,7 @@ export default function TopicBoardPage() {
           </section>
 
           {/* ⑦ 评分计算 */}
-          {result.decisionStatus !== "blocked" && result.totalScore !== null && (
+          {result.decisionStatus !== "evaluated" && result.decisionStatus !== "blocked" && result.totalScore !== null && (
           <section>
             <STitle num="06" sub="加权模型，每分都有出处">综合评分计算</STitle>
             <Card>
@@ -1000,7 +1084,7 @@ export default function TopicBoardPage() {
           )}
 
           {/* ⑧ 可信度仪表盘 */}
-          {result.decisionStatus !== "blocked" && (
+          {result.decisionStatus !== "evaluated" && result.decisionStatus !== "blocked" && (
           <section>
             <STitle num="07" sub="本次评审结论的可靠程度">可信度仪表盘</STitle>
             <Card>
@@ -1032,7 +1116,7 @@ export default function TopicBoardPage() {
           )}
 
           {/* ⑨ 最终决议 */}
-          {result.decisionStatus !== "blocked" && result.totalScore !== null && (
+          {result.decisionStatus !== "evaluated" && result.decisionStatus !== "blocked" && result.totalScore !== null && (
           <section>
             <STitle num="08">最终董事会决议</STitle>
             <div className="rounded-[16px] bg-[#1C1C1B] p-6">
@@ -1167,6 +1251,9 @@ export default function TopicBoardPage() {
                 </p>
               </Card>
             </section>
+          )}
+
+          </>
           )}
 
         </div>
