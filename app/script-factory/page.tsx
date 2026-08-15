@@ -731,6 +731,21 @@ export default function ScriptFactoryPage() {
       })));
   }
 
+  function getIPSourceContext(ipId: string) {
+    return getKnowledgeEntries("IP原始内容")
+      .filter(entry => entry.ipId === ipId)
+      .flatMap(entry => (entry.sourceAnalysis?.items ?? []).map(item => ({
+        ipId,
+        sourceId: entry.id,
+        sourceTitle: entry.title,
+        itemId: item.id,
+        kind: item.kind,
+        content: item.content,
+        originalExcerpt: item.originalExcerpt,
+        extractionStatus: item.extractionStatus,
+      })));
+  }
+
   useEffect(() => {
     setCoverage(null);
     setCoverageError(null);
@@ -977,6 +992,20 @@ export default function ScriptFactoryPage() {
 
   async function generateFor(ip: IPProfile, t: string) {
     let res: Response;
+    const caseEvidence = caseDecision === "knowledge" && selectedKnowledgeCase ? {
+      ipId: selectedKnowledgeCase.ipId,
+      title: selectedKnowledgeCase.title,
+      content: selectedKnowledgeCase.rawContent,
+      sourceType: "知识库",
+      verificationStatus: selectedKnowledgeCase.sourceTier === "高" ? "有明确来源" : "未核实",
+      sourceUrl: selectedKnowledgeCase.sourceUrl,
+    } : caseDecision === "manual" ? {
+      title: manualCaseTitle.trim() || "人工补充案例",
+      content: manualCaseContent.trim(),
+      sourceType: "用户提供",
+      verificationStatus: manualCaseVerified ? "人工已核实" : "未经系统核验",
+      sourceUrl: manualCaseSource.trim(),
+    } : null;
     try {
       res = await apiFetch("/api/script-factory", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -987,6 +1016,8 @@ export default function ScriptFactoryPage() {
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
           formatCategory, durationSeconds: duration, goal, videoType,
           needsStoryboard, needsShootingTips,
+          ipSourceContext: generationMode === "ip" ? getIPSourceContext(ip.id) : undefined,
+          caseEvidence: generationMode === "ip" ? caseEvidence : undefined,
           evidenceGate: generationMode === "ip" && coverage ? {
             coverage: coverage.coverage,
             reason: coverage.reason,
@@ -997,19 +1028,7 @@ export default function ScriptFactoryPage() {
             caseDecision,
             evidenceConfirmed: coverage.coverage === "FULL" ? evidenceConfirmed : false,
             limitationsAcknowledged: coverage.coverage !== "FULL" ? limitationsAcknowledged : false,
-            caseEvidence: caseDecision === "knowledge" && selectedKnowledgeCase ? {
-              title: selectedKnowledgeCase.title,
-              content: selectedKnowledgeCase.rawContent,
-              sourceType: "知识库",
-              verificationStatus: selectedKnowledgeCase.sourceTier === "高" ? "有明确来源" : "未核实",
-              sourceUrl: selectedKnowledgeCase.sourceUrl,
-            } : caseDecision === "manual" ? {
-              title: manualCaseTitle.trim() || "人工补充案例",
-              content: manualCaseContent.trim(),
-              sourceType: "用户提供",
-              verificationStatus: manualCaseVerified ? "人工已核实" : "未经系统核验",
-              sourceUrl: manualCaseSource.trim(),
-            } : null,
+            caseEvidence,
           } : null,
           voiceSamples: getKnowledgeEntries("IP表达语料")
             .filter(entry => entry.ipId === ip.id)
@@ -1022,6 +1041,7 @@ export default function ScriptFactoryPage() {
             })),
           knowledgeRefs: knowledgeRefs.map(ref => ({
             id: ref.id,
+            ipId: ref.entry.ipId ?? null,
             title: ref.entry.title,
             category: getNormalizedCategory(ref.entry),
             rawContent: ref.entry.rawContent,

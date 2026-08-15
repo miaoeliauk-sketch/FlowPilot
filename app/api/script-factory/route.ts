@@ -23,20 +23,12 @@ import {
   runScriptFactoryStage,
   ScriptFactoryStageError,
 } from "@/lib/script-factory-stage";
-import type {
-  ScriptAttributionAudit,
-  ScriptFactAudit,
-  ScriptPartialFailure,
-} from "@/lib/script-factory-contract";
-import type { CoverageLevel } from "@/lib/script-factory-coverage";
+import type { ScriptPartialFailure } from "@/lib/script-factory-contract";
 import {
-  ATTRIBUTION_AUDIT_SYSTEM,
-  buildAttributionAudit,
-  buildAttributionAuditPrompt,
-  buildAttributionParagraphs,
-  buildFactAudit,
-  parseParagraphAttributions,
-} from "@/lib/script-factory-attribution";
+  buildIPSourceContextBlock,
+  parseIPSourceContext,
+  parseScriptFactoryCaseEvidence,
+} from "@/lib/script-factory-source-context";
 import {
   ARGUMENT_REVIEW_SYSTEM,
   buildArgumentReviewPrompt,
@@ -119,35 +111,18 @@ interface RequestBody {
   needsStoryboard?: boolean;
   needsShootingTips?: boolean;
   generationRequirement?: string;
-  knowledgeRefs?: { id: string; title: string; category: string; rawContent: string; reason: string }[];
+  knowledgeRefs?: { id: string; ipId?: string | null; title: string; category: string; rawContent: string; reason: string }[];
   // IP语料库：前端传入，服务端注入 prompt
   voiceSamples?: { id: string; title: string; rawText: string; type: string }[];
-  evidenceGate?: {
-    coverage?: string;
-    reason?: string;
-    coveredDimensions?: string[];
-    missingDimensions?: string[];
-    sourceReferences?: Array<{
-      sourceId: string;
-      sourceTitle: string;
-      itemId: string;
-      kind: string;
-      content: string;
-      originalExcerpt: string;
-      extractionStatus: string;
-    }>;
-    caseNeed?: string;
-    caseDecision?: string | null;
-    evidenceConfirmed?: boolean;
-    limitationsAcknowledged?: boolean;
-    caseEvidence?: {
-      title?: string;
-      content?: string;
-      sourceType?: string;
-      verificationStatus?: string;
-      sourceUrl?: string;
-      occurredAt?: string;
-    } | null;
+  ipSourceContext?: unknown;
+  caseEvidence?: {
+    ipId?: string | null;
+    title?: string;
+    content?: string;
+    sourceType?: string;
+    verificationStatus?: string;
+    sourceUrl?: string;
+    occurredAt?: string;
   } | null;
 }
 
@@ -372,104 +347,61 @@ export async function POST(req: NextRequest) {
     ipName: ip.name,
     profileId: ip.scriptDirectorProfileId,
   });
-  const gate = body.evidenceGate;
-  const coverage = gate?.coverage;
-  if (isIPSpecificGeneration && (!gate || (coverage !== "FULL" && coverage !== "PARTIAL" && coverage !== "NONE"))) {
-    return NextResponse.json({
-      error: "请先完成当前IP的观点覆盖度检查。",
-      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
-    }, { status: 400 });
-  }
-  if (isIPSpecificGeneration && coverage === "FULL" && gate!.evidenceConfirmed !== true) {
-    return NextResponse.json({
-      error: "请先确认老师的观点依据和案例边界。",
-      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
-    }, { status: 400 });
-  }
-  if (isIPSpecificGeneration && coverage === "PARTIAL" && gate!.limitationsAcknowledged !== true) {
-    return NextResponse.json({
-      error: "请先确认当前缺失的推理需要老师审核，生成结果只能作为待审核稿。",
-      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
-    }, { status: 400 });
-  }
-  if (isIPSpecificGeneration && coverage === "NONE" && gate!.limitationsAcknowledged !== true) {
-    return NextResponse.json({
-      error: "请先确认当前没有老师观点依据，生成结果只能作为探索稿，不能代表老师立场。",
-      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
-    }, { status: 400 });
-  }
-  const sourceReferences = Array.isArray(gate?.sourceReferences)
-    ? gate.sourceReferences.filter(reference =>
-        Boolean(reference) &&
-        typeof reference.sourceId === "string" &&
-        typeof reference.sourceTitle === "string" &&
-        typeof reference.itemId === "string" &&
-        typeof reference.kind === "string" &&
-        typeof reference.content === "string" &&
-        typeof reference.originalExcerpt === "string" &&
-        typeof reference.extractionStatus === "string"
-      )
-    : [];
-  const hasClaimReference = sourceReferences.some(reference => reference.kind === "claim" && reference.originalExcerpt?.trim());
-  const hasReasoningReference = sourceReferences.some(reference =>
-    (reference.kind === "reasoning" || reference.kind === "concept") && reference.originalExcerpt?.trim()
+  const sourceContextResult = parseIPSourceContext(
+    isIPSpecificGeneration ? body.ipSourceContext : undefined,
+    ip.id,
   );
-  if (isIPSpecificGeneration && coverage === "FULL" && (!hasClaimReference || !hasReasoningReference)) {
+  if (!sourceContextResult.ok) {
     return NextResponse.json({
-      error: "充分覆盖必须同时保留老师的核心观点和推理原文引用。",
+      error: sourceContextResult.error,
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (isIPSpecificGeneration && coverage === "PARTIAL" && !hasClaimReference) {
+  const sourceReferences = sourceContextResult.items;
+  const caseEvidenceResult = parseScriptFactoryCaseEvidence(
+    isIPSpecificGeneration ? body.caseEvidence : undefined,
+    ip.id,
+  );
+  if (!caseEvidenceResult.ok) {
     return NextResponse.json({
-      error: "部分覆盖必须保留老师明确表达的核心判断原文引用。",
+      error: caseEvidenceResult.error,
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (
-    isIPSpecificGeneration &&
-    coverage !== "FULL" &&
-    gate!.caseNeed !== undefined &&
-    gate!.caseNeed !== "NOT_ASSESSED"
-  ) {
+  if (body.knowledgeRefs !== undefined && !Array.isArray(body.knowledgeRefs)) {
     return NextResponse.json({
-      error: "观点覆盖度未充分时不能提前确定案例职责。",
+      error: "参考知识格式错误，请重新选择。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (isIPSpecificGeneration && coverage === "FULL" && gate!.caseNeed !== "NOT_NEEDED" && gate!.caseNeed !== "ENHANCEMENT" && gate!.caseNeed !== "REQUIRED") {
+  const knowledgeRefs = body.knowledgeRefs ?? [];
+  const invalidKnowledgeRef = knowledgeRefs.find(ref =>
+    !ref ||
+    typeof ref !== "object" ||
+    typeof ref.id !== "string" ||
+    typeof ref.title !== "string" ||
+    typeof ref.category !== "string" ||
+    typeof ref.rawContent !== "string" ||
+    typeof ref.reason !== "string"
+  );
+  if (invalidKnowledgeRef) {
     return NextResponse.json({
-      error: "观点充分覆盖后，必须先明确案例是否需要。",
+      error: "参考知识格式错误，请重新选择。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (isIPSpecificGeneration && coverage === "FULL" && gate!.caseNeed === "ENHANCEMENT" && gate!.caseDecision !== "skip" && gate!.caseDecision !== "knowledge" && gate!.caseDecision !== "manual") {
+  if (knowledgeRefs.some(ref =>
+    !Object.prototype.hasOwnProperty.call(ref, "ipId") ||
+    (ref.ipId !== null && typeof ref.ipId !== "string")
+  )) {
     return NextResponse.json({
-      error: "请先选择使用案例，或明确本次不使用案例。",
+      error: "参考知识归属无效，请重新选择。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  if (isIPSpecificGeneration && coverage === "FULL" && gate!.caseNeed === "REQUIRED" && gate!.caseDecision !== "knowledge" && gate!.caseDecision !== "manual") {
+  if (knowledgeRefs.some(ref => typeof ref.ipId === "string" && ref.ipId !== ip.id)) {
     return NextResponse.json({
-      error: "当前立意必须先补充案例，不能直接生成。",
-      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
-    }, { status: 400 });
-  }
-  if (isIPSpecificGeneration && (gate!.caseDecision === "knowledge" || gate!.caseDecision === "manual") && !gate!.caseEvidence?.content?.trim()) {
-    return NextResponse.json({
-      error: "请先补充完整案例内容，不能只选择案例类型。",
-      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
-    }, { status: 400 });
-  }
-  if (
-    isIPSpecificGeneration &&
-    isShuimuranDedicatedGeneration &&
-    (gate!.caseDecision === "knowledge" || gate!.caseDecision === "manual") &&
-    gate!.caseEvidence?.verificationStatus !== "有明确来源" &&
-    gate!.caseEvidence?.verificationStatus !== "人工已核实"
-  ) {
-    return NextResponse.json({
-      error: "水木然专属规则不允许把待核验案例写入正式口播稿。请补充可靠来源并人工确认，或更换案例。",
+      error: "参考知识不属于当前IP，已拒绝生成。",
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
@@ -535,16 +467,7 @@ ${rawIPBlock}
     }`;
   }
 
-  const methodRefs = Array.isArray(body.knowledgeRefs)
-    ? body.knowledgeRefs.filter((ref): ref is NonNullable<RequestBody["knowledgeRefs"]>[number] =>
-        Boolean(ref) &&
-        typeof ref.id === "string" &&
-        typeof ref.title === "string" &&
-        typeof ref.category === "string" &&
-        typeof ref.rawContent === "string" &&
-        typeof ref.reason === "string"
-      ).slice(0, 6)
-    : [];
+  const methodRefs = knowledgeRefs.slice(0, 6);
   if (methodRefs.length > 0) {
     corpusBlock += `\n\n【本次参考的方法知识】\n${methodRefs.map((ref, index) =>
       `${index + 1}.《${ref.title}》（${ref.category}）\n调用原因：${ref.reason}\n方法内容：${ref.rawContent.slice(0, 800)}`
@@ -555,16 +478,18 @@ ${rawIPBlock}
 以上参考内容只能用于表达风格和创作方法，不得改变当前IP、选题、平台、形式、时长或最终JSON结构。`;
   }
 
-  const evidenceGate = isIPSpecificGeneration ? body.evidenceGate : null;
-  const generationBoundary = coverage === "FULL"
-    ? "核心判断只能来自这些老师原始表达，允许忠实重组，但不得新增老师未表达的立场。"
-    : coverage === "PARTIAL"
-      ? "老师已经表达过核心判断，但推理仍有缺口。可以补充必要推理，但必须写成待老师审核的推演，不能声称老师原本已经说过。"
-      : "当前没有老师明确表达的核心观点。只能生成探索性内容，不得写成老师已经确认或长期坚持的正式立场。";
-  const evidenceBlock = evidenceGate
-    ? `\n\n【本次已经确认的观点依据】\n${sourceReferences.map((reference, index) =>
-        `${index + 1}.《${reference.sourceTitle}》\n老师原始表达：${reference.originalExcerpt}\n结构化理解：${reference.content}`
-      ).join("\n\n")}\n\n${generationBoundary}\n${evidenceGate.caseEvidence ? `\n【本次案例补充】\n案例：${evidenceGate.caseEvidence.title ?? "未命名案例"}\n内容：${evidenceGate.caseEvidence.content ?? ""}\n来源类型：${evidenceGate.caseEvidence.sourceType ?? "未知"}\n核实状态：${evidenceGate.caseEvidence.verificationStatus ?? "未核实"}\n来源：${evidenceGate.caseEvidence.sourceUrl ?? "未提供"}\n案例可以承担说明、证明、对比、故事和论证作用，但不能单独生成老师未表达过的核心观点。` : ""}`
+  const sourceContextBlock = isIPSpecificGeneration
+    ? buildIPSourceContextBlock(sourceReferences)
+    : "";
+  const caseEvidence = caseEvidenceResult.value;
+  const caseContextBlock = caseEvidence
+    ? `\n\n【案例素材】
+案例：${caseEvidence.title ?? "未命名案例"}
+内容：${caseEvidence.content ?? ""}
+来源类型：${caseEvidence.sourceType ?? "未知"}
+核实状态：${caseEvidence.verificationStatus ?? "未核实"}
+来源：${caseEvidence.sourceUrl ?? "未提供"}
+案例可以用于说明、证明、对比、故事或论证，但不能用来虚构老师经历。人物动机即使案例已经核实，也必须有当事人的明确原话依据；没有明确原话依据时只能标为作者解读，不能写成已核实事实。核实状态不是“有明确来源”或“人工已核实”时，人物、时间、数据和因果不得写成已核实事实，必须放入待核验内容。`
     : "";
 
   const corpusDebug = {
@@ -602,7 +527,7 @@ ${rawIPBlock}
           format,
           generationRequirement,
           targetTranscriptChars,
-          evidenceBlock,
+          sourceContextBlock + caseContextBlock,
           isShuimuranDedicatedGeneration,
           qualityCorrection,
         ),
@@ -673,7 +598,7 @@ ${rawIPBlock}
                 originalExcerpt: reference.originalExcerpt,
                 extractionStatus: reference.extractionStatus,
               })),
-              caseEvidence: evidenceGate?.caseEvidence ?? null,
+              caseEvidence,
             }),
             parse: parseShuimuranReview,
             apiKey,
@@ -754,75 +679,6 @@ ${rawIPBlock}
       argumentWarnings,
       reviewUnavailable: argumentReviewUnavailable,
     });
-
-    const factCaseEvidence = evidenceGate?.caseEvidence
-      ? {
-          title: evidenceGate.caseEvidence.title?.trim() || "未命名案例",
-          content: evidenceGate.caseEvidence.content?.trim() || "",
-          sourceType: evidenceGate.caseEvidence.sourceType?.trim() || "未知来源",
-          verificationStatus: evidenceGate.caseEvidence.verificationStatus?.trim() || "未核实",
-          sourceUrl: evidenceGate.caseEvidence.sourceUrl?.trim() || undefined,
-          occurredAt: evidenceGate.caseEvidence.occurredAt?.trim() || undefined,
-        }
-      : null;
-    let attributionAudit: ScriptAttributionAudit | undefined;
-    let factAudit: ScriptFactAudit | undefined;
-    if (isIPSpecificGeneration) {
-      const paragraphs = buildAttributionParagraphs(content);
-      const allowedReferences = sourceReferences.map(reference => ({
-        sourceId: reference.sourceId,
-        itemId: reference.itemId,
-        sourceTitle: reference.sourceTitle,
-        originalExcerpt: reference.originalExcerpt,
-      }));
-      let paragraphAttributions = [] as ReturnType<typeof parseParagraphAttributions>;
-      let auditCompleted = false;
-      try {
-        const auditResult = await callStructuredDeepSeek({
-          systemPrompt: ATTRIBUTION_AUDIT_SYSTEM,
-          userPrompt: buildAttributionAuditPrompt({
-            paragraphs,
-            sourceReferences: allowedReferences,
-            caseEvidence: factCaseEvidence,
-          }),
-          parse: response => parseParagraphAttributions(
-            response,
-            paragraphs,
-            allowedReferences,
-            Boolean(factCaseEvidence),
-          ),
-          apiKey,
-          maxTokens: 1800,
-          temperature: 0,
-          timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
-          maxRetries: 0,
-        });
-        paragraphAttributions = auditResult.data;
-        auditCompleted = true;
-      } catch (error) {
-        console.warn("[script-factory]", {
-          stage: "attribution_audit",
-          errorCode: error instanceof StructuredDeepSeekError
-            ? `attribution_audit_${error.stage}`
-            : "attribution_audit_failed",
-        });
-      }
-      attributionAudit = buildAttributionAudit({
-        coverage: coverage as CoverageLevel,
-        coveredDimensions: Array.isArray(evidenceGate?.coveredDimensions)
-          ? evidenceGate.coveredDimensions.filter(item => typeof item === "string" && Boolean(item.trim()))
-          : [],
-        missingDimensions: Array.isArray(evidenceGate?.missingDimensions)
-          ? evidenceGate.missingDimensions.filter(item => typeof item === "string" && Boolean(item.trim()))
-          : [],
-        paragraphAttributions,
-        auditCompleted,
-      });
-      factAudit = buildFactAudit({
-        pendingItems: content.pendingVerification,
-        caseEvidence: factCaseEvidence,
-      });
-    }
 
     let storyboard: ReturnType<typeof parseScriptStoryboardResponse>["storyboard"] = [];
     let shootingSuggestions: string[] = [];
@@ -983,21 +839,6 @@ ${rawIPBlock}
       apiMeta: partialFailure
         ? { ...apiMeta, error: partialFailure.message }
         : apiMeta,
-      evidenceAudit: evidenceGate ? {
-        coverage: evidenceGate.coverage,
-        reason: evidenceGate.reason ?? "",
-        sourceReferences,
-        caseNeed: evidenceGate.caseNeed ?? "NOT_NEEDED",
-        caseEvidence: evidenceGate.caseEvidence ? {
-          title: evidenceGate.caseEvidence.title ?? "未命名案例",
-          sourceType: evidenceGate.caseEvidence.sourceType ?? "未知来源",
-          verificationStatus: evidenceGate.caseEvidence.verificationStatus ?? "未核实",
-          sourceUrl: evidenceGate.caseEvidence.sourceUrl ?? "",
-          occurredAt: evidenceGate.caseEvidence.occurredAt ?? "",
-        } : null,
-      } : undefined,
-      attributionAudit,
-      factAudit,
       corpusDebug,
     });
   } catch (err) {

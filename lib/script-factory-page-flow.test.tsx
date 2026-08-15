@@ -231,6 +231,16 @@ test("覆盖度为NONE时确认风险后生成探索稿并分层展示审核信�
     localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
     localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
     localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+      {
+        id: "source-current", category: "IP原始内容", title: "当前IP原文", createdAt: "2026-08-15", ipId: SHUIMURAN.id,
+        sourceAnalysis: { items: [{ id: "claim-current", kind: "claim", content: "当前IP观点", originalExcerpt: "这是当前IP说过的话。", extractionStatus: "人工确认" }] },
+      },
+      {
+        id: "source-other", category: "IP原始内容", title: "其他IP原文", createdAt: "2026-08-15", ipId: "ip-other",
+        sourceAnalysis: { items: [{ id: "claim-other", kind: "claim", content: "其他IP观点", originalExcerpt: "这是其他IP说过的话。", extractionStatus: "人工确认" }] },
+      },
+    ]));
 
     const { render } = await import("@testing-library/react");
     const userEvent = (await import("@testing-library/user-event")).default;
@@ -271,6 +281,10 @@ test("覆盖度为NONE时确认风险后生成探索稿并分层展示审核信�
     const evidenceGate = generationBodies[0]?.evidenceGate as Record<string, unknown> | undefined;
     assert.equal(evidenceGate?.limitationsAcknowledged, true);
     assert.deepEqual(evidenceGate?.missingDimensions, ["核心判断", "推理过程"]);
+    const sourceContext = generationBodies[0]?.ipSourceContext as Array<Record<string, unknown>> | undefined;
+    assert.equal(sourceContext?.length, 1);
+    assert.equal(sourceContext?.[0]?.ipId, SHUIMURAN.id);
+    assert.equal(sourceContext?.[0]?.sourceId, "source-current");
     const savedScripts = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
     const approval = savedScripts[0]?.scriptResult?.generationApproval as Record<string, unknown> | undefined;
     assert.equal(approval?.coverage, "NONE");
