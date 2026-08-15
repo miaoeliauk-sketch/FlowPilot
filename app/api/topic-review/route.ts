@@ -537,11 +537,111 @@ function scoreLevel(s: number) {
   return "D 不建议做";
 }
 
+interface UserPersonaItem {
+  name: string;
+  coreNeeds: string[];
+  coreConcerns: string[];
+  contentPreferences: string[];
+  purchaseIntent: string;
+  topicFocus: string;
+  representativeComments: string[];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+function optionalFiniteNumberIsValid(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value));
+}
+
+function validateKnowledgeContext(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return "knowledgeContext";
+  for (const [index, item] of value.entries()) {
+    if (!isPlainObject(item)) return `knowledgeContext[${index}]`;
+    for (const field of ["id", "title", "category", "reason", "relevanceTier"] as const) {
+      if (!isNonEmptyString(item[field])) return `knowledgeContext[${index}].${field}`;
+    }
+    if (!optionalFiniteNumberIsValid(item.matchScore)) return `knowledgeContext[${index}].matchScore`;
+    for (const field of ["methodMatches", "matchedFields"] as const) {
+      if (item[field] !== undefined && !isStringArray(item[field])) {
+        return `knowledgeContext[${index}].${field}`;
+      }
+    }
+    if (item.methodAdvice !== undefined && typeof item.methodAdvice !== "string") {
+      return `knowledgeContext[${index}].methodAdvice`;
+    }
+  }
+  return null;
+}
+
+function validateHistoricalData(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return "historicalData";
+  for (const [index, item] of value.entries()) {
+    if (!isPlainObject(item)) return `historicalData[${index}]`;
+    for (const field of ["id", "title", "source", "content", "performanceLevel"] as const) {
+      if (!isNonEmptyString(item[field])) return `historicalData[${index}].${field}`;
+    }
+    if (!isPlainObject(item.metrics)) return `historicalData[${index}].metrics`;
+    for (const metric of Object.values(item.metrics)) {
+      if (
+        metric !== null &&
+        typeof metric !== "string" &&
+        typeof metric !== "boolean" &&
+        (typeof metric !== "number" || !Number.isFinite(metric))
+      ) {
+        return `historicalData[${index}].metrics`;
+      }
+    }
+    if (item.createdAt !== undefined && typeof item.createdAt !== "string") {
+      return `historicalData[${index}].createdAt`;
+    }
+    if (!optionalFiniteNumberIsValid(item.matchScore)) return `historicalData[${index}].matchScore`;
+  }
+  return null;
+}
+
+function validateUserPersonas(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return "userPersonas";
+  for (const [index, item] of value.entries()) {
+    if (!isPlainObject(item)) return `userPersonas[${index}]`;
+    for (const field of ["name", "purchaseIntent", "topicFocus"] as const) {
+      if (!isNonEmptyString(item[field])) return `userPersonas[${index}].${field}`;
+    }
+    for (const field of ["coreNeeds", "coreConcerns", "contentPreferences", "representativeComments"] as const) {
+      if (!isStringArray(item[field])) return `userPersonas[${index}].${field}`;
+    }
+  }
+  return null;
+}
+
+function invalidRequest(errorField: string) {
+  return NextResponse.json({
+    error: "请求格式错误",
+    errorCode: "INVALID_REQUEST",
+    errorField,
+  }, { status: 400 });
+}
+
 export async function POST(req: NextRequest) {
   const apiKey = req.headers.get("X-DeepSeek-Key") || "";
-  let body: { topic?: string; ipProfile?: unknown; userPersonas?: { name: string; coreNeeds: string[]; coreConcerns: string[]; contentPreferences: string[]; purchaseIntent: string; topicFocus: string; representativeComments: string[] }[] };
+  let body: unknown;
   try { body = await req.json(); }
-  catch { return NextResponse.json({ error: "请求格式错误" }, { status: 400 }); }
+  catch { return invalidRequest("body"); }
+  if (!isPlainObject(body)) return invalidRequest("body");
 
   const ipProfileResult = parseRequiredIPProfile(body.ipProfile);
   if (!ipProfileResult.ok) {
@@ -553,11 +653,17 @@ export async function POST(req: NextRequest) {
   }
   const ip = ipProfileResult.ipProfile;
 
-  const topic = (body.topic ?? "").trim();
+  if (typeof body.topic !== "string") return invalidRequest("topic");
+  const invalidArrayField = validateKnowledgeContext(body.knowledgeContext)
+    ?? validateHistoricalData(body.historicalData)
+    ?? validateUserPersonas(body.userPersonas);
+  if (invalidArrayField) return invalidRequest(invalidArrayField);
+
+  const topic = body.topic.trim();
   if (!topic) return NextResponse.json({ error: "请输入选题内容" }, { status: 400 });
 
   const ipBlock = buildIPContextBlock(ip);
-  const personas = body.userPersonas ?? [];
+  const personas = (body.userPersonas ?? []) as UserPersonaItem[];
 
   try {
     // ── 第一步：9位专家并行调用，每位专家都拿到同一份IP上下文 ──
