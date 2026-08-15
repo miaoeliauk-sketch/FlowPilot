@@ -1,9 +1,12 @@
+import type { CoverageAssessment } from "./script-factory-coverage";
+
 export type ScriptFactoryStage = "content" | "storyboard" | "execution";
 export type PartialScriptFailedStage = Exclude<ScriptFactoryStage, "content">;
 export type ScriptGenerationStatus = "complete" | "partial";
 export type ScriptOutputStatus = "formal" | "review" | "exploratory";
 export type AttributionConfidenceLevel = "high" | "medium" | "low";
 export type AttributionAuditStatus = "completed" | "unavailable";
+export type ScriptPostGenerationAuditStatus = "pending" | "completed" | "unavailable";
 export type ParagraphAttributionType =
   | "teacher_explicit"
   | "faithful_rewrite"
@@ -49,6 +52,22 @@ export interface ScriptFactAudit {
   pendingItems: string[];
   caseEvidence: ScriptFactCaseEvidence | null;
 }
+
+export type ScriptPostGenerationAudit =
+  | { status: "pending" }
+  | {
+      status: "completed";
+      coverageAssessment: CoverageAssessment;
+      attributionAudit: ScriptAttributionAudit;
+      factAudit: ScriptFactAudit;
+    }
+  | {
+      status: "unavailable";
+      message: string;
+      coverageAssessment?: CoverageAssessment;
+      attributionAudit?: ScriptAttributionAudit;
+      factAudit: ScriptFactAudit;
+    };
 
 export interface ScriptPartialFailure {
   stage: PartialScriptFailedStage;
