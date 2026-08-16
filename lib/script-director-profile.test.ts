@@ -23,9 +23,13 @@ test("水木然增量修正规则追加在原规则之后且只允许IP专属模
       < block.indexOf("【水木然IP专属生成｜增量修正规则】"),
   );
   assert.match(block, /老师最新修改意见和已通过文案＞本增量规则＞原有水木然规则＞通用脚本规则/);
-  assert.match(block, /胖东来不依赖低价竞争/);
-  assert.match(block, /胖东来不少门店实行周二闭店/);
-  assert.match(block, /胖东来看似退出了规模竞争，实际上守住了品质、信任和口碑/);
+  assert.equal(block.match(/胖东来/g)?.length ?? 0, 1);
+  assert.match(block, /示例只用于说明结构和表达边界，不属于本次创作素材/);
+  assert.match(block, /格式示例不能进入正文素材池/);
+  assert.match(block, /除非当前选题、IP原始内容或案例材料明确涉及该对象，否则不得复用示例中的人物、企业、事件和结论/);
+  assert.doesNotMatch(block, /胖东来不依赖低价竞争/);
+  assert.doesNotMatch(block, /胖东来不少门店实行周二闭店/);
+  assert.doesNotMatch(block, /胖东来看似退出了规模竞争/);
   assert.match(block, /最终只能输出：[\s\S]*标题[\s\S]*完整口播文案[\s\S]*待核实信息/);
   assert.match(block, /任何一项不符合，都必须修改后再输出/);
 

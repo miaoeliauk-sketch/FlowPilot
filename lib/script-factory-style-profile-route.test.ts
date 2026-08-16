@@ -312,6 +312,45 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
   }
 });
 
+test("创业失败选题只把唯一胖东来范例作为格式说明而非默认素材", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "startup-failure-content");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "startup-failure-review");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "startup-failure-argument");
+  };
+
+  try {
+    const request = scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    });
+    const requestBody = await request.clone().json();
+    requestBody.topic = "创业失败以后，真正应该反思什么";
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+
+    assert.equal(response.status, 200);
+    assert.match(prompts[0] ?? "", /选题：「创业失败以后，真正应该反思什么」/);
+    assert.equal((prompts[0]?.match(/胖东来/g) ?? []).length, 1);
+    assert.match(prompts[0] ?? "", /示例只用于说明结构和表达边界，不属于本次创作素材/);
+    assert.match(prompts[0] ?? "", /格式示例不能进入正文素材池/);
+    assert.match(prompts[0] ?? "", /否则不得复用示例中的人物、企业、事件和结论/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("水木然专属生成只在本机记录完整AI调用链，不通过接口泄露诊断内容", async () => {
   const originalFetch = globalThis.fetch;
   const originalEnabled = process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS;
