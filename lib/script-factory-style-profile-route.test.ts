@@ -773,6 +773,23 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
     const compressionRecord = JSON.parse(compressionRecordText) as {
       stage: string;
       userPrompt: string;
+      rawResponse: string;
+      rawResponseChars: number;
+      parsedBodyVisibleChars: number;
+      initialBodyVisibleChars: number;
+      targetMinimumChars: number;
+      targetMaximumChars: number;
+      actualCompressionRatio: number;
+      exactlyMatchesInitial: boolean;
+      normalizedMatchesInitial: boolean;
+      requestId: string;
+      finishReason: string;
+      tokenUsage: {
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number | null;
+        reasoningTokens: number | null;
+      };
       materials: {
         methodKnowledge: Array<{ id: string }>;
         voiceSamples: Array<{ id: string }>;
@@ -783,12 +800,48 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
     assert.doesNotMatch(compressionRecord.userPrompt, /70%至80%/);
     assert.match(compressionRecord.userPrompt, /初稿共148个有效字符/);
     assert.match(compressionRecord.userPrompt, /必须控制在104至118个有效字符之间/);
+    assert.equal(compressionRecord.rawResponse, JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT));
+    assert.equal(compressionRecord.rawResponseChars, Array.from(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT)).length);
+    assert.equal(compressionRecord.parsedBodyVisibleChars, 117);
+    assert.equal(compressionRecord.initialBodyVisibleChars, 148);
+    assert.equal(compressionRecord.targetMinimumChars, 104);
+    assert.equal(compressionRecord.targetMaximumChars, 118);
+    assert.equal(compressionRecord.actualCompressionRatio, 0.7905);
+    assert.equal(compressionRecord.exactlyMatchesInitial, false);
+    assert.equal(compressionRecord.normalizedMatchesInitial, false);
+    assert.equal(compressionRecord.requestId, "trace-content-compression");
+    assert.equal(compressionRecord.finishReason, "stop");
+    assert.deepEqual(compressionRecord.tokenUsage, {
+      promptTokens: 100,
+      completionTokens: 200,
+      totalTokens: null,
+      reasoningTokens: null,
+    });
     assert.deepEqual(compressionRecord.materials.methodKnowledge.map(item => item.id), ["knowledge-trace-1"]);
     assert.deepEqual(compressionRecord.materials.voiceSamples.map(item => item.id), ["voice-trace-1"]);
 
-    const allTraceText = (await Promise.all(callFiles.map(file =>
-      readFile(path.join(generationDir, file), "utf8")
-    ))).join("\n");
+    const allTraceRecords = await Promise.all(callFiles.map(async file =>
+      JSON.parse(await readFile(path.join(generationDir, file), "utf8")) as {
+        rawResponse: string | null;
+        rawResponseChars: number | null;
+        requestId: string | null;
+        finishReason: string | null;
+        tokenUsage: { promptTokens: number | null; completionTokens: number | null };
+      }
+    ));
+    assert.equal(allTraceRecords.every(record => typeof record.rawResponse === "string"), true);
+    assert.equal(allTraceRecords.every(record => (record.rawResponseChars ?? 0) > 0), true);
+    assert.deepEqual(allTraceRecords.map(record => record.requestId), [
+      "trace-content",
+      "trace-content-compression",
+      "trace-shuimuran-review",
+      "trace-argument-review",
+    ]);
+    assert.equal(allTraceRecords.every(record => record.finishReason === "stop"), true);
+    assert.equal(allTraceRecords.every(record => record.tokenUsage.promptTokens === 100), true);
+    assert.equal(allTraceRecords.every(record => record.tokenUsage.completionTokens === 200), true);
+
+    const allTraceText = allTraceRecords.map(record => JSON.stringify(record)).join("\n");
     assert.doesNotMatch(allTraceText, /test-key|apiKey|authorization/i);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1023,8 +1076,12 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
       JSON.parse(await readFile(path.join(generationDir, file), "utf8")) as {
         stage: string;
         retryReason: string | null;
+        rawResponse: string | null;
+        failureCode: string | null;
       }
     ));
+    assert.equal(records[0]!.rawResponse, "{内容被截断");
+    assert.match(records[0]!.failureCode ?? "", /JSON|INVALID/i);
     assert.match(records[1]!.retryReason ?? "", /JSON|解析|截断/);
     assert.match(records[4]!.retryReason ?? "", /标题直接公布了核心答案/);
     assert.equal(records[6]!.retryReason, "终审未通过后的二次检查");

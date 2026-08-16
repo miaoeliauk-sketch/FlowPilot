@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,12 +35,36 @@ test("本机诊断记录保存实际Prompt和素材，但不接受或保存API�
         caseEvidence: { title: "案例A", content: "案例内容" },
       },
     });
+    const resultWritten = await trace.recordResult({
+      stage: "content-initial",
+      attempt: 1,
+      rawResponse: "{\"fullScript\":\"AI实际返回\"}",
+      parsedBodyVisibleChars: 6,
+      initialBodyVisibleChars: null,
+      targetMinimumChars: null,
+      targetMaximumChars: null,
+      actualCompressionRatio: null,
+      exactlyMatchesInitial: null,
+      normalizedMatchesInitial: null,
+      requestId: "request-001",
+      finishReason: "stop",
+      tokenUsage: {
+        promptTokens: 100,
+        completionTokens: 200,
+        totalTokens: 300,
+        reasoningTokens: 0,
+      },
+      failureCode: null,
+    });
 
     assert.equal(written, true);
+    assert.equal(resultWritten, true);
     const generationDirs = await readdir(rootDir);
     assert.equal(generationDirs.length, 1);
     const files = await readdir(path.join(rootDir, generationDirs[0]!));
     assert.deepEqual(files, ["001-content-initial.json"]);
+    assert.equal((await stat(path.join(rootDir, generationDirs[0]!))).mode & 0o777, 0o700);
+    assert.equal((await stat(path.join(rootDir, generationDirs[0]!, files[0]!))).mode & 0o777, 0o600);
     const savedText = await readFile(
       path.join(rootDir, generationDirs[0]!, files[0]!),
       "utf8",
@@ -50,6 +74,16 @@ test("本机诊断记录保存实际Prompt和素材，但不接受或保存API�
     assert.equal(saved.systemPrompt, "系统提示词：禁止使用通用开头。");
     assert.equal(saved.userPrompt, "用户提示词：请围绕创业失败生成脚本。");
     assert.equal(saved.shuimuranProfileEnabled, true);
+    assert.equal(saved.rawResponse, "{\"fullScript\":\"AI实际返回\"}");
+    assert.equal(saved.rawResponseChars, 23);
+    assert.equal(saved.parsedBodyVisibleChars, 6);
+    assert.equal(saved.requestId, "request-001");
+    assert.deepEqual(saved.tokenUsage, {
+      promptTokens: 100,
+      completionTokens: 200,
+      totalTokens: 300,
+      reasoningTokens: 0,
+    });
     assert.deepEqual(
       (saved.materials as { methodKnowledge: unknown[] }).methodKnowledge,
       [{ id: "knowledge-1", title: "创业案例", rawContent: "案例原文" }],

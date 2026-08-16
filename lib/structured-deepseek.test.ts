@@ -266,6 +266,10 @@ test("reports stable empty-content diagnostics when both attempts have no final 
 test("retries one invalid structured response and parses the second result", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
+  const attemptResults: Array<{
+    rawResponse: string | null;
+    failureCode: string | null;
+  }> = [];
   globalThis.fetch = async () => {
     calls += 1;
     return deepSeekResponse(calls === 1 ? '{"status":' : '{"status":"valid"}');
@@ -280,10 +284,44 @@ test("retries one invalid structured response and parses the second result", asy
       timeoutMs: 100,
       maxRetries: 1,
       parse: (content) => JSON.parse(content) as { status: string },
+      onAttemptResult: result => {
+        attemptResults.push({
+          rawResponse: result.rawResponse,
+          failureCode: result.failureCode,
+        });
+      },
     });
 
     assert.deepEqual(result.data, { status: "valid" });
     assert.equal(result.attempts, 2);
+    assert.deepEqual(attemptResults, [
+      { rawResponse: '{"status":', failureCode: "PARSE_FAILED" },
+      { rawResponse: '{"status":"valid"}', failureCode: null },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("diagnostic result callback failure does not block a valid structured response", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => deepSeekResponse('{"status":"valid"}');
+
+  try {
+    const result = await callStructuredDeepSeek({
+      systemPrompt: "system",
+      userPrompt: "user",
+      apiKey: "test-key",
+      maxTokens: 100,
+      timeoutMs: 100,
+      maxRetries: 0,
+      parse: (content) => JSON.parse(content) as { status: string },
+      onAttemptResult: () => {
+        throw new Error("diagnostic disk unavailable");
+      },
+    });
+
+    assert.deepEqual(result.data, { status: "valid" });
   } finally {
     globalThis.fetch = originalFetch;
   }

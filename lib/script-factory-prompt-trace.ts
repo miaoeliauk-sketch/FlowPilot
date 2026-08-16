@@ -1,4 +1,4 @@
-import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const MAX_GENERATIONS = 20;
@@ -42,9 +42,32 @@ export interface RecordScriptFactoryPromptCallInput {
   materials: ScriptFactoryPromptTraceMaterials;
 }
 
+export interface RecordScriptFactoryPromptResultInput {
+  stage: ScriptFactoryPromptTraceStage;
+  attempt: number;
+  rawResponse: string | null;
+  parsedBodyVisibleChars: number | null;
+  initialBodyVisibleChars: number | null;
+  targetMinimumChars: number | null;
+  targetMaximumChars: number | null;
+  actualCompressionRatio: number | null;
+  exactlyMatchesInitial: boolean | null;
+  normalizedMatchesInitial: boolean | null;
+  requestId: string | null;
+  finishReason: string | null;
+  tokenUsage: {
+    promptTokens: number | null;
+    completionTokens: number | null;
+    totalTokens: number | null;
+    reasoningTokens: number | null;
+  };
+  failureCode: string | null;
+}
+
 export interface ScriptFactoryPromptTrace {
   readonly generationId: string;
   recordCall(input: RecordScriptFactoryPromptCallInput): Promise<boolean>;
+  recordResult(input: RecordScriptFactoryPromptResultInput): Promise<boolean>;
 }
 
 function defaultEnabled(): boolean {
@@ -59,6 +82,14 @@ function defaultRootDir(): string {
 
 function safeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "trace";
+}
+
+function callKey(stage: ScriptFactoryPromptTraceStage, attempt: number): string {
+  return `${stage}:${attempt}`;
+}
+
+function callFileName(index: number, stage: ScriptFactoryPromptTraceStage): string {
+  return `${String(index).padStart(3, "0")}-${safeSegment(stage)}.json`;
 }
 
 async function pruneOldGenerations(rootDir: string): Promise<void> {
@@ -88,6 +119,7 @@ export function createScriptFactoryPromptTrace(
   const generationDir = path.join(rootDir, directoryName);
   let callIndex = 0;
   let writeQueue = Promise.resolve(true);
+  const latestCallIndexByKey = new Map<string, number>();
 
   return {
     generationId: input.generationId,
@@ -95,10 +127,12 @@ export function createScriptFactoryPromptTrace(
       if (!enabled) return Promise.resolve(false);
       callIndex += 1;
       const currentIndex = callIndex;
+      latestCallIndexByKey.set(callKey(call.stage, call.attempt), currentIndex);
       writeQueue = writeQueue.then(async () => {
         try {
           await mkdir(generationDir, { recursive: true, mode: 0o700 });
-          const fileName = `${String(currentIndex).padStart(3, "0")}-${safeSegment(call.stage)}.json`;
+          await chmod(generationDir, 0o700);
+          const fileName = callFileName(currentIndex, call.stage);
           const targetPath = path.join(generationDir, fileName);
           const tempPath = `${targetPath}.${safeSegment(input.generationId)}.tmp`;
           const record = {
@@ -116,6 +150,24 @@ export function createScriptFactoryPromptTrace(
             systemPrompt: call.systemPrompt,
             userPrompt: call.userPrompt,
             materials: call.materials,
+            rawResponse: null,
+            rawResponseChars: null,
+            parsedBodyVisibleChars: null,
+            initialBodyVisibleChars: null,
+            targetMinimumChars: null,
+            targetMaximumChars: null,
+            actualCompressionRatio: null,
+            exactlyMatchesInitial: null,
+            normalizedMatchesInitial: null,
+            requestId: null,
+            finishReason: null,
+            tokenUsage: {
+              promptTokens: null,
+              completionTokens: null,
+              totalTokens: null,
+              reasoningTokens: null,
+            },
+            failureCode: null,
           };
           await writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, {
             encoding: "utf8",
@@ -123,7 +175,39 @@ export function createScriptFactoryPromptTrace(
             flag: "wx",
           });
           await rename(tempPath, targetPath);
+          await chmod(targetPath, 0o600);
           await pruneOldGenerations(rootDir);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      return writeQueue;
+    },
+    recordResult(result) {
+      if (!enabled) return Promise.resolve(false);
+      const currentIndex = latestCallIndexByKey.get(callKey(result.stage, result.attempt));
+      if (currentIndex === undefined) return Promise.resolve(false);
+      writeQueue = writeQueue.then(async () => {
+        try {
+          const fileName = callFileName(currentIndex, result.stage);
+          const targetPath = path.join(generationDir, fileName);
+          const currentRecord = JSON.parse(await readFile(targetPath, "utf8")) as Record<string, unknown>;
+          const tempPath = `${targetPath}.${safeSegment(input.generationId)}.result.tmp`;
+          const record = {
+            ...currentRecord,
+            ...result,
+            rawResponseChars: result.rawResponse === null
+              ? null
+              : Array.from(result.rawResponse).length,
+          };
+          await writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+            flag: "wx",
+          });
+          await rename(tempPath, targetPath);
+          await chmod(targetPath, 0o600);
           return true;
         } catch {
           return false;

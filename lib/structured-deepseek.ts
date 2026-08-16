@@ -20,6 +20,12 @@ export interface StructuredDeepSeekOptions<T> {
     userPrompt: string;
     retryReason: StructuredDeepSeekRetryReason | null;
   }) => void | Promise<void>;
+  onAttemptResult?: (result: {
+    attempt: number;
+    rawResponse: string | null;
+    responseMeta: DeepSeekResponseMeta;
+    failureCode: string | null;
+  }) => void | Promise<void>;
 }
 
 export interface StructuredDeepSeekRetryReason {
@@ -165,6 +171,18 @@ export async function callStructuredDeepSeek<T>(
   const attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[] = [];
   let parseRetryInstruction: string | null = null;
   let retryReason: StructuredDeepSeekRetryReason | null = null;
+  const notifyAttemptResult = async (result: {
+    attempt: number;
+    rawResponse: string | null;
+    responseMeta: DeepSeekResponseMeta;
+    failureCode: string | null;
+  }) => {
+    try {
+      await options.onAttemptResult?.(result);
+    } catch {
+      // 诊断留痕失败不能阻断正式AI调用。
+    }
+  };
 
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
     let responseMeta = EMPTY_RESPONSE_META;
@@ -221,6 +239,12 @@ export async function callStructuredDeepSeek<T>(
           finishReason: null,
           completionTokens: null,
         });
+        await notifyAttemptResult({
+          attempt,
+          rawResponse: null,
+          responseMeta,
+          failureCode: "MISSING_API_KEY",
+        });
         throw new StructuredDeepSeekError(
           "request",
           attempt,
@@ -244,6 +268,12 @@ export async function callStructuredDeepSeek<T>(
         responseChars: responseError?.responseChars ?? null,
         ...responseMetaDiagnostic(failureMeta),
       });
+      await notifyAttemptResult({
+        attempt,
+        rawResponse: null,
+        responseMeta: failureMeta,
+        failureCode,
+      });
       retryReason = { stage: lastStage, failureCode };
       continue;
     } finally {
@@ -251,8 +281,15 @@ export async function callStructuredDeepSeek<T>(
     }
 
     try {
+      const data = options.parse(content);
+      await notifyAttemptResult({
+        attempt,
+        rawResponse: content,
+        responseMeta,
+        failureCode: null,
+      });
       return {
-        data: options.parse(content),
+        data,
         attempts: attempt,
         responseMeta,
         attemptDiagnostics: [
@@ -284,6 +321,12 @@ export async function callStructuredDeepSeek<T>(
         responseChars: content.length,
         ...responseMetaDiagnostic(responseMeta),
         ...parseDiagnostic,
+      });
+      await notifyAttemptResult({
+        attempt,
+        rawResponse: content,
+        responseMeta,
+        failureCode,
       });
     }
   }

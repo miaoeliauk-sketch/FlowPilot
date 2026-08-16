@@ -70,6 +70,10 @@ function getRequestId(meta: DeepSeekResponseMeta | null): string | null {
   return meta?.requestId ?? null;
 }
 
+function normalizedResponseText(text: string): string {
+  return text.replace(/\s+/g, "");
+}
+
 function unwrapStageError(error: unknown): unknown {
   return error instanceof ScriptFactoryStageError ? error.cause : error;
 }
@@ -646,6 +650,52 @@ ${rawIPBlock}
     shuimuranProfileEnabled: isShuimuranDedicatedGeneration,
   });
 
+  const recordTraceResult = (input: {
+    stage: ScriptFactoryPromptTraceStage;
+    attempt: number;
+    rawResponse: string | null;
+    parsedBody: string | null;
+    initialBody?: string | null;
+    targetMinimumChars?: number | null;
+    targetMaximumChars?: number | null;
+    meta: DeepSeekResponseMeta | null;
+    failureCode: string | null;
+  }) => {
+    const parsedBodyVisibleChars = input.parsedBody === null
+      ? null
+      : visibleCharacterCount(input.parsedBody);
+    const initialBodyVisibleChars = input.initialBody == null
+      ? null
+      : visibleCharacterCount(input.initialBody);
+    return promptTrace.recordResult({
+      stage: input.stage,
+      attempt: input.attempt,
+      rawResponse: input.rawResponse,
+      parsedBodyVisibleChars,
+      initialBodyVisibleChars,
+      targetMinimumChars: input.targetMinimumChars ?? null,
+      targetMaximumChars: input.targetMaximumChars ?? null,
+      actualCompressionRatio: initialBodyVisibleChars && parsedBodyVisibleChars !== null
+        ? Number((parsedBodyVisibleChars / initialBodyVisibleChars).toFixed(4))
+        : null,
+      exactlyMatchesInitial: input.initialBody == null || input.parsedBody === null
+        ? null
+        : input.parsedBody === input.initialBody,
+      normalizedMatchesInitial: input.initialBody == null || input.parsedBody === null
+        ? null
+        : normalizedResponseText(input.parsedBody) === normalizedResponseText(input.initialBody),
+      requestId: input.meta?.requestId ?? null,
+      finishReason: input.meta?.finishReason ?? null,
+      tokenUsage: {
+        promptTokens: input.meta?.promptTokens ?? null,
+        completionTokens: input.meta?.completionTokens ?? null,
+        totalTokens: input.meta?.totalTokens ?? null,
+        reasoningTokens: input.meta?.reasoningTokens ?? null,
+      },
+      failureCode: input.failureCode,
+    });
+  };
+
   let failedStage = "request";
   let responseMeta: DeepSeekResponseMeta | null = null;
   try {
@@ -664,6 +714,9 @@ ${rawIPBlock}
       },
     ) => {
       responseMeta = null;
+      let contentRaw: string | null = null;
+      let parsedBody: string | null = null;
+      let failureCode: string | null = null;
       const contentUserPrompt = CONTENT_PROMPT(
         ipBlock + corpusBlock,
         topic,
@@ -686,31 +739,47 @@ ${rawIPBlock}
         retryReason: traceInput.retryReason,
         materials: contentTraceMaterials,
       });
-      const contentRaw = await callDeepSeek(
-        CONTENT_SYSTEM,
-        contentUserPrompt,
-        6000,
-        0.3,
-        apiKey,
-        {
-          thinking: { type: "disabled" },
-          responseFormat: { type: "json_object" },
-          onResponseMeta: meta => { responseMeta = meta; },
-          signal,
-        },
-      );
-      if (getFinishReason(responseMeta) === "length") {
-        throw new ScriptFactoryResponseError(
-          "invalid_json",
-          "AI返回的核心脚本被截断",
+      try {
+        contentRaw = await callDeepSeek(
+          CONTENT_SYSTEM,
+          contentUserPrompt,
+          6000,
+          0.3,
+          apiKey,
+          {
+            thinking: { type: "disabled" },
+            responseFormat: { type: "json_object" },
+            onResponseMeta: meta => { responseMeta = meta; },
+            signal,
+          },
         );
+        if (getFinishReason(responseMeta) === "length") {
+          throw new ScriptFactoryResponseError(
+            "invalid_json",
+            "AI返回的核心脚本被截断",
+          );
+        }
+        const parsedContent = parseScriptContentResponse(contentRaw, {
+          outputMode: isShuimuranDedicatedGeneration ? "shuimuran-confirmed" : "default",
+          minimumTranscriptChars: format.supportsStoryboard
+            ? Math.max(120, Math.round(durationSeconds * 1.2))
+            : undefined,
+        });
+        parsedBody = parsedContent.outline[0]?.content ?? "";
+        return parsedContent;
+      } catch (error) {
+        failureCode = getErrorCode(error);
+        throw error;
+      } finally {
+        await recordTraceResult({
+          stage: traceInput.stage,
+          attempt: traceInput.attempt,
+          rawResponse: contentRaw,
+          parsedBody,
+          meta: responseMeta,
+          failureCode,
+        });
       }
-      return parseScriptContentResponse(contentRaw, {
-        outputMode: isShuimuranDedicatedGeneration ? "shuimuran-confirmed" : "default",
-        minimumTranscriptChars: format.supportsStoryboard
-          ? Math.max(120, Math.round(durationSeconds * 1.2))
-          : undefined,
-      });
     };
 
     let content = await runScriptFactoryStage(
@@ -750,6 +819,9 @@ ${rawIPBlock}
           "content",
           async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
+            let compressedRaw: string | null = null;
+            let parsedBody: string | null = null;
+            let failureCode: string | null = null;
             const compressionUserPrompt = buildShuimuranCompressionPrompt(
               initialDraft,
               retryReason,
@@ -763,57 +835,73 @@ ${rawIPBlock}
               retryReason,
               materials: contentTraceMaterials,
             });
-            const compressedRaw = await callDeepSeek(
-              SHUIMURAN_COMPRESSION_SYSTEM,
-              compressionUserPrompt,
-              6000,
-              0.1,
-              apiKey,
-              {
-                thinking: { type: "disabled" },
-                responseFormat: { type: "json_object" },
-                onResponseMeta: meta => { responseMeta = meta; },
-                signal,
-              },
-            );
-            if (getFinishReason(responseMeta) === "length") {
-              throw new ScriptFactoryResponseError(
-                "invalid_json",
-                "AI返回的压缩稿被截断",
+            try {
+              compressedRaw = await callDeepSeek(
+                SHUIMURAN_COMPRESSION_SYSTEM,
+                compressionUserPrompt,
+                6000,
+                0.1,
+                apiKey,
+                {
+                  thinking: { type: "disabled" },
+                  responseFormat: { type: "json_object" },
+                  onResponseMeta: meta => { responseMeta = meta; },
+                  signal,
+                },
               );
+              if (getFinishReason(responseMeta) === "length") {
+                throw new ScriptFactoryResponseError(
+                  "invalid_json",
+                  "AI返回的压缩稿被截断",
+                );
+              }
+              const compressed = parseScriptContentResponse(compressedRaw, {
+                outputMode: "shuimuran-confirmed",
+              });
+              parsedBody = compressed.outline[0]?.content ?? "";
+              previousCompression = compressed;
+              const validationIssues: string[] = [];
+              if (compressed.titles[0]?.title !== initialDraft.titles[0]?.title) {
+                validationIssues.push("压缩稿改变了初稿标题");
+              }
+              if (!hasSamePendingVerification(
+                initialDraft.pendingVerification,
+                compressed.pendingVerification,
+              )) {
+                validationIssues.push("压缩稿改变了待核验内容");
+              }
+              const compressedLength = visibleCharacterCount(parsedBody);
+              if (
+                compressedLength < target.minimumLength ||
+                compressedLength > target.maximumLength
+              ) {
+                validationIssues.push(
+                  `压缩稿为${compressedLength}个有效字符，目标为${target.minimumLength}至${target.maximumLength}个`,
+                );
+              }
+              if (validationIssues.length > 0) {
+                throw new ScriptFactoryResponseError(
+                  "quality_retry",
+                  validationIssues.join("；"),
+                );
+              }
+              return compressed;
+            } catch (error) {
+              failureCode = getErrorCode(error);
+              throw error;
+            } finally {
+              await recordTraceResult({
+                stage: "content-compression",
+                attempt,
+                rawResponse: compressedRaw,
+                parsedBody,
+                initialBody: initialDraft.outline[0]?.content ?? "",
+                targetMinimumChars: target.minimumLength,
+                targetMaximumChars: target.maximumLength,
+                meta: responseMeta,
+                failureCode,
+              });
             }
-            const compressed = parseScriptContentResponse(compressedRaw, {
-              outputMode: "shuimuran-confirmed",
-            });
-            previousCompression = compressed;
-            const validationIssues: string[] = [];
-            if (compressed.titles[0]?.title !== initialDraft.titles[0]?.title) {
-              validationIssues.push("压缩稿改变了初稿标题");
-            }
-            if (!hasSamePendingVerification(
-              initialDraft.pendingVerification,
-              compressed.pendingVerification,
-            )) {
-              validationIssues.push("压缩稿改变了待核验内容");
-            }
-            const compressedLength = visibleCharacterCount(
-              compressed.outline[0]?.content ?? "",
-            );
-            if (
-              compressedLength < target.minimumLength ||
-              compressedLength > target.maximumLength
-            ) {
-              validationIssues.push(
-                `压缩稿为${compressedLength}个有效字符，目标为${target.minimumLength}至${target.maximumLength}个`,
-              );
-            }
-            if (validationIssues.length > 0) {
-              throw new ScriptFactoryResponseError(
-                "quality_retry",
-                validationIssues.join("；"),
-              );
-            }
-            return compressed;
           },
           SCRIPT_STAGE_RETRY_OPTIONS,
         );
@@ -861,6 +949,14 @@ ${rawIPBlock}
                 ? `${prompt.retryReason.stage}:${prompt.retryReason.failureCode}`
                 : retryReason,
               materials: reviewTraceMaterials,
+            }).then(() => undefined),
+            onAttemptResult: result => recordTraceResult({
+              stage: "shuimuran-review",
+              attempt: result.attempt,
+              rawResponse: result.rawResponse,
+              parsedBody: null,
+              meta: result.responseMeta,
+              failureCode: result.failureCode,
             }).then(() => undefined),
           })).data;
           return {
@@ -937,6 +1033,14 @@ ${rawIPBlock}
             : null,
           materials: emptyTraceMaterials,
         }).then(() => undefined),
+        onAttemptResult: result => recordTraceResult({
+          stage: "argument-review",
+          attempt: result.attempt,
+          rawResponse: result.rawResponse,
+          parsedBody: null,
+          meta: result.responseMeta,
+          failureCode: result.failureCode,
+        }).then(() => undefined),
       });
       argumentWarnings = reviewResult.data;
     } catch (error) {
@@ -977,6 +1081,8 @@ ${rawIPBlock}
           "storyboard",
           async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
+            let storyboardRaw: string | null = null;
+            let failureCode: string | null = null;
             const storyboardUserPrompt = STORYBOARD_PROMPT(
               ipBlock,
               topic,
@@ -991,29 +1097,43 @@ ${rawIPBlock}
               retryReason,
               materials: emptyTraceMaterials,
             });
-            const storyboardRaw = await callDeepSeek(
-              STORYBOARD_SYSTEM,
-              storyboardUserPrompt,
-              6000,
-              0.3,
-              apiKey,
-              {
-                thinking: { type: "disabled" },
-                responseFormat: { type: "json_object" },
-                onResponseMeta: meta => { responseMeta = meta; },
-                signal,
-              },
-            );
-            if (getFinishReason(responseMeta) === "length") {
-              throw new ScriptFactoryResponseError(
-                "invalid_json",
-                "AI返回的分镜脚本被截断",
+            try {
+              storyboardRaw = await callDeepSeek(
+                STORYBOARD_SYSTEM,
+                storyboardUserPrompt,
+                6000,
+                0.3,
+                apiKey,
+                {
+                  thinking: { type: "disabled" },
+                  responseFormat: { type: "json_object" },
+                  onResponseMeta: meta => { responseMeta = meta; },
+                  signal,
+                },
               );
+              if (getFinishReason(responseMeta) === "length") {
+                throw new ScriptFactoryResponseError(
+                  "invalid_json",
+                  "AI返回的分镜脚本被截断",
+                );
+              }
+              return parseScriptStoryboardResponse(
+                storyboardRaw,
+                { needsStoryboard, needsShootingTips },
+              );
+            } catch (error) {
+              failureCode = getErrorCode(error);
+              throw error;
+            } finally {
+              await recordTraceResult({
+                stage: "storyboard",
+                attempt,
+                rawResponse: storyboardRaw,
+                parsedBody: null,
+                meta: responseMeta,
+                failureCode,
+              });
             }
-            return parseScriptStoryboardResponse(
-              storyboardRaw,
-              { needsStoryboard, needsShootingTips },
-            );
           },
           SCRIPT_STAGE_RETRY_OPTIONS,
         );
@@ -1042,6 +1162,8 @@ ${rawIPBlock}
           "execution",
           async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
+            let execRaw: string | null = null;
+            let failureCode: string | null = null;
             const executionUserPrompt = EXECUTION_PROMPT(ipBlock, topic, outlineText, format);
             await promptTrace.recordCall({
               stage: "execution",
@@ -1051,42 +1173,56 @@ ${rawIPBlock}
               retryReason,
               materials: emptyTraceMaterials,
             });
-            const execRaw = await callDeepSeek(
-              EXECUTION_SYSTEM,
-              executionUserPrompt,
-              1200,
-              0.3,
-              apiKey,
-              {
-                thinking: { type: "disabled" },
-                responseFormat: { type: "json_object" },
-                onResponseMeta: meta => { responseMeta = meta; },
-                signal,
-              },
-            );
-            if (getFinishReason(responseMeta) === "length") {
-              throw new ScriptFactoryResponseError(
-                "invalid_json",
-                "AI返回的执行建议被截断",
+            try {
+              execRaw = await callDeepSeek(
+                EXECUTION_SYSTEM,
+                executionUserPrompt,
+                1200,
+                0.3,
+                apiKey,
+                {
+                  thinking: { type: "disabled" },
+                  responseFormat: { type: "json_object" },
+                  onResponseMeta: meta => { responseMeta = meta; },
+                  signal,
+                },
               );
-            }
-            const ex = parseDeepSeekJSON(
-              execRaw,
-              { shootingSuggestions: [] as string[] },
-            );
-            const suggestions = Array.isArray(ex.shootingSuggestions)
-              ? ex.shootingSuggestions.filter(
-                  (item): item is string =>
-                    typeof item === "string" && Boolean(item.trim()),
-                )
-              : [];
-            if (suggestions.length === 0) {
-              throw new ScriptFactoryResponseError(
-                "incomplete_fields",
-                "脚本结果字段不完整：shootingSuggestions",
+              if (getFinishReason(responseMeta) === "length") {
+                throw new ScriptFactoryResponseError(
+                  "invalid_json",
+                  "AI返回的执行建议被截断",
+                );
+              }
+              const ex = parseDeepSeekJSON(
+                execRaw,
+                { shootingSuggestions: [] as string[] },
               );
+              const suggestions = Array.isArray(ex.shootingSuggestions)
+                ? ex.shootingSuggestions.filter(
+                    (item): item is string =>
+                      typeof item === "string" && Boolean(item.trim()),
+                  )
+                : [];
+              if (suggestions.length === 0) {
+                throw new ScriptFactoryResponseError(
+                  "incomplete_fields",
+                  "脚本结果字段不完整：shootingSuggestions",
+                );
+              }
+              return suggestions;
+            } catch (error) {
+              failureCode = getErrorCode(error);
+              throw error;
+            } finally {
+              await recordTraceResult({
+                stage: "execution",
+                attempt,
+                rawResponse: execRaw,
+                parsedBody: null,
+                meta: responseMeta,
+                failureCode,
+              });
             }
-            return suggestions;
           },
           SCRIPT_STAGE_RETRY_OPTIONS,
         );
