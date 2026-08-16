@@ -1,18 +1,4 @@
-const CHECK_KEYS = [
-  "titleKeepsAnswer",
-  "openingBuildsSuspense",
-  "concreteEntry",
-  "classicExplainsReality",
-  "risesToPattern",
-  "conciseWithoutRepetition",
-  "staleHotspotReframed",
-  "titleOpeningEndingClosed",
-  "soundsLikeTeacher",
-  "singleCoreIdea",
-  "reasoningSupported",
-  "endingClosesSpecificLoop",
-  "compressionAddsNoFacts",
-] as const;
+import { SHUIMURAN_REVIEW_CHECK_KEYS } from "./script-factory-quality-policy";
 
 export interface ShuimuranScriptReview {
   passed: boolean;
@@ -237,13 +223,13 @@ export function parseShuimuranReview(content: unknown): ShuimuranScriptReview {
   }
   const checkObject = checks as Record<string, unknown>;
   if (
-    Object.keys(checkObject).length !== CHECK_KEYS.length ||
-    CHECK_KEYS.some(key => typeof checkObject[key] !== "boolean")
+    Object.keys(checkObject).length !== SHUIMURAN_REVIEW_CHECK_KEYS.length ||
+    SHUIMURAN_REVIEW_CHECK_KEYS.some(key => typeof checkObject[key] !== "boolean")
   ) {
     throw new Error("水木然脚本终审返回字段不完整");
   }
   const normalizedIssues = issues.map(issue => issue.trim()).filter(Boolean);
-  const passed = CHECK_KEYS.every(key => checkObject[key] === true);
+  const passed = SHUIMURAN_REVIEW_CHECK_KEYS.every(key => checkObject[key] === true);
   if (passed && normalizedIssues.length > 0) {
     throw new Error("水木然脚本终审结果自相矛盾");
   }
