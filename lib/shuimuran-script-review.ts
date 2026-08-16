@@ -8,6 +8,9 @@ const CHECK_KEYS = [
   "staleHotspotReframed",
   "titleOpeningEndingClosed",
   "soundsLikeTeacher",
+  "singleCoreIdea",
+  "reasoningSupported",
+  "endingClosesSpecificLoop",
 ] as const;
 
 export interface ShuimuranScriptReview {
@@ -15,7 +18,96 @@ export interface ShuimuranScriptReview {
   issues: string[];
 }
 
-export const SHUIMURAN_REVIEW_SYSTEM = `你是水木然IP专属脚本的独立终审员。只检查老师已经确认的9项内容质量标准，不负责观点归属审计、事实核验、润色或改写文案。
+const FORBIDDEN_OPENINGS = [
+  "大家有没有发现一个很有意思的现象",
+  "今天跟大家聊一个话题",
+  "最近发生了一件事",
+  "你知道为什么吗",
+] as const;
+
+const GENERIC_ENDINGS = [
+  /1%的人/,
+  /值得(?:你)?反复琢磨/,
+  /记住这(?:三个字|几个字|句话|一点)/,
+] as const;
+
+const MECHANICAL_LIST_SEQUENCES: ReadonlyArray<ReadonlyArray<RegExp>> = [
+  [
+    /(?:第一(?:种|点|个|条|步|层|类|件事)|第一(?=[，、：:。！？!?；;\s]|$))/,
+    /(?:第二(?:种|点|个|条|步|层|类|件事)|第二(?=[，、：:。！？!?；;\s]|$))/,
+    /(?:第三(?:种|点|个|条|步|层|类|件事)|第三(?=[，、：:。！？!?；;\s]|$))/,
+  ],
+  [/一是/, /二是/, /三是/],
+  [/首先/, /其次/, /最后/],
+];
+
+function containsOrderedSequence(text: string, sequence: ReadonlyArray<RegExp>): boolean {
+  let offset = 0;
+  for (const pattern of sequence) {
+    const match = pattern.exec(text.slice(offset));
+    if (!match || match.index === undefined) return false;
+    offset += match.index + match[0].length;
+  }
+  return true;
+}
+
+function containsLocalMechanicalList(fullScript: string): boolean {
+  const paragraphs = fullScript
+    .split(/\n+/)
+    .map(paragraph => paragraph.trim())
+    .filter(Boolean);
+  if (paragraphs.some(paragraph =>
+    MECHANICAL_LIST_SEQUENCES.some(sequence => containsOrderedSequence(paragraph, sequence))
+  )) {
+    return true;
+  }
+  for (let index = 0; index < paragraphs.length; index += 1) {
+    const nearbyParagraphs = paragraphs.slice(index, index + 3).join("\n");
+    if (MECHANICAL_LIST_SEQUENCES.some(sequence =>
+      containsOrderedSequence(nearbyParagraphs, sequence)
+    )) {
+      return true;
+    }
+  }
+
+  const sentences = fullScript.match(/[^。！？!?；;\n]+[。！？!?；;]?/g) ?? [];
+  for (let index = 0; index < sentences.length; index += 1) {
+    const nearbySentences = sentences.slice(index, index + 3).join("");
+    if (MECHANICAL_LIST_SEQUENCES.some(sequence =>
+      containsOrderedSequence(nearbySentences, sequence)
+    )) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function findShuimuranDeterministicReviewIssues(input: {
+  title: string;
+  fullScript: string;
+}): string[] {
+  const issues: string[] = [];
+  const normalizedScript = input.fullScript.trim();
+  const opening = normalizedScript.slice(0, 120);
+  const forbiddenOpening = FORBIDDEN_OPENINGS.find(pattern => opening.includes(pattern));
+  if (forbiddenOpening) {
+    issues.push(`禁用开头：命中“${forbiddenOpening}”，必须改为直接判断式开头。`);
+  }
+
+  if (containsLocalMechanicalList(normalizedScript)) {
+    issues.push("机械清单：正文短距离内连续使用“第一、第二、第三”“一是、二是、三是”或“首先、其次、最后”等固定枚举，必须围绕一条推理链重组。");
+  }
+
+  const ending = normalizedScript.slice(-220);
+  const genericEnding = GENERIC_ENDINGS.find(pattern => pattern.test(ending));
+  if (genericEnding) {
+    issues.push("通用结尾：命中脱离本文仍成立的收尾，必须回答标题悬念并回扣本篇案例、经典或核心规律。");
+  }
+
+  return issues;
+}
+
+export const SHUIMURAN_REVIEW_SYSTEM = `你是水木然IP专属脚本的独立终审员。只检查老师已经确认的12项内容质量标准，不负责观点归属审计、事实核验、润色或改写文案。
 必须逐项给出布尔值。任何一项不通过，issues中必须写明可直接用于重写的具体原因。
 只输出合法JSON，不要输出Markdown或解释。`;
 
@@ -82,6 +174,9 @@ ${caseBlock}
 7. 过期热点是否已经转为长期认知内容？没有使用热点时通过。
 8. 标题、开头和结尾是否形成闭环？
 9. 全文是否像老师在表达，而不是AI模仿几个关键词？
+10. 全文是否只围绕一个核心思想展开，而不是多个观点并列堆砌？
+11. 每个锋利判断是否有事实、案例或清楚的因果桥梁支撑？如有口号或鸡汤式判断，issues必须指出缺少事实案例或因果桥梁的具体句子。
+12. 结尾是否回答标题悬念，并明确回到本篇实际使用的案例、经典或核心规律？仅仅重复宽泛结论不能通过。
 
 严格输出：
 {
@@ -94,7 +189,10 @@ ${caseBlock}
     "conciseWithoutRepetition": true,
     "staleHotspotReframed": true,
     "titleOpeningEndingClosed": true,
-    "soundsLikeTeacher": true
+    "soundsLikeTeacher": true,
+    "singleCoreIdea": true,
+    "reasoningSupported": true,
+    "endingClosesSpecificLoop": true
   },
   "issues": []
 }`;

@@ -39,6 +39,7 @@ import {
 } from "@/lib/script-factory-quality";
 import {
   buildShuimuranReviewPrompt,
+  findShuimuranDeterministicReviewIssues,
   parseShuimuranReview,
   SHUIMURAN_REVIEW_SYSTEM,
 } from "@/lib/shuimuran-script-review";
@@ -641,6 +642,10 @@ ${rawIPBlock}
         retryReason: string | null = null,
       ) => {
         try {
+          const deterministicIssues = findShuimuranDeterministicReviewIssues({
+            title: candidate.titles[0]?.title ?? "",
+            fullScript: candidate.outline[0]?.content ?? "",
+          });
           const reviewUserPrompt = buildShuimuranReviewPrompt({
             title: candidate.titles[0]?.title ?? "",
             fullScript: candidate.outline[0]?.content ?? "",
@@ -654,7 +659,7 @@ ${rawIPBlock}
             })),
             caseEvidence,
           });
-          return (await callStructuredDeepSeek({
+          const modelReview = (await callStructuredDeepSeek({
             systemPrompt: SHUIMURAN_REVIEW_SYSTEM,
             userPrompt: reviewUserPrompt,
             parse: parseShuimuranReview,
@@ -674,6 +679,10 @@ ${rawIPBlock}
               materials: reviewTraceMaterials,
             }).then(() => undefined),
           })).data;
+          return {
+            passed: deterministicIssues.length === 0 && modelReview.passed,
+            issues: [...deterministicIssues, ...modelReview.issues],
+          };
         } catch {
           throw new ScriptFactoryResponseError(
             "quality_retry",

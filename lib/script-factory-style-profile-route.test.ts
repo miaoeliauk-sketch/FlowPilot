@@ -91,6 +91,19 @@ const SHUIMURAN_DIRECTOR_CONTENT = {
   pendingVerification: [],
 };
 
+const BREAK_SIX_CONTENT = {
+  titles: [{ title: "一个人真正觉醒之前，必须破掉这六种相" }],
+  fullScript: `大家有没有发现一个很有意思的现象：很多人越努力越焦虑，因为他们一直在着相。
+第一种相，叫我相。破掉我相，就是看清自己的局限。
+第二种相，叫人相。破掉人相，就是不再用别人的尺子量自己。
+第三种相，叫众生相。破掉众生相，就是敢于走少有人走的路。
+第四种相，叫寿者相。破掉寿者相，就是不再被年龄绑架。
+第五种相，叫法相。破掉法相，就是不再迷信方法。
+第六种相，叫非法相。破掉非法相，就是既不执着于有，也不执着于无。
+希望你能成为那1%的人。`,
+  pendingVerification: [],
+};
+
 const VALID_SHUIMURAN_REVIEW = {
   checks: {
     titleKeepsAnswer: true,
@@ -102,6 +115,9 @@ const VALID_SHUIMURAN_REVIEW = {
     staleHotspotReframed: true,
     titleOpeningEndingClosed: true,
     soundsLikeTeacher: true,
+    singleCoreIdea: true,
+    reasoningSupported: true,
+    endingClosesSpecificLoop: true,
   },
   issues: [],
 };
@@ -530,6 +546,38 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
     assert.equal(response.status, 200);
     assert.equal(calls, 5);
     assert.match(prompts[2], /标题直接公布了核心答案/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("破六相硬问题即使被模型放行也会触发重写并在二次终审再次拦截", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1 || calls === 3) {
+      return deepSeekResponse(JSON.stringify(BREAK_SIX_CONTENT), `break-six-content-${calls}`);
+    }
+    return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), `break-six-review-${calls}`);
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+
+    assert.equal(response.status, 502);
+    assert.equal(calls, 4);
+    assert.match(prompts[2] ?? "", /禁用开头/);
+    assert.match(prompts[2] ?? "", /机械清单/);
+    assert.match(prompts[2] ?? "", /通用结尾/);
   } finally {
     globalThis.fetch = originalFetch;
   }
