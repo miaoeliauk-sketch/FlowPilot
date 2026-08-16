@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/script-factory/route";
@@ -309,6 +312,113 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
   }
 });
 
+test("水木然专属生成只在本机记录完整AI调用链，不通过接口泄露诊断内容", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnabled = process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS;
+  const originalCwd = process.cwd();
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), "script-factory-route-trace-"));
+  const rootDir = path.join(projectDir, ".flowpilot-diagnostics", "script-factory");
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "trace-content");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "trace-shuimuran-review");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "trace-argument-review");
+  };
+  process.chdir(projectDir);
+  process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS = "1";
+
+  try {
+    const request = scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    });
+    const requestBody = await request.clone().json();
+    requestBody.needsStoryboard = false;
+    requestBody.needsShootingTips = false;
+    requestBody.knowledgeRefs = [{
+      id: "knowledge-trace-1",
+      ipId: SHUIMURAN.id,
+      title: "创业失败的认知边界",
+      category: "文案框架方法库",
+      rawContent: "失败会让人重新看见边界。",
+      reason: "支持本次选题的推理。",
+    }];
+    requestBody.voiceSamples = [{
+      id: "voice-trace-1",
+      title: "老师口播样本",
+      rawText: "真正的问题，不是失败本身，而是失败之后有没有重新判断。",
+      type: "老师确认稿",
+    }];
+    requestBody.caseEvidence = {
+      ipId: SHUIMURAN.id,
+      title: "创业案例A",
+      content: "一位经营者在扩张失败后主动收缩业务。",
+      sourceType: "用户提供",
+      verificationStatus: "未核实",
+      sourceUrl: "https://example.com/case-a",
+    };
+
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const responseText = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.doesNotMatch(responseText, /generationId|diagnostic|systemPrompt|userPrompt/);
+    assert.doesNotMatch(responseText, /失败会让人重新看见边界/);
+
+    const generationDirectories = await readdir(rootDir);
+    assert.equal(generationDirectories.length, 1);
+    const generationDir = path.join(rootDir, generationDirectories[0]!);
+    const callFiles = (await readdir(generationDir)).sort();
+    assert.deepEqual(callFiles, [
+      "001-content-initial.json",
+      "002-shuimuran-review.json",
+      "003-argument-review.json",
+    ]);
+
+    const contentRecordText = await readFile(path.join(generationDir, callFiles[0]!), "utf8");
+    const contentRecord = JSON.parse(contentRecordText) as {
+      shuimuranProfileEnabled: boolean;
+      systemPrompt: string;
+      userPrompt: string;
+      materials: {
+        methodKnowledge: Array<{ id: string }>;
+        voiceSamples: Array<{ id: string }>;
+        sourceReferences: Array<{ itemId: string }>;
+        caseEvidence: { title: string };
+      };
+    };
+    assert.equal(contentRecord.shuimuranProfileEnabled, true);
+    assert.match(contentRecord.userPrompt, /大家有没有发现一个很有意思的现象/);
+    assert.match(contentRecord.userPrompt, /失败会让人重新看见边界/);
+    assert.match(contentRecord.userPrompt, /老师口播样本/);
+    assert.match(contentRecord.userPrompt, /创业案例A/);
+    assert.deepEqual(contentRecord.materials.methodKnowledge.map(item => item.id), ["knowledge-trace-1"]);
+    assert.deepEqual(contentRecord.materials.voiceSamples.map(item => item.id), ["voice-trace-1"]);
+    assert.deepEqual(contentRecord.materials.sourceReferences.map(item => item.itemId), ["claim-1", "reasoning-1"]);
+    assert.equal(contentRecord.materials.caseEvidence.title, "创业案例A");
+
+    const allTraceText = (await Promise.all(callFiles.map(file =>
+      readFile(path.join(generationDir, file), "utf8")
+    ))).join("\n");
+    assert.doesNotMatch(allTraceText, /test-key|apiKey|authorization/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalEnabled === undefined) delete process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS;
+    else process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS = originalEnabled;
+    await rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 test("水木然没有原始内容时仍生成，但不得冒充老师已确认观点", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
@@ -427,6 +537,69 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     assert.match(prompts[3], /标题直接公布了核心答案/);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("格式重试、终审重写和二次终审分别写入同一次生成诊断链", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnabled = process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS;
+  const originalCwd = process.cwd();
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), "script-factory-retry-trace-"));
+  const rootDir = path.join(projectDir, ".flowpilot-diagnostics", "script-factory");
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) return deepSeekResponse("{内容被截断", "trace-content-invalid");
+    if (calls === 2 || calls === 4) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `trace-content-${calls}`);
+    }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify({
+        ...VALID_SHUIMURAN_REVIEW,
+        checks: { ...VALID_SHUIMURAN_REVIEW.checks, titleKeepsAnswer: false },
+        issues: ["标题直接公布了核心答案"],
+      }), "trace-review-failed");
+    }
+    if (calls === 5) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "trace-review-passed");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "trace-argument-review");
+  };
+  process.chdir(projectDir);
+  process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS = "1";
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+    assert.equal(response.status, 200);
+
+    const generationDirectories = await readdir(rootDir);
+    assert.equal(generationDirectories.length, 1);
+    const generationDir = path.join(rootDir, generationDirectories[0]!);
+    const callFiles = (await readdir(generationDir)).sort();
+    assert.deepEqual(callFiles, [
+      "001-content-initial.json",
+      "002-content-format-retry.json",
+      "003-shuimuran-review.json",
+      "004-content-rewrite.json",
+      "005-shuimuran-review.json",
+      "006-argument-review.json",
+    ]);
+    const records = await Promise.all(callFiles.map(async file =>
+      JSON.parse(await readFile(path.join(generationDir, file), "utf8")) as {
+        stage: string;
+        retryReason: string | null;
+      }
+    ));
+    assert.match(records[1]!.retryReason ?? "", /JSON|解析|截断/);
+    assert.match(records[3]!.retryReason ?? "", /标题直接公布了核心答案/);
+    assert.equal(records[4]!.retryReason, "终审未通过后的二次检查");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalEnabled === undefined) delete process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS;
+    else process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS = originalEnabled;
+    await rm(projectDir, { recursive: true, force: true });
   }
 });
 

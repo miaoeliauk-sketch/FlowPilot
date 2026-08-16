@@ -3,6 +3,7 @@ import type { ScriptFactoryStage } from "./script-factory-contract";
 interface StageAttemptContext {
   attempt: number;
   signal: AbortSignal;
+  retryReason: string | null;
 }
 
 interface StageRetryOptions {
@@ -59,7 +60,15 @@ export async function runScriptFactoryStage<T>(
         }, options.timeoutMs);
       });
       const operation = Promise.resolve().then(() =>
-        task({ attempt, signal: controller.signal }),
+        task({
+          attempt,
+          signal: controller.signal,
+          retryReason: lastError instanceof Error
+            ? lastError.message
+            : lastError === undefined
+              ? null
+              : String(lastError),
+        }),
       );
       return await Promise.race([operation, timeout]);
     } catch (error) {

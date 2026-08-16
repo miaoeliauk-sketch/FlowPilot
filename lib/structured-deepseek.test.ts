@@ -57,6 +57,7 @@ test("returns parsed data and response metadata after one successful attempt", a
 
 test("retries one failed request and returns the second result", async () => {
   const originalFetch = globalThis.fetch;
+  const retryReasons: Array<{ stage: string; failureCode: string } | null> = [];
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
@@ -75,11 +76,64 @@ test("retries one failed request and returns the second result", async () => {
       timeoutMs: 100,
       maxRetries: 1,
       parse: (content) => JSON.parse(content) as { status: string },
+      onAttemptPrompt: prompt => {
+        retryReasons.push(prompt.retryReason);
+      },
     });
 
     assert.deepEqual(result.data, { status: "recovered" });
     assert.equal(result.attempts, 2);
     assert.equal(calls, 2);
+    assert.deepEqual(retryReasons, [
+      null,
+      { stage: "request", failureCode: "REQUEST_FAILED" },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("每次结构化调用重试前都暴露实际发送的最终Prompt", async () => {
+  const originalFetch = globalThis.fetch;
+  const attempts: Array<{
+    attempt: number;
+    systemPrompt: string;
+    userPrompt: string;
+    retryReason: { stage: string; failureCode: string } | null;
+  }> = [];
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return calls === 1
+      ? deepSeekResponse("不是JSON")
+      : deepSeekResponse('{"status":"ok"}');
+  };
+
+  try {
+    const result = await callStructuredDeepSeek({
+      systemPrompt: "system-final",
+      userPrompt: "user-original",
+      apiKey: "test-key",
+      maxTokens: 100,
+      timeoutMs: 100,
+      maxRetries: 1,
+      parse: (content) => JSON.parse(content) as { status: string },
+      buildParseRetryInstruction: () => "必须返回合法JSON",
+      onAttemptPrompt: (prompt) => {
+        attempts.push(prompt);
+      },
+    });
+
+    assert.deepEqual(result.data, { status: "ok" });
+    assert.deepEqual(attempts, [
+      { attempt: 1, systemPrompt: "system-final", userPrompt: "user-original", retryReason: null },
+      {
+        attempt: 2,
+        systemPrompt: "system-final",
+        userPrompt: "user-original\n\n【上次输出纠错要求】\n必须返回合法JSON",
+        retryReason: { stage: "parse", failureCode: "PARSE_FAILED" },
+      },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

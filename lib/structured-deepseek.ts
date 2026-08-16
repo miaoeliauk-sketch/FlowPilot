@@ -14,6 +14,17 @@ export interface StructuredDeepSeekOptions<T> {
   temperature?: number;
   timeoutMs?: number;
   maxRetries?: number;
+  onAttemptPrompt?: (prompt: {
+    attempt: number;
+    systemPrompt: string;
+    userPrompt: string;
+    retryReason: StructuredDeepSeekRetryReason | null;
+  }) => void | Promise<void>;
+}
+
+export interface StructuredDeepSeekRetryReason {
+  stage: StructuredDeepSeekErrorStage;
+  failureCode: string;
 }
 
 export interface StructuredDeepSeekResult<T> {
@@ -153,6 +164,7 @@ export async function callStructuredDeepSeek<T>(
   let lastStage: StructuredDeepSeekErrorStage = "request";
   const attemptDiagnostics: StructuredDeepSeekAttemptDiagnostic[] = [];
   let parseRetryInstruction: string | null = null;
+  let retryReason: StructuredDeepSeekRetryReason | null = null;
 
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
     let responseMeta = EMPTY_RESPONSE_META;
@@ -161,6 +173,19 @@ export async function callStructuredDeepSeek<T>(
     const timeoutError = new StructuredDeepSeekTimeoutError(timeoutMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      const finalUserPrompt = parseRetryInstruction
+        ? `${options.userPrompt}\n\n【上次输出纠错要求】\n${parseRetryInstruction}`
+        : options.userPrompt;
+      try {
+        await options.onAttemptPrompt?.({
+          attempt,
+          systemPrompt: options.systemPrompt,
+          userPrompt: finalUserPrompt,
+          retryReason,
+        });
+      } catch {
+        // 诊断留痕失败不能阻断正式AI调用。
+      }
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           controller.abort(timeoutError);
@@ -169,9 +194,7 @@ export async function callStructuredDeepSeek<T>(
       });
       const request = callDeepSeek(
         options.systemPrompt,
-        parseRetryInstruction
-          ? `${options.userPrompt}\n\n【上次输出纠错要求】\n${parseRetryInstruction}`
-          : options.userPrompt,
+        finalUserPrompt,
         options.maxTokens,
         options.temperature ?? 0.3,
         options.apiKey,
@@ -211,15 +234,17 @@ export async function callStructuredDeepSeek<T>(
         : "request";
       const responseError = error instanceof DeepSeekResponseError ? error : null;
       const failureMeta = responseError?.responseMeta ?? responseMeta;
+      const failureCode = lastStage === "timeout"
+        ? "TIMEOUT"
+        : responseError?.code ?? "REQUEST_FAILED";
       attemptDiagnostics.push({
         attempt,
         stage: lastStage,
-        failureCode: lastStage === "timeout"
-          ? "TIMEOUT"
-          : responseError?.code ?? "REQUEST_FAILED",
+        failureCode,
         responseChars: responseError?.responseChars ?? null,
         ...responseMetaDiagnostic(failureMeta),
       });
+      retryReason = { stage: lastStage, failureCode };
       continue;
     } finally {
       if (timer) clearTimeout(timer);
@@ -249,6 +274,7 @@ export async function callStructuredDeepSeek<T>(
         parseDiagnostic.reasonCode = "OUTPUT_TRUNCATED";
       }
       const failureCode = parseDiagnostic.failureCode ?? "PARSE_FAILED";
+      retryReason = { stage: "parse", failureCode };
       parseRetryInstruction = attempt < totalAttempts
         ? options.buildParseRetryInstruction?.(failureCode) ?? null
         : null;

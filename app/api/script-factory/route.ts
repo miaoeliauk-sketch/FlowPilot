@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { buildScriptDirectorBlock, shouldUseShuimuranDirector } from "@/lib/script-director-profile";
@@ -41,6 +42,11 @@ import {
   parseShuimuranReview,
   SHUIMURAN_REVIEW_SYSTEM,
 } from "@/lib/shuimuran-script-review";
+import {
+  createScriptFactoryPromptTrace,
+  type ScriptFactoryPromptTraceMaterials,
+  type ScriptFactoryPromptTraceStage,
+} from "@/lib/script-factory-prompt-trace";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -505,6 +511,34 @@ ${rawIPBlock}
     })),
   };
 
+  const contentTraceMaterials: ScriptFactoryPromptTraceMaterials = {
+    methodKnowledge: methodRefs,
+    voiceSamples: injectedSamples,
+    sourceReferences,
+    caseEvidence,
+  };
+  const reviewTraceMaterials: ScriptFactoryPromptTraceMaterials = {
+    methodKnowledge: [],
+    voiceSamples: [],
+    sourceReferences,
+    caseEvidence,
+  };
+  const emptyTraceMaterials: ScriptFactoryPromptTraceMaterials = {
+    methodKnowledge: [],
+    voiceSamples: [],
+    sourceReferences: [],
+    caseEvidence: null,
+  };
+  const promptTrace = createScriptFactoryPromptTrace({
+    generationId: randomUUID(),
+    createdAt: calledAt,
+    ipId: ip.id,
+    ipName: ip.name,
+    generationMode,
+    topic,
+    shuimuranProfileEnabled: isShuimuranDedicatedGeneration,
+  });
+
   let failedStage = "request";
   let responseMeta: DeepSeekResponseMeta | null = null;
   try {
@@ -513,24 +547,41 @@ ${rawIPBlock}
     const targetTranscriptChars = Math.max(180, Math.round(durationSeconds * 3.5));
     let closingStyleRetryNeeded = false;
     let unresolvedClosingStyleWarning = null as ReturnType<typeof findDenseClosingStyleWarning>;
-    const generateContent = async (signal: AbortSignal, qualityCorrection = "") => {
+    const generateContent = async (
+      signal: AbortSignal,
+      traceInput: {
+        stage: Extract<ScriptFactoryPromptTraceStage, "content-initial" | "content-format-retry" | "content-rewrite">;
+        attempt: number;
+        qualityCorrection?: string;
+        retryReason: string | null;
+      },
+    ) => {
       responseMeta = null;
+      const contentUserPrompt = CONTENT_PROMPT(
+        ipBlock + corpusBlock,
+        topic,
+        platform,
+        durationLabel,
+        goal,
+        videoType,
+        format,
+        generationRequirement,
+        targetTranscriptChars,
+        sourceContextBlock + caseContextBlock,
+        isShuimuranDedicatedGeneration,
+        traceInput.qualityCorrection ?? "",
+      );
+      await promptTrace.recordCall({
+        stage: traceInput.stage,
+        attempt: traceInput.attempt,
+        systemPrompt: CONTENT_SYSTEM,
+        userPrompt: contentUserPrompt,
+        retryReason: traceInput.retryReason,
+        materials: contentTraceMaterials,
+      });
       const contentRaw = await callDeepSeek(
         CONTENT_SYSTEM,
-        CONTENT_PROMPT(
-          ipBlock + corpusBlock,
-          topic,
-          platform,
-          durationLabel,
-          goal,
-          videoType,
-          format,
-          generationRequirement,
-          targetTranscriptChars,
-          sourceContextBlock + caseContextBlock,
-          isShuimuranDedicatedGeneration,
-          qualityCorrection,
-        ),
+        contentUserPrompt,
         6000,
         0.3,
         apiKey,
@@ -557,13 +608,15 @@ ${rawIPBlock}
 
     let content = await runScriptFactoryStage(
       "content",
-      async ({ attempt, signal }) => {
-        const parsedContent = await generateContent(
-          signal,
-          closingStyleRetryNeeded
+      async ({ attempt, signal, retryReason }) => {
+        const parsedContent = await generateContent(signal, {
+          stage: attempt === 1 ? "content-initial" : "content-format-retry",
+          attempt,
+          qualityCorrection: closingStyleRetryNeeded
             ? "上次生成的结尾存在强调式口头禅或反问密集堆叠。结尾只保留一个必要的强调表达，其余改为正常陈述。"
             : "",
-        );
+          retryReason,
+        });
         const closingStyleWarning = findDenseClosingStyleWarning(
           parsedContent,
           ip,
@@ -583,29 +636,43 @@ ${rawIPBlock}
     );
 
     if (isShuimuranDedicatedGeneration) {
-      const reviewContent = async (candidate: typeof content) => {
+      const reviewContent = async (
+        candidate: typeof content,
+        retryReason: string | null = null,
+      ) => {
         try {
+          const reviewUserPrompt = buildShuimuranReviewPrompt({
+            title: candidate.titles[0]?.title ?? "",
+            fullScript: candidate.outline[0]?.content ?? "",
+            pendingVerification: candidate.pendingVerification,
+            reviewedAt: calledAt,
+            sourceReferences: sourceReferences.map(reference => ({
+              sourceTitle: reference.sourceTitle,
+              kind: reference.kind,
+              originalExcerpt: reference.originalExcerpt,
+              extractionStatus: reference.extractionStatus,
+            })),
+            caseEvidence,
+          });
           return (await callStructuredDeepSeek({
             systemPrompt: SHUIMURAN_REVIEW_SYSTEM,
-            userPrompt: buildShuimuranReviewPrompt({
-              title: candidate.titles[0]?.title ?? "",
-              fullScript: candidate.outline[0]?.content ?? "",
-              pendingVerification: candidate.pendingVerification,
-              reviewedAt: calledAt,
-              sourceReferences: sourceReferences.map(reference => ({
-                sourceTitle: reference.sourceTitle,
-                kind: reference.kind,
-                originalExcerpt: reference.originalExcerpt,
-                extractionStatus: reference.extractionStatus,
-              })),
-              caseEvidence,
-            }),
+            userPrompt: reviewUserPrompt,
             parse: parseShuimuranReview,
             apiKey,
             maxTokens: 900,
             temperature: 0,
             timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
             maxRetries: 0,
+            onAttemptPrompt: prompt => promptTrace.recordCall({
+              stage: "shuimuran-review",
+              attempt: prompt.attempt,
+              systemPrompt: prompt.systemPrompt,
+              userPrompt: prompt.userPrompt,
+              retryReason: prompt.retryReason
+                ? `${prompt.retryReason.stage}:${prompt.retryReason.failureCode}`
+                : retryReason,
+              materials: reviewTraceMaterials,
+            }).then(() => undefined),
           })).data;
         } catch {
           throw new ScriptFactoryResponseError(
@@ -621,10 +688,12 @@ ${rawIPBlock}
         content = await runScriptFactoryStage(
           "content",
           async ({ signal }) => {
-            const revisedContent = await generateContent(
-              signal,
-              `上次没有通过水木然老师确认版终审：${reviewIssues.join("；")}。逐项修正后重新生成。`,
-            );
+            const revisedContent = await generateContent(signal, {
+              stage: "content-rewrite",
+              attempt: 1,
+              qualityCorrection: `上次没有通过水木然老师确认版终审：${reviewIssues.join("；")}。逐项修正后重新生成。`,
+              retryReason: `水木然终审未通过：${reviewIssues.join("；")}`,
+            });
             const closingStyleWarning = findDenseClosingStyleWarning(
               revisedContent,
               ip,
@@ -641,7 +710,7 @@ ${rawIPBlock}
           },
           { timeoutMs: SCRIPT_STAGE_TIMEOUT_MS, maxRetries: 0 },
         );
-        review = await reviewContent(content);
+        review = await reviewContent(content, "终审未通过后的二次检查");
         if (!review.passed) {
           throw new ScriptFactoryResponseError(
             "quality_retry",
@@ -654,15 +723,26 @@ ${rawIPBlock}
     let argumentWarnings: ReturnType<typeof parseScriptArgumentReview> = [];
     let argumentReviewUnavailable = false;
     try {
+      const argumentReviewUserPrompt = buildArgumentReviewPrompt(topic, content);
       const reviewResult = await callStructuredDeepSeek({
         systemPrompt: ARGUMENT_REVIEW_SYSTEM,
-        userPrompt: buildArgumentReviewPrompt(topic, content),
+        userPrompt: argumentReviewUserPrompt,
         parse: response => parseScriptArgumentReview(response, content),
         apiKey,
         maxTokens: 1400,
         temperature: 0,
         timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
         maxRetries: 1,
+        onAttemptPrompt: prompt => promptTrace.recordCall({
+          stage: "argument-review",
+          attempt: prompt.attempt,
+          systemPrompt: prompt.systemPrompt,
+          userPrompt: prompt.userPrompt,
+          retryReason: prompt.retryReason
+            ? `${prompt.retryReason.stage}:${prompt.retryReason.failureCode}`
+            : null,
+          materials: emptyTraceMaterials,
+        }).then(() => undefined),
       });
       argumentWarnings = reviewResult.data;
     } catch (error) {
@@ -701,11 +781,25 @@ ${rawIPBlock}
       try {
         const parsedStoryboard = await runScriptFactoryStage(
           "storyboard",
-          async ({ signal }) => {
+          async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
+            const storyboardUserPrompt = STORYBOARD_PROMPT(
+              ipBlock,
+              topic,
+              outlineText,
+              durationLabel,
+            );
+            await promptTrace.recordCall({
+              stage: "storyboard",
+              attempt,
+              systemPrompt: STORYBOARD_SYSTEM,
+              userPrompt: storyboardUserPrompt,
+              retryReason,
+              materials: emptyTraceMaterials,
+            });
             const storyboardRaw = await callDeepSeek(
               STORYBOARD_SYSTEM,
-              STORYBOARD_PROMPT(ipBlock, topic, outlineText, durationLabel),
+              storyboardUserPrompt,
               6000,
               0.3,
               apiKey,
@@ -752,11 +846,20 @@ ${rawIPBlock}
       try {
         shootingSuggestions = await runScriptFactoryStage(
           "execution",
-          async ({ signal }) => {
+          async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
+            const executionUserPrompt = EXECUTION_PROMPT(ipBlock, topic, outlineText, format);
+            await promptTrace.recordCall({
+              stage: "execution",
+              attempt,
+              systemPrompt: EXECUTION_SYSTEM,
+              userPrompt: executionUserPrompt,
+              retryReason,
+              materials: emptyTraceMaterials,
+            });
             const execRaw = await callDeepSeek(
               EXECUTION_SYSTEM,
-              EXECUTION_PROMPT(ipBlock, topic, outlineText, format),
+              executionUserPrompt,
               1200,
               0.3,
               apiKey,
