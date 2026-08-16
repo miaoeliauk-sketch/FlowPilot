@@ -262,35 +262,65 @@ ${architecture}
 ${outputSchema}`;
 };
 
-const SHUIMURAN_COMPRESSION_SYSTEM = `你是水木然IP专属脚本的压缩编辑。你的唯一任务是在不改变核心观点、不新增事实的前提下压缩初稿。
-必须保留核心案例、事实、因果关系、经典解释和最终结论，只删除重复解释、相近排比、无关感悟和不推动主线的过渡句。
+const SHUIMURAN_COMPRESSION_SYSTEM = `你是水木然IP专属脚本的压缩编辑。你的唯一任务是在不改变核心观点、不新增事实的前提下，把正文压缩到指定的精确字数区间。
+取舍优先级：先保证事实和因果不失真，再保留核心案例、主要经典解释和最终结论，最后按指定方法删减次要内容，直至达到字数要求。
+保留是保留原意和关键信息，不要求逐字保留。不得为了凑字数删除因果关系或改变结论。
 只输出一个合法JSON对象，不要输出Markdown或解释。`;
 
 function visibleCharacterCount(text: string): number {
   return Array.from(text.replace(/\s+/g, "")).length;
 }
 
-function compressionRatio(initialScript: string, compressedScript: string): number {
+function compressionTarget(initialScript: string): {
+  initialLength: number;
+  minimumLength: number;
+  maximumLength: number;
+} {
   const initialLength = visibleCharacterCount(initialScript);
-  if (initialLength === 0) return 0;
-  return visibleCharacterCount(compressedScript) / initialLength;
+  return {
+    initialLength,
+    minimumLength: Math.ceil(initialLength * 0.7),
+    maximumLength: Math.floor(initialLength * 0.8),
+  };
 }
 
-function compressionRetryInstruction(retryReason: string | null): string {
+function compressionRetryInstruction(input: {
+  retryReason: string | null;
+  target: ReturnType<typeof compressionTarget>;
+  previousCompression: ReturnType<typeof parseScriptContentResponse> | null;
+}): string {
+  const { retryReason, target, previousCompression } = input;
   if (!retryReason) return "";
+  if (/JSON|格式|解析|截断|字段|不完整/.test(retryReason)) {
+    return `重试要求：上一次压缩稿格式不合法：${retryReason}。请只返回完整、合法的JSON，并保持规定字段。`;
+  }
+
+  const correctionInstructions: string[] = [];
   if (/标题/.test(retryReason)) {
-    return `5. 上一次压缩改变了初稿标题：${retryReason}。这次必须保持标题完全不变。`;
+    correctionInstructions.push("上一次压缩改变了初稿标题，这次必须保持标题完全不变。");
   }
   if (/待核验/.test(retryReason)) {
-    return `5. 上一次压缩改变了待核验内容：${retryReason}。这次必须原样保留待核验内容。`;
+    correctionInstructions.push("上一次压缩改变了待核验内容，这次必须原样保留待核验内容。");
   }
-  if (/JSON|格式|解析|截断|字段|不完整/.test(retryReason)) {
-    return `5. 上一次压缩稿格式不合法：${retryReason}。请只返回完整、合法的JSON，并保持规定字段。`;
+  if (/压缩稿为\d+个有效字符，目标为\d+至\d+个/.test(retryReason) && previousCompression) {
+    const previousLength = visibleCharacterCount(
+      previousCompression.outline[0]?.content ?? "",
+    );
+    if (previousLength > target.maximumLength) {
+      correctionInstructions.push(
+        `上一次压缩稿长度不符合要求。上次返回${previousLength}个有效字符，目标上限为${target.maximumLength}个，至少还需要删除${previousLength - target.maximumLength}个有效字符。\n请在这个版本基础上继续删减，不要回到初稿重新生成。`,
+      );
+    }
+    if (previousLength < target.minimumLength) {
+      correctionInstructions.push(
+        `上一次压缩稿长度不符合要求。上次返回${previousLength}个有效字符，目标下限为${target.minimumLength}个，至少还需要补回${target.minimumLength - previousLength}个有效字符。\n请在这个版本基础上补回必要的因果关系或关键解释，不要回到初稿重新生成。`,
+      );
+    }
   }
-  if (/长度|\d+%|70%|80%/.test(retryReason)) {
-    return `5. 上一次压缩稿长度不符合要求：${retryReason}。这次必须重新调整到70%至80%。`;
+  if (correctionInstructions.length > 0) {
+    return `重试要求：上一次压缩稿存在以下问题：${retryReason}。\n${correctionInstructions.join("\n")}`;
   }
-  return `5. 上一次压缩未通过校验：${retryReason}。请修正该问题后重新压缩。`;
+  return `重试要求：上一次压缩未通过校验：${retryReason}。请修正该问题后重新压缩。`;
 }
 
 function hasSamePendingVerification(
@@ -304,19 +334,29 @@ function hasSamePendingVerification(
 function buildShuimuranCompressionPrompt(
   content: ReturnType<typeof parseScriptContentResponse>,
   retryReason: string | null,
+  previousCompression: ReturnType<typeof parseScriptContentResponse> | null,
 ): string {
-  return `请把下面的水木然口播初稿压缩到原文长度的70%至80%。
+  const initialScript = content.outline[0]?.content ?? "";
+  const target = compressionTarget(initialScript);
+  const previousCompressionBlock = previousCompression
+    ? `\n上一次压缩稿：\n${previousCompression.outline[0]?.content ?? ""}\n`
+    : "";
+  return `初稿共${target.initialLength}个有效字符（不计空格和换行，标点计入）。本次压缩稿必须控制在${target.minimumLength}至${target.maximumLength}个有效字符之间，少于${target.minimumLength}个或超过${target.maximumLength}个都不合格。
 
 硬性要求：
 1. 保留核心案例、事实、因果关系、经典解释和最终结论。
 2. 不得新增人物、事件、数字、引语、观点或待核验内容。
 3. 标题保持不变，只压缩fullScript。
-4. 同一个结论只完整解释一次。
-${compressionRetryInstruction(retryReason)}
+4. 优先删除重复表达同一观点的段落、相近排比、反复反问、空泛过渡和通用感悟。
+5. 多个并列观点只完整保留论证最充分的1至2个，其余压缩成一句话带过。
+6. 多个经典引用只保留真正参与核心论证的一句。
+7. 保留是保留原意和关键信息，不要求逐字保留；不得通过删除因果关系来凑字数。
+${compressionRetryInstruction({ retryReason, target, previousCompression })}
 
 初稿标题：${content.titles[0]?.title ?? ""}
 初稿正文：
-${content.outline[0]?.content ?? ""}
+${initialScript}
+${previousCompressionBlock}
 
 待核验内容：${content.pendingVerification.join("；") || "无"}
 
@@ -703,14 +743,17 @@ ${rawIPBlock}
     );
 
     if (isShuimuranDedicatedGeneration) {
-      const compressContent = async (initialDraft: typeof content) =>
-        runScriptFactoryStage(
+      const compressContent = async (initialDraft: typeof content) => {
+        let previousCompression: typeof content | null = null;
+        const target = compressionTarget(initialDraft.outline[0]?.content ?? "");
+        return runScriptFactoryStage(
           "content",
           async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
             const compressionUserPrompt = buildShuimuranCompressionPrompt(
               initialDraft,
               retryReason,
+              previousCompression,
             );
             await promptTrace.recordCall({
               stage: "content-compression",
@@ -742,35 +785,39 @@ ${rawIPBlock}
             const compressed = parseScriptContentResponse(compressedRaw, {
               outputMode: "shuimuran-confirmed",
             });
+            previousCompression = compressed;
+            const validationIssues: string[] = [];
             if (compressed.titles[0]?.title !== initialDraft.titles[0]?.title) {
-              throw new ScriptFactoryResponseError(
-                "quality_retry",
-                "压缩稿改变了初稿标题",
-              );
+              validationIssues.push("压缩稿改变了初稿标题");
             }
             if (!hasSamePendingVerification(
               initialDraft.pendingVerification,
               compressed.pendingVerification,
             )) {
-              throw new ScriptFactoryResponseError(
-                "quality_retry",
-                "压缩稿改变了待核验内容",
-              );
+              validationIssues.push("压缩稿改变了待核验内容");
             }
-            const ratio = compressionRatio(
-              initialDraft.outline[0]?.content ?? "",
+            const compressedLength = visibleCharacterCount(
               compressed.outline[0]?.content ?? "",
             );
-            if (ratio < 0.7 || ratio > 0.8) {
+            if (
+              compressedLength < target.minimumLength ||
+              compressedLength > target.maximumLength
+            ) {
+              validationIssues.push(
+                `压缩稿为${compressedLength}个有效字符，目标为${target.minimumLength}至${target.maximumLength}个`,
+              );
+            }
+            if (validationIssues.length > 0) {
               throw new ScriptFactoryResponseError(
                 "quality_retry",
-                `压缩稿长度为初稿的${Math.round(ratio * 100)}%，不在70%至80%范围内`,
+                validationIssues.join("；"),
               );
             }
             return compressed;
           },
           SCRIPT_STAGE_RETRY_OPTIONS,
         );
+      };
 
       content = await compressContent(content);
 

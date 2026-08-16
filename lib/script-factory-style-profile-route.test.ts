@@ -108,6 +108,21 @@ const COMPRESSED_SHUIMURAN_CONTENT = {
   fullScript: "变化不会提前通知所有人，它总是先改变少数人的选择。很多人只盯结果，却没看到行业规则已经改变。判断趋势不能只看热闹，要观察需求、成本和普通人的真实行为。当三个信号同时出现，个体要调整选择顺序。看懂变化后就行动，这才是普通人能抓住的机会。",
 };
 
+const TOO_LONG_SHUIMURAN_COMPRESSION = {
+  ...SHUIMURAN_DIRECTOR_CONTENT,
+  fullScript: "变化不会提前通知所有人，它总是先改变少数人的选择。很多人只盯着眼前结果，却没有看到行业规则已经发生变化。判断趋势不能只看热闹，要同时观察需求、成本和普通人的真实行为。当三个信号同时出现时，个体真正需要调整自己的选择顺序。看懂变化之后就行动，这才是普通人能够抓住的机会。",
+};
+
+const WRONG_TITLE_TOO_LONG_SHUIMURAN_COMPRESSION = {
+  ...TOO_LONG_SHUIMURAN_COMPRESSION,
+  titles: [{ title: "被压缩步骤擅自改变的标题" }],
+};
+
+const TOO_SHORT_SHUIMURAN_COMPRESSION = {
+  ...SHUIMURAN_DIRECTOR_CONTENT,
+  fullScript: "变化已经开始。看懂趋势，才能调整选择。",
+};
+
 const BREAK_SIX_CONTENT = {
   titles: [{ title: "一个人真正觉醒之前，必须破掉这六种相" }],
   fullScript: `大家有没有发现一个很有意思的现象：很多人越努力越焦虑，因为他们一直在着相。
@@ -399,8 +414,13 @@ test("水木然专属生成先生成初稿再独立压缩到七至八成后进�
     assert.match(result.outline[0].content, /看懂进退，才能理解下一轮机会属于谁/);
     assert.match(prompts[0] ?? "", /完整初稿/);
     assert.doesNotMatch(prompts[0] ?? "", /在内部精简20%至30%/);
-    assert.match(prompts[1] ?? "", /70%至80%/);
+    assert.doesNotMatch(prompts[1] ?? "", /70%至80%/);
+    assert.match(prompts[1] ?? "", /初稿共244个有效字符/);
+    assert.match(prompts[1] ?? "", /必须控制在171至195个有效字符之间/);
     assert.match(prompts[1] ?? "", /核心案例、事实、因果关系、经典解释和最终结论/);
+    assert.match(prompts[1] ?? "", /多个并列观点只完整保留论证最充分的1至2个/);
+    assert.match(prompts[1] ?? "", /其余压缩成一句话带过/);
+    assert.match(prompts[1] ?? "", /保留是保留原意和关键信息，不要求逐字保留/);
     assert.match(prompts[2] ?? "", new RegExp(COMPRESSED_PRESERVATION_CONTENT.fullScript.slice(0, 20)));
   } finally {
     globalThis.fetch = originalFetch;
@@ -421,7 +441,7 @@ test("水木然压缩稿不在七至八成时明确重压一次且只终审合�
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-draft");
     }
     if (calls === 2) {
-      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-compression-too-long");
+      return deepSeekResponse(JSON.stringify(TOO_LONG_SHUIMURAN_COMPRESSION), "director-compression-too-long");
     }
     if (calls === 3) {
       return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression-passed");
@@ -442,10 +462,80 @@ test("水木然压缩稿不在七至八成时明确重压一次且只终审合�
     assert.equal(response.status, 200);
     assert.equal(calls, 5);
     assert.equal(result.outline[0].content, COMPRESSED_SHUIMURAN_CONTENT.fullScript);
-    assert.match(prompts[2] ?? "", /长度为初稿的100%/);
-    assert.match(prompts[2] ?? "", /必须重新调整到70%至80%/);
+    assert.match(prompts[2] ?? "", /上次返回134个有效字符/);
+    assert.match(prompts[2] ?? "", /目标上限为118个/);
+    assert.match(prompts[2] ?? "", /至少还需要删除16个有效字符/);
+    assert.match(prompts[2] ?? "", /请在这个版本基础上继续删减，不要回到初稿重新生成/);
+    assert.match(prompts[2] ?? "", new RegExp(TOO_LONG_SHUIMURAN_COMPRESSION.fullScript.slice(0, 30)));
     assert.match(prompts[3] ?? "", new RegExp(COMPRESSED_SHUIMURAN_CONTENT.fullScript.slice(0, 20)));
     assert.doesNotMatch(prompts[3] ?? "", new RegExp(SHUIMURAN_DIRECTOR_CONTENT.fullScript.slice(-20)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然压缩稿过短时按真实差额补回必要内容", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-draft");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(TOO_SHORT_SHUIMURAN_COMPRESSION), "director-compression-too-short");
+    if (calls === 3) return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression-passed");
+    if (calls === 4) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 5);
+    assert.match(prompts[2] ?? "", /上次返回19个有效字符/);
+    assert.match(prompts[2] ?? "", /目标下限为104个/);
+    assert.match(prompts[2] ?? "", /至少还需要补回85个有效字符/);
+    assert.match(prompts[2] ?? "", new RegExp(TOO_SHORT_SHUIMURAN_COMPRESSION.fullScript));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然压缩稿同时改变标题且字数超限时完整报告两项问题", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-draft");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(WRONG_TITLE_TOO_LONG_SHUIMURAN_COMPRESSION), "director-compression-invalid");
+    if (calls === 3) return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression-passed");
+    if (calls === 4) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 5);
+    assert.match(prompts[2] ?? "", /压缩稿改变了初稿标题/);
+    assert.match(prompts[2] ?? "", /上次返回134个有效字符/);
+    assert.match(prompts[2] ?? "", /至少还需要删除16个有效字符/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -690,7 +780,9 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
     };
     assert.equal(compressionRecord.stage, "content-compression");
     assert.match(compressionRecord.userPrompt, new RegExp(SHUIMURAN_DIRECTOR_CONTENT.fullScript.slice(0, 20)));
-    assert.match(compressionRecord.userPrompt, /70%至80%/);
+    assert.doesNotMatch(compressionRecord.userPrompt, /70%至80%/);
+    assert.match(compressionRecord.userPrompt, /初稿共148个有效字符/);
+    assert.match(compressionRecord.userPrompt, /必须控制在104至118个有效字符之间/);
     assert.deepEqual(compressionRecord.materials.methodKnowledge.map(item => item.id), ["knowledge-trace-1"]);
     assert.deepEqual(compressionRecord.materials.voiceSamples.map(item => item.id), ["voice-trace-1"]);
 
@@ -783,7 +875,9 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
     assert.equal(response.status, 200);
     assert.equal(calls, 7);
     assert.match(prompts[3], /标题直接公布了核心答案/);
-    assert.match(prompts[4], /70%至80%/);
+    assert.doesNotMatch(prompts[4], /70%至80%/);
+    assert.match(prompts[4], /初稿共148个有效字符/);
+    assert.match(prompts[4], /必须控制在104至118个有效字符之间/);
     assert.match(prompts[5], new RegExp(COMPRESSED_SHUIMURAN_CONTENT.fullScript.slice(0, 20)));
   } finally {
     globalThis.fetch = originalFetch;
@@ -867,7 +961,9 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     assert.equal(response.status, 200);
     assert.equal(calls, 8);
     assert.match(prompts[4], /标题直接公布了核心答案/);
-    assert.match(prompts[5], /70%至80%/);
+    assert.doesNotMatch(prompts[5], /70%至80%/);
+    assert.match(prompts[5], /初稿共148个有效字符/);
+    assert.match(prompts[5], /必须控制在104至118个有效字符之间/);
   } finally {
     globalThis.fetch = originalFetch;
   }
