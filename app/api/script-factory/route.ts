@@ -24,7 +24,7 @@ import {
   runScriptFactoryStage,
   ScriptFactoryStageError,
 } from "@/lib/script-factory-stage";
-import type { ScriptPartialFailure } from "@/lib/script-factory-contract";
+import type { ScriptCompressionAudit, ScriptPartialFailure } from "@/lib/script-factory-contract";
 import {
   buildIPSourceContextBlock,
   parseIPSourceContext,
@@ -279,12 +279,60 @@ function compressionTarget(initialScript: string): {
   initialLength: number;
   minimumLength: number;
   maximumLength: number;
+  acceptableMinimumLength: number;
+  acceptableMaximumLength: number;
 } {
   const initialLength = visibleCharacterCount(initialScript);
+  const [idealMinimumRatio, idealMaximumRatio, acceptableMinimumRatio, acceptableMaximumRatio] =
+    initialLength <= 400
+      ? [0.8, 0.9, 0.8, 0.95]
+      : initialLength <= 800
+        ? [0.7, 0.8, 0.7, 0.9]
+        : initialLength <= 1500
+          ? [0.7, 0.8, 0.7, 0.85]
+          : [0.7, 0.8, 0.7, 0.82];
   return {
     initialLength,
-    minimumLength: Math.ceil(initialLength * 0.7),
-    maximumLength: Math.floor(initialLength * 0.8),
+    minimumLength: Math.ceil(initialLength * idealMinimumRatio),
+    maximumLength: Math.floor(initialLength * idealMaximumRatio),
+    acceptableMinimumLength: Math.ceil(initialLength * acceptableMinimumRatio),
+    acceptableMaximumLength: Math.floor(initialLength * acceptableMaximumRatio),
+  };
+}
+
+function compressionRatio(actualLength: number, initialLength: number): number {
+  return initialLength > 0 ? Number((actualLength / initialLength).toFixed(4)) : 0;
+}
+
+function compressionDistance(length: number, minimum: number, maximum: number): number {
+  if (length < minimum) return minimum - length;
+  if (length > maximum) return length - maximum;
+  return 0;
+}
+
+function buildCompressionAudit(
+  status: ScriptCompressionAudit["status"],
+  target: ReturnType<typeof compressionTarget>,
+  actualChars: number,
+  selectedAttempt: ScriptCompressionAudit["selectedAttempt"],
+): ScriptCompressionAudit {
+  const messages: Record<ScriptCompressionAudit["status"], string> = {
+    precise: "本稿已达到理想压缩比例。",
+    tolerated: "本稿未达到理想压缩比例，但已进入短稿可接受区间。",
+    closest_fallback: "本次压缩未能精确达到目标比例，已采用最接近的版本。",
+    unavailable: "本次压缩未能产生可用版本，已保留完整初稿。",
+  };
+  return {
+    status,
+    initialChars: target.initialLength,
+    idealMinimumChars: target.minimumLength,
+    idealMaximumChars: target.maximumLength,
+    acceptableMinimumChars: target.acceptableMinimumLength,
+    acceptableMaximumChars: target.acceptableMaximumLength,
+    actualChars,
+    actualRatio: compressionRatio(actualChars, target.initialLength),
+    selectedAttempt,
+    message: messages[status],
   };
 }
 
@@ -811,13 +859,20 @@ ${rawIPBlock}
       SCRIPT_STAGE_RETRY_OPTIONS,
     );
 
+    let compressionAudit: ScriptCompressionAudit | undefined;
     if (isShuimuranDedicatedGeneration) {
       const compressContent = async (initialDraft: typeof content) => {
         let previousCompression: typeof content | null = null;
         const target = compressionTarget(initialDraft.outline[0]?.content ?? "");
-        return runScriptFactoryStage(
-          "content",
-          async ({ attempt, signal, retryReason }) => {
+        const candidates: Array<{
+          content: typeof content;
+          attempt: 1 | 2;
+          length: number;
+        }> = [];
+        try {
+          return await runScriptFactoryStage(
+            "content",
+            async ({ attempt, signal, retryReason }) => {
             responseMeta = null;
             let compressedRaw: string | null = null;
             let parsedBody: string | null = null;
@@ -871,6 +926,13 @@ ${rawIPBlock}
                 validationIssues.push("压缩稿改变了待核验内容");
               }
               const compressedLength = visibleCharacterCount(parsedBody);
+              if (validationIssues.length === 0) {
+                candidates.push({
+                  content: compressed,
+                  attempt: attempt as 1 | 2,
+                  length: compressedLength,
+                });
+              }
               if (
                 compressedLength < target.minimumLength ||
                 compressedLength > target.maximumLength
@@ -885,6 +947,12 @@ ${rawIPBlock}
                   validationIssues.join("；"),
                 );
               }
+              compressionAudit = buildCompressionAudit(
+                "precise",
+                target,
+                compressedLength,
+                attempt as 1 | 2,
+              );
               return compressed;
             } catch (error) {
               failureCode = getErrorCode(error);
@@ -902,16 +970,48 @@ ${rawIPBlock}
                 failureCode,
               });
             }
-          },
-          SCRIPT_STAGE_RETRY_OPTIONS,
-        );
+            },
+            SCRIPT_STAGE_RETRY_OPTIONS,
+          );
+        } catch {
+          const rankedCandidates = [...candidates].sort((left, right) => {
+            const leftDistance = compressionDistance(
+              left.length,
+              target.minimumLength,
+              target.maximumLength,
+            );
+            const rightDistance = compressionDistance(
+              right.length,
+              target.minimumLength,
+              target.maximumLength,
+            );
+            return leftDistance - rightDistance || right.attempt - left.attempt;
+          });
+          const selected = rankedCandidates[0];
+          if (!selected) {
+            const initialLength = visibleCharacterCount(initialDraft.outline[0]?.content ?? "");
+            compressionAudit = buildCompressionAudit("unavailable", target, initialLength, 0);
+            return initialDraft;
+          }
+          const withinAcceptableRange = selected.length >= target.acceptableMinimumLength
+            && selected.length <= target.acceptableMaximumLength;
+          compressionAudit = buildCompressionAudit(
+            withinAcceptableRange ? "tolerated" : "closest_fallback",
+            target,
+            selected.length,
+            selected.attempt,
+          );
+          return selected.content;
+        }
       };
 
-      content = await compressContent(content);
+      let compressionSourceDraft = content;
+      content = await compressContent(compressionSourceDraft);
 
       const reviewContent = async (
         candidate: typeof content,
         retryReason: string | null = null,
+        sourceDraft: typeof content = compressionSourceDraft,
       ) => {
         try {
           const deterministicIssues = findShuimuranDeterministicReviewIssues({
@@ -930,6 +1030,7 @@ ${rawIPBlock}
               extractionStatus: reference.extractionStatus,
             })),
             caseEvidence,
+            compressionSourceScript: sourceDraft.outline[0]?.content ?? "",
           });
           const modelReview = (await callStructuredDeepSeek({
             systemPrompt: SHUIMURAN_REVIEW_SYSTEM,
@@ -971,7 +1072,7 @@ ${rawIPBlock}
         }
       };
 
-      let review = await reviewContent(content);
+      let review = await reviewContent(content, null, compressionSourceDraft);
       if (!review.passed) {
         const reviewIssues = review.issues;
         const revisedDraft = await runScriptFactoryStage(
@@ -999,8 +1100,9 @@ ${rawIPBlock}
           },
           { timeoutMs: SCRIPT_STAGE_TIMEOUT_MS, maxRetries: 0 },
         );
+        compressionSourceDraft = revisedDraft;
         content = await compressContent(revisedDraft);
-        review = await reviewContent(content, "终审未通过后的二次检查");
+        review = await reviewContent(content, "终审未通过后的二次检查", revisedDraft);
         if (!review.passed) {
           throw new ScriptFactoryResponseError(
             "quality_retry",
@@ -1264,6 +1366,7 @@ ${rawIPBlock}
       commentGuidance: content.commentGuidance,
       ipStyleExplanation: content.ipStyleExplanation,
       pendingVerification: content.pendingVerification,
+      compressionAudit,
       qualityCheck,
       storyboard,
       shootingSuggestions,

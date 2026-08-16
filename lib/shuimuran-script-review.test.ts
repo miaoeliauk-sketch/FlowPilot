@@ -108,7 +108,7 @@ test("单换行分段且序数词相隔较远时不误判为机械清单", () =>
   assert.doesNotMatch(issues.join("\n"), /机械清单/);
 });
 
-test("水木然生成后内容质量检查必须十二项全部通过", () => {
+test("水木然生成后内容质量检查必须十三项全部通过", () => {
   const result = parseShuimuranReview(JSON.stringify({
     checks: {
       titleKeepsAnswer: true,
@@ -123,6 +123,7 @@ test("水木然生成后内容质量检查必须十二项全部通过", () => {
       singleCoreIdea: true,
       reasoningSupported: true,
       endingClosesSpecificLoop: true,
+      compressionAddsNoFacts: true,
     },
     issues: [],
   }));
@@ -146,6 +147,7 @@ test("水木然生成后内容质量检查任一项失败时返回具体重写�
       singleCoreIdea: true,
       reasoningSupported: false,
       endingClosesSpecificLoop: true,
+      compressionAddsNoFacts: true,
     },
     issues: ["标题直接公布了答案", "正文存在重复解释", "判断句缺少事实、案例或因果桥梁"],
   }));
@@ -192,7 +194,7 @@ test("水木然生成后检查提示词包含单一思想、推理支撑和具�
   assert.match(prompt, /不要改写文案/);
 });
 
-test("水木然终审不能同时声称十二项全过又返回问题", () => {
+test("水木然终审不能同时声称十三项全过又返回问题", () => {
   assert.throws(() => parseShuimuranReview(JSON.stringify({
     checks: {
       titleKeepsAnswer: true,
@@ -207,6 +209,7 @@ test("水木然终审不能同时声称十二项全过又返回问题", () => {
       singleCoreIdea: true,
       reasoningSupported: true,
       endingClosesSpecificLoop: true,
+      compressionAddsNoFacts: true,
     },
     issues: ["仍有一处没有解决"],
   })), /自相矛盾/);

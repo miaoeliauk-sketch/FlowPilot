@@ -7,6 +7,20 @@ export type ScriptOutputStatus = "formal" | "review" | "exploratory";
 export type AttributionConfidenceLevel = "high" | "medium" | "low";
 export type AttributionAuditStatus = "completed" | "unavailable";
 export type ScriptPostGenerationAuditStatus = "pending" | "completed" | "unavailable";
+export type ScriptCompressionStatus = "precise" | "tolerated" | "closest_fallback" | "unavailable";
+
+export interface ScriptCompressionAudit {
+  status: ScriptCompressionStatus;
+  initialChars: number;
+  idealMinimumChars: number;
+  idealMaximumChars: number;
+  acceptableMinimumChars: number;
+  acceptableMaximumChars: number;
+  actualChars: number;
+  actualRatio: number;
+  selectedAttempt: 0 | 1 | 2;
+  message: string;
+}
 export type ParagraphAttributionType =
   | "teacher_explicit"
   | "faithful_rewrite"

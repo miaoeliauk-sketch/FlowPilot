@@ -16,6 +16,7 @@ import {
 } from "@/lib/script-factory-draft";
 import type {
   ScriptAttributionAudit,
+  ScriptCompressionAudit,
   ScriptFactAudit,
   ScriptGenerationStatus,
   ScriptOutputStatus,
@@ -66,6 +67,7 @@ interface ScriptResult {
   titles: TitleOption[]; coverCopy: string[]; outline: OutlineSection[]; commentGuidance: CommentGuidance;
   ipStyleExplanation: string;
   pendingVerification?: string[];
+  compressionAudit?: ScriptCompressionAudit;
   qualityCheck?: ScriptQualityCheck;
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
@@ -247,6 +249,24 @@ const OUTPUT_STATUS_LABELS: Record<ScriptOutputStatus, string> = {
 
 const CONFIDENCE_LABELS = { high: "高", medium: "中", low: "低" } as const;
 
+function CompressionReviewInfo({ audit }: { audit?: ScriptCompressionAudit }) {
+  if (!audit) return null;
+  const selectedLabel = audit.selectedAttempt === 0
+    ? "保留完整初稿"
+    : `采用第${audit.selectedAttempt}次压缩结果`;
+  return (
+    <div className="mt-3 rounded-[10px] bg-white p-3">
+      <div className="text-[11px] font-bold text-[#888]">压缩状态</div>
+      <p className="mt-1 text-[12px] font-semibold text-[#1C1C1B]">{audit.message}</p>
+      <p className="mt-1 text-[11.5px] leading-5 text-[#777]">
+        初稿{audit.initialChars}字，理想目标{audit.idealMinimumChars}—{audit.idealMaximumChars}字，
+        可接受区间{audit.acceptableMinimumChars}—{audit.acceptableMaximumChars}字，
+        最终{audit.actualChars}字（{(audit.actualRatio * 100).toFixed(1)}%），{selectedLabel}。
+      </p>
+    </div>
+  );
+}
+
 function TeamReviewPanel({ data }: { data: ScriptResult }) {
   const attribution = data.attributionAudit;
   const fact = data.factAudit;
@@ -255,6 +275,7 @@ function TeamReviewPanel({ data }: { data: ScriptResult }) {
       <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-4">
         <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
         <p className="mt-2 text-[12.5px] text-[#666]">观点归属分析中，不影响正文使用</p>
+        <CompressionReviewInfo audit={data.compressionAudit} />
       </section>
     );
   }
@@ -263,6 +284,7 @@ function TeamReviewPanel({ data }: { data: ScriptResult }) {
       <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4">
         <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
         <p className="mt-2 text-[12.5px] text-[#755700]">{data.postGenerationAuditMessage ?? "本次归属分析暂未完成，不影响正文使用"}</p>
+        <CompressionReviewInfo audit={data.compressionAudit} />
       </section>
     );
   }
@@ -272,6 +294,7 @@ function TeamReviewPanel({ data }: { data: ScriptResult }) {
         <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
         <p className="mt-2 text-[12.5px] text-[#8A6515]">历史稿未记录观点归属信息</p>
         <p className="mt-1 text-[11.5px] leading-5 text-[#777]">这不代表高置信度，正式发布前请人工核对观点来源和事实。</p>
+        <CompressionReviewInfo audit={data.compressionAudit} />
       </div>
     );
   }
@@ -312,6 +335,7 @@ function TeamReviewPanel({ data }: { data: ScriptResult }) {
           </>
         ) : <p className="mt-1 text-[11.5px] text-[#777]">历史稿未记录事实核验状态。</p>}
       </div>
+      <CompressionReviewInfo audit={data.compressionAudit} />
     </section>
   );
 }

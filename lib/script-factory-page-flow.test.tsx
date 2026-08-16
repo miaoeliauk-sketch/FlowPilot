@@ -115,7 +115,7 @@ after(() => {
   restoreBrowser?.();
 });
 
-function generatedScript(topic: string) {
+function generatedScript(topic: string, compressionAudit?: Record<string, unknown>) {
   return {
     generationMode: "ip",
     generationStatus: "complete",
@@ -142,6 +142,7 @@ function generatedScript(topic: string) {
     shotPrompts: [],
     editingRhythm: { subtitleHighlights: [], soundEffects: [], screenRecordingCuts: [], caseInserts: [], pauses: [] },
     apiMeta: { apiCalled: true, calledAt: "2026-08-15T00:00:00.000Z", model: "test", ipUsed: SHUIMURAN.name, mockHit: false },
+    compressionAudit,
   };
 }
 
@@ -247,6 +248,62 @@ test("IP专属生成一次点击先展示并保存正文，再在后台补充团
     assert.ok(await view.findByText(/待审核稿 · 置信度中/));
     const savedAfterAudit = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
     assert.equal(savedAfterAudit[0]?.scriptResult?.postGenerationAuditStatus, "completed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然压缩兜底状态显示在团队审核信息且复制正文不包含审核标记", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory") {
+      return new Response(JSON.stringify(generatedScript("压缩兜底", {
+        status: "closest_fallback",
+        initialChars: 678,
+        idealMinimumChars: 475,
+        idealMaximumChars: 542,
+        acceptableMinimumChars: 475,
+        acceptableMaximumChars: 610,
+        actualChars: 630,
+        actualRatio: 0.9292,
+        selectedAttempt: 2,
+        message: "本次压缩未能精确达到目标比例，已采用最接近的版本。",
+      })), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/script-factory/audit") {
+      return new Promise<Response>(() => undefined);
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "压缩兜底");
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
+
+    assert.ok(await view.findByText("本次压缩未能精确达到目标比例，已采用最接近的版本。"));
+    assert.ok(view.getByText(/初稿678字/));
+    assert.ok(view.getByText(/最终630字/));
+    const saved = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{
+      scriptResult?: { compressionAudit?: { status?: string } };
+    }>;
+    assert.equal(saved[0]?.scriptResult?.compressionAudit?.status, "closest_fallback");
+    await user.click(view.getByRole("button", { name: "复制正文" }));
+    await view.findByText("正文已复制");
+    const copiedText = await navigator.clipboard.readText();
+    assert.match(copiedText, /正文应该先展示，辅助审计随后补充/);
+    assert.doesNotMatch(copiedText, /压缩未能精确达到目标比例/);
+    assert.doesNotMatch(copiedText, /初稿678字/);
   } finally {
     globalThis.fetch = originalFetch;
   }

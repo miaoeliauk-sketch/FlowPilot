@@ -11,6 +11,7 @@ const CHECK_KEYS = [
   "singleCoreIdea",
   "reasoningSupported",
   "endingClosesSpecificLoop",
+  "compressionAddsNoFacts",
 ] as const;
 
 export interface ShuimuranScriptReview {
@@ -107,7 +108,7 @@ export function findShuimuranDeterministicReviewIssues(input: {
   return issues;
 }
 
-export const SHUIMURAN_REVIEW_SYSTEM = `你是水木然IP专属脚本的独立终审员。只检查老师已经确认的12项内容质量标准，不负责观点归属审计、事实核验、润色或改写文案。
+export const SHUIMURAN_REVIEW_SYSTEM = `你是水木然IP专属脚本的独立终审员。只检查老师已经确认的13项内容质量标准，不负责观点归属审计、事实核验、润色或改写文案。
 必须逐项给出布尔值。任何一项不通过，issues中必须写明可直接用于重写的具体原因。
 只输出合法JSON，不要输出Markdown或解释。`;
 
@@ -129,6 +130,7 @@ export function buildShuimuranReviewPrompt(input: {
     sourceUrl?: string;
     occurredAt?: string;
   } | null;
+  compressionSourceScript?: string;
 }): string {
   const sourceReferences = input.sourceReferences ?? [];
   const caseEvidence = input.caseEvidence ?? null;
@@ -144,6 +146,12 @@ export function buildShuimuranReviewPrompt(input: {
 发生时间：${caseEvidence.occurredAt ?? "未提供"}
 来源链接：${caseEvidence.sourceUrl ?? "未提供"}`
     : "本次未使用案例";
+  const compressionComparisonBlock = input.compressionSourceScript
+    ? `【压缩前初稿】
+${input.compressionSourceScript}
+
+压缩稿不得新增初稿中不存在的人物、事件、数字、引语或事实判断。`
+    : "【压缩前初稿】\n本次未提供压缩前版本，不检查压缩新增事实。";
 
   return `请审查以下脚本，不要改写文案。
 
@@ -156,6 +164,8 @@ ${sourceBlock}
 
 【案例与事实依据】
 ${caseBlock}
+
+${compressionComparisonBlock}
 
 审查时间：${input.reviewedAt ?? "未提供"}
 
@@ -177,6 +187,7 @@ ${caseBlock}
 10. 全文是否只围绕一个核心思想展开，而不是多个观点并列堆砌？
 11. 每个锋利判断是否有事实、案例或清楚的因果桥梁支撑？如有口号或鸡汤式判断，issues必须指出缺少事实案例或因果桥梁的具体句子。
 12. 结尾是否回答标题悬念，并明确回到本篇实际使用的案例、经典或核心规律？仅仅重复宽泛结论不能通过。
+13. 对照压缩前初稿，压缩稿是否新增了初稿中不存在的人物、事件、数字、引语或事实判断？新增任何事实都不通过。
 
 严格输出：
 {
@@ -192,7 +203,8 @@ ${caseBlock}
     "soundsLikeTeacher": true,
     "singleCoreIdea": true,
     "reasoningSupported": true,
-    "endingClosesSpecificLoop": true
+    "endingClosesSpecificLoop": true,
+    "compressionAddsNoFacts": true
   },
   "issues": []
 }`;
