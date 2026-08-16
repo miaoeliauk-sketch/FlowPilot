@@ -213,7 +213,7 @@ const CONTENT_PROMPT = (
   qualityCorrection = "",
 ) => {
   const architecture = useShuimuranConfirmedOutput
-    ? "严格按照水木然老师确认版的正文顺序完成一篇连续口播稿。先写初稿，再在内部精简20%至30%，最终只把精简后的完整口播放入fullScript，不要拆成阶段或大纲。"
+    ? "严格按照水木然老师确认版的正文顺序完成一篇连续口播初稿。这一步只负责把核心案例、事实、因果关系、经典解释和最终结论写完整，不要在内部压缩；系统会在下一步单独完成压缩。只把完整初稿放入fullScript，不要拆成阶段或大纲。"
     : format.architecture;
   const outputSchema = useShuimuranConfirmedOutput
     ? `{
@@ -261,6 +261,72 @@ ${architecture}
 严格按以下JSON格式输出，只能输出JSON对象：
 ${outputSchema}`;
 };
+
+const SHUIMURAN_COMPRESSION_SYSTEM = `你是水木然IP专属脚本的压缩编辑。你的唯一任务是在不改变核心观点、不新增事实的前提下压缩初稿。
+必须保留核心案例、事实、因果关系、经典解释和最终结论，只删除重复解释、相近排比、无关感悟和不推动主线的过渡句。
+只输出一个合法JSON对象，不要输出Markdown或解释。`;
+
+function visibleCharacterCount(text: string): number {
+  return Array.from(text.replace(/\s+/g, "")).length;
+}
+
+function compressionRatio(initialScript: string, compressedScript: string): number {
+  const initialLength = visibleCharacterCount(initialScript);
+  if (initialLength === 0) return 0;
+  return visibleCharacterCount(compressedScript) / initialLength;
+}
+
+function compressionRetryInstruction(retryReason: string | null): string {
+  if (!retryReason) return "";
+  if (/标题/.test(retryReason)) {
+    return `5. 上一次压缩改变了初稿标题：${retryReason}。这次必须保持标题完全不变。`;
+  }
+  if (/待核验/.test(retryReason)) {
+    return `5. 上一次压缩改变了待核验内容：${retryReason}。这次必须原样保留待核验内容。`;
+  }
+  if (/JSON|格式|解析|截断|字段|不完整/.test(retryReason)) {
+    return `5. 上一次压缩稿格式不合法：${retryReason}。请只返回完整、合法的JSON，并保持规定字段。`;
+  }
+  if (/长度|\d+%|70%|80%/.test(retryReason)) {
+    return `5. 上一次压缩稿长度不符合要求：${retryReason}。这次必须重新调整到70%至80%。`;
+  }
+  return `5. 上一次压缩未通过校验：${retryReason}。请修正该问题后重新压缩。`;
+}
+
+function hasSamePendingVerification(
+  initial: string[],
+  compressed: string[],
+): boolean {
+  return initial.length === compressed.length &&
+    initial.every((item, index) => item === compressed[index]);
+}
+
+function buildShuimuranCompressionPrompt(
+  content: ReturnType<typeof parseScriptContentResponse>,
+  retryReason: string | null,
+): string {
+  return `请把下面的水木然口播初稿压缩到原文长度的70%至80%。
+
+硬性要求：
+1. 保留核心案例、事实、因果关系、经典解释和最终结论。
+2. 不得新增人物、事件、数字、引语、观点或待核验内容。
+3. 标题保持不变，只压缩fullScript。
+4. 同一个结论只完整解释一次。
+${compressionRetryInstruction(retryReason)}
+
+初稿标题：${content.titles[0]?.title ?? ""}
+初稿正文：
+${content.outline[0]?.content ?? ""}
+
+待核验内容：${content.pendingVerification.join("；") || "无"}
+
+严格输出：
+{
+  "titles": [{"title": "与初稿完全相同的唯一标题"}],
+  "fullScript": "压缩后的完整口播文案",
+  "pendingVerification": ["与初稿相同的待核验内容；没有则为空数组"]
+}`;
+}
 
 // ── 第二段A：短/中视频专用——逐秒分镜表 ──
 const STORYBOARD_SYSTEM = `你是一位短视频导演兼分镜师，专门为下方给出的具体IP设计分镜和拍摄方案。
@@ -637,6 +703,77 @@ ${rawIPBlock}
     );
 
     if (isShuimuranDedicatedGeneration) {
+      const compressContent = async (initialDraft: typeof content) =>
+        runScriptFactoryStage(
+          "content",
+          async ({ attempt, signal, retryReason }) => {
+            responseMeta = null;
+            const compressionUserPrompt = buildShuimuranCompressionPrompt(
+              initialDraft,
+              retryReason,
+            );
+            await promptTrace.recordCall({
+              stage: "content-compression",
+              attempt,
+              systemPrompt: SHUIMURAN_COMPRESSION_SYSTEM,
+              userPrompt: compressionUserPrompt,
+              retryReason,
+              materials: contentTraceMaterials,
+            });
+            const compressedRaw = await callDeepSeek(
+              SHUIMURAN_COMPRESSION_SYSTEM,
+              compressionUserPrompt,
+              6000,
+              0.1,
+              apiKey,
+              {
+                thinking: { type: "disabled" },
+                responseFormat: { type: "json_object" },
+                onResponseMeta: meta => { responseMeta = meta; },
+                signal,
+              },
+            );
+            if (getFinishReason(responseMeta) === "length") {
+              throw new ScriptFactoryResponseError(
+                "invalid_json",
+                "AI返回的压缩稿被截断",
+              );
+            }
+            const compressed = parseScriptContentResponse(compressedRaw, {
+              outputMode: "shuimuran-confirmed",
+            });
+            if (compressed.titles[0]?.title !== initialDraft.titles[0]?.title) {
+              throw new ScriptFactoryResponseError(
+                "quality_retry",
+                "压缩稿改变了初稿标题",
+              );
+            }
+            if (!hasSamePendingVerification(
+              initialDraft.pendingVerification,
+              compressed.pendingVerification,
+            )) {
+              throw new ScriptFactoryResponseError(
+                "quality_retry",
+                "压缩稿改变了待核验内容",
+              );
+            }
+            const ratio = compressionRatio(
+              initialDraft.outline[0]?.content ?? "",
+              compressed.outline[0]?.content ?? "",
+            );
+            if (ratio < 0.7 || ratio > 0.8) {
+              throw new ScriptFactoryResponseError(
+                "quality_retry",
+                `压缩稿长度为初稿的${Math.round(ratio * 100)}%，不在70%至80%范围内`,
+              );
+            }
+            return compressed;
+          },
+          SCRIPT_STAGE_RETRY_OPTIONS,
+        );
+
+      content = await compressContent(content);
+
       const reviewContent = async (
         candidate: typeof content,
         retryReason: string | null = null,
@@ -694,7 +831,7 @@ ${rawIPBlock}
       let review = await reviewContent(content);
       if (!review.passed) {
         const reviewIssues = review.issues;
-        content = await runScriptFactoryStage(
+        const revisedDraft = await runScriptFactoryStage(
           "content",
           async ({ signal }) => {
             const revisedContent = await generateContent(signal, {
@@ -719,6 +856,7 @@ ${rawIPBlock}
           },
           { timeoutMs: SCRIPT_STAGE_TIMEOUT_MS, maxRetries: 0 },
         );
+        content = await compressContent(revisedDraft);
         review = await reviewContent(content, "终审未通过后的二次检查");
         if (!review.passed) {
           throw new ScriptFactoryResponseError(

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildScriptDirectorBlock, isScriptDirectorProfileId, shouldUseShuimuranDirector } from "./script-director-profile";
 
-test("水木然老师确认版规则包含时效、悬念、压缩和最终输出约束", () => {
+test("水木然老师确认版规则包含时效、悬念和最终输出约束但不要求初稿自行压缩", () => {
   const block = buildScriptDirectorBlock("shuimuran-v1");
 
   assert.match(block, /老师最新修改意见＞老师已经通过的成稿/);
@@ -10,7 +10,9 @@ test("水木然老师确认版规则包含时效、悬念、压缩和最终输�
   assert.match(block, /标题要有神秘、幽深和窥探感/);
   assert.match(block, /胖东来的经营秘诀，就是《道德经》的这八个字/);
   assert.match(block, /开头前15秒依次完成/);
-  assert.match(block, /强制进行一次20%至30%的精简/);
+  assert.doesNotMatch(block, /主动压缩20%至30%/);
+  assert.doesNotMatch(block, /强制进行一次20%至30%的精简/);
+  assert.doesNotMatch(block, /比初稿压缩了20%至30%/);
   assert.match(block, /只输出以下内容/);
   assert.match(block, /标题：[\s\S]*完整口播文案：[\s\S]*待核验内容：/);
 });

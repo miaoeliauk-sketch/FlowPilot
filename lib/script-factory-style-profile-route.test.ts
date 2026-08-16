@@ -91,6 +91,23 @@ const SHUIMURAN_DIRECTOR_CONTENT = {
   pendingVerification: [],
 };
 
+const COMPRESSION_PRESERVATION_DRAFT = {
+  titles: [{ title: "一家企业真正的机会，藏在进退之间" }],
+  fullScript: `很多人判断一家企业有没有机会，只看规模和增长速度。某企业连续三年主动缩减低效门店，却把更多预算投入产品质量和员工培训。短期看，它少赚了不少钱，长期却稳住了复购和口碑。这不是简单的保守，而是一种主动选择边界的能力。《道德经》说“明道若昧，进道若退”，真正的前进有时看起来像后退。因为扩张会放大优势，也会同时放大管理漏洞；当组织能力跟不上规模，增长越快，风险积累得越快。所以，企业真正的竞争力，不是永远向前冲，而是在该停的时候敢停、该退的时候敢退。看懂这种进退，才能理解下一轮机会真正属于谁。`,
+  pendingVerification: ["某企业连续三年的经营情况"],
+};
+
+const COMPRESSED_PRESERVATION_CONTENT = {
+  titles: COMPRESSION_PRESERVATION_DRAFT.titles,
+  fullScript: `很多人判断企业机会，只看规模和增速。某企业连续三年缩减低效门店，却把预算投入产品质量和员工培训，短期少赚了钱，长期稳住复购和口碑。这是主动选择边界。《道德经》说“明道若昧，进道若退”，前进有时看起来像后退。因为扩张既放大优势，也放大管理漏洞；组织能力跟不上，增长越快，风险越大。所以，企业的竞争力不是永远向前冲，而是在该停时敢停、该退时敢退。看懂进退，才能理解下一轮机会属于谁。`,
+  pendingVerification: COMPRESSION_PRESERVATION_DRAFT.pendingVerification,
+};
+
+const COMPRESSED_SHUIMURAN_CONTENT = {
+  ...SHUIMURAN_DIRECTOR_CONTENT,
+  fullScript: "变化不会提前通知所有人，它总是先改变少数人的选择。很多人只盯结果，却没看到行业规则已经改变。判断趋势不能只看热闹，要观察需求、成本和普通人的真实行为。当三个信号同时出现，个体要调整选择顺序。看懂变化后就行动，这才是普通人能抓住的机会。",
+};
+
 const BREAK_SIX_CONTENT = {
   titles: [{ title: "一个人真正觉醒之前，必须破掉这六种相" }],
   fullScript: `大家有没有发现一个很有意思的现象：很多人越努力越焦虑，因为他们一直在着相。
@@ -102,6 +119,18 @@ const BREAK_SIX_CONTENT = {
 第六种相，叫非法相。破掉非法相，就是既不执着于有，也不执着于无。
 希望你能成为那1%的人。`,
   pendingVerification: [],
+};
+
+const COMPRESSED_BREAK_SIX_CONTENT = {
+  ...BREAK_SIX_CONTENT,
+  fullScript: `大家有没有发现一个很有意思的现象：很多人焦虑，因为一直在着相。
+第一种相，叫我相，就是看清局限。
+第二种相，叫人相，就是不用别人的尺子量自己。
+第三种相，叫众生相，就是敢走少有人走的路。
+第四种相，叫寿者相，就是不被年龄绑架。
+第五种相，叫法相，就是不迷信方法。
+第六种相，叫非法相，就是既不执着于有，也不执着于无。
+希望你能成为那1%的人。`,
 };
 
 const VALID_SHUIMURAN_REVIEW = {
@@ -296,10 +325,10 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-content");
     }
     if (calls === 2) {
-      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+      return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression");
     }
     if (calls === 3) {
-      return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-review");
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
     }
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-review");
   };
@@ -319,10 +348,194 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
     assert.equal(result.storyboard.length, 0);
     assert.match(prompts[0], /水木然IP专属脚本生成规则｜老师确认版/);
     assert.match(prompts[0], /不超过24小时，可以直接追热点/);
-    assert.match(prompts[0], /强制进行一次20%至30%的精简/);
+    assert.doesNotMatch(prompts[0], /主动压缩20%至30%/);
+    assert.doesNotMatch(prompts[0], /强制进行一次20%至30%的精简/);
+    assert.doesNotMatch(prompts[0], /比初稿压缩了20%至30%/);
     assert.match(prompts[0], /"fullScript"/);
     assert.match(prompts[0], /"pendingVerification"/);
     assert.doesNotMatch(prompts[0], /"coverCopy"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然专属生成先生成初稿再独立压缩到七至八成后进入终审", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(COMPRESSION_PRESERVATION_DRAFT), "director-draft");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_PRESERVATION_CONTENT), "director-compression");
+    }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 4);
+    assert.equal(result.outline[0].content, COMPRESSED_PRESERVATION_CONTENT.fullScript);
+    assert.deepEqual(result.pendingVerification, COMPRESSION_PRESERVATION_DRAFT.pendingVerification);
+    assert.match(result.outline[0].content, /某企业连续三年/);
+    assert.match(result.outline[0].content, /产品质量和员工培训/);
+    assert.match(result.outline[0].content, /《道德经》说“明道若昧，进道若退”/);
+    assert.match(result.outline[0].content, /因为扩张既放大优势，也放大管理漏洞/);
+    assert.match(result.outline[0].content, /看懂进退，才能理解下一轮机会属于谁/);
+    assert.match(prompts[0] ?? "", /完整初稿/);
+    assert.doesNotMatch(prompts[0] ?? "", /在内部精简20%至30%/);
+    assert.match(prompts[1] ?? "", /70%至80%/);
+    assert.match(prompts[1] ?? "", /核心案例、事实、因果关系、经典解释和最终结论/);
+    assert.match(prompts[2] ?? "", new RegExp(COMPRESSED_PRESERVATION_CONTENT.fullScript.slice(0, 20)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然压缩稿不在七至八成时明确重压一次且只终审合格稿", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-draft");
+    }
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-compression-too-long");
+    }
+    if (calls === 3) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression-passed");
+    }
+    if (calls === 4) {
+      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    }
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 5);
+    assert.equal(result.outline[0].content, COMPRESSED_SHUIMURAN_CONTENT.fullScript);
+    assert.match(prompts[2] ?? "", /长度为初稿的100%/);
+    assert.match(prompts[2] ?? "", /必须重新调整到70%至80%/);
+    assert.match(prompts[3] ?? "", new RegExp(COMPRESSED_SHUIMURAN_CONTENT.fullScript.slice(0, 20)));
+    assert.doesNotMatch(prompts[3] ?? "", new RegExp(SHUIMURAN_DIRECTOR_CONTENT.fullScript.slice(-20)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然压缩重试会区分格式错误、标题变化和长度不合格", async t => {
+  const scenarios = [
+    {
+      name: "格式错误",
+      firstCompression: "{不是合法JSON",
+      expectedReason: /上一次压缩稿格式不合法/,
+    },
+    {
+      name: "标题变化",
+      firstCompression: JSON.stringify({
+        ...COMPRESSED_SHUIMURAN_CONTENT,
+        titles: [{ title: "被压缩步骤擅自改变的标题" }],
+      }),
+      expectedReason: /上一次压缩改变了初稿标题/,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const originalFetch = globalThis.fetch;
+      const prompts: string[] = [];
+      let calls = 0;
+      globalThis.fetch = async (_input, init) => {
+        calls += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          messages?: Array<{ content?: string }>;
+        };
+        prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+        if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-draft");
+        if (calls === 2) return deepSeekResponse(scenario.firstCompression, "director-compression-invalid");
+        if (calls === 3) return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression-passed");
+        if (calls === 4) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+        return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-argument-review");
+      };
+
+      try {
+        const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+          ...SHUIMURAN,
+          scriptDirectorProfileId: "shuimuran-v1",
+        }));
+
+        assert.equal(response.status, 200);
+        assert.equal(calls, 5);
+        assert.match(prompts[2] ?? "", scenario.expectedReason);
+        assert.doesNotMatch(prompts[2] ?? "", /未通过长度检查/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});
+
+test("水木然压缩不能改变待核验内容", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      messages?: Array<{ content?: string }>;
+    };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(COMPRESSION_PRESERVATION_DRAFT), "director-draft");
+    if (calls === 2) {
+      return deepSeekResponse(JSON.stringify({
+        ...COMPRESSED_PRESERVATION_CONTENT,
+        pendingVerification: [],
+      }), "director-compression-dropped-pending");
+    }
+    if (calls === 3) return deepSeekResponse(JSON.stringify(COMPRESSED_PRESERVATION_CONTENT), "director-compression-passed");
+    if (calls === 4) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
+      ...SHUIMURAN,
+      scriptDirectorProfileId: "shuimuran-v1",
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 5);
+    assert.deepEqual(result.pendingVerification, COMPRESSION_PRESERVATION_DRAFT.pendingVerification);
+    assert.match(prompts[2] ?? "", /上一次压缩改变了待核验内容/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -339,7 +552,8 @@ test("创业失败选题只把唯一胖东来范例作为格式说明而非默�
     };
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
     if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "startup-failure-content");
-    if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "startup-failure-review");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "startup-failure-compression");
+    if (calls === 3) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "startup-failure-review");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "startup-failure-argument");
   };
 
@@ -380,6 +594,9 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "trace-content");
     }
     if (calls === 2) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "trace-content-compression");
+    }
+    if (calls === 3) {
       return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "trace-shuimuran-review");
     }
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "trace-argument-review");
@@ -435,8 +652,9 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
     const callFiles = (await readdir(generationDir)).sort();
     assert.deepEqual(callFiles, [
       "001-content-initial.json",
-      "002-shuimuran-review.json",
-      "003-argument-review.json",
+      "002-content-compression.json",
+      "003-shuimuran-review.json",
+      "004-argument-review.json",
     ]);
 
     const contentRecordText = await readFile(path.join(generationDir, callFiles[0]!), "utf8");
@@ -461,6 +679,21 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
     assert.deepEqual(contentRecord.materials.sourceReferences.map(item => item.itemId), ["claim-1", "reasoning-1"]);
     assert.equal(contentRecord.materials.caseEvidence.title, "创业案例A");
 
+    const compressionRecordText = await readFile(path.join(generationDir, callFiles[1]!), "utf8");
+    const compressionRecord = JSON.parse(compressionRecordText) as {
+      stage: string;
+      userPrompt: string;
+      materials: {
+        methodKnowledge: Array<{ id: string }>;
+        voiceSamples: Array<{ id: string }>;
+      };
+    };
+    assert.equal(compressionRecord.stage, "content-compression");
+    assert.match(compressionRecord.userPrompt, new RegExp(SHUIMURAN_DIRECTOR_CONTENT.fullScript.slice(0, 20)));
+    assert.match(compressionRecord.userPrompt, /70%至80%/);
+    assert.deepEqual(compressionRecord.materials.methodKnowledge.map(item => item.id), ["knowledge-trace-1"]);
+    assert.deepEqual(compressionRecord.materials.voiceSamples.map(item => item.id), ["voice-trace-1"]);
+
     const allTraceText = (await Promise.all(callFiles.map(file =>
       readFile(path.join(generationDir, file), "utf8")
     ))).join("\n");
@@ -483,7 +716,8 @@ test("水木然没有原始内容时仍生成，但不得冒充老师已确认�
     const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content?: string }> };
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
     if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "director-content");
-    if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "director-compression");
+    if (calls === 3) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-final-review");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "director-review");
   };
 
@@ -520,20 +754,23 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
       messages?: Array<{ content?: string }>;
     };
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
-    if (calls === 1 || calls === 3) {
+    if (calls === 1 || calls === 4) {
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `director-content-${calls}`);
     }
-    if (calls === 2) {
+    if (calls === 2 || calls === 5) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), `director-compression-${calls}`);
+    }
+    if (calls === 3) {
       return deepSeekResponse(JSON.stringify({
         ...VALID_SHUIMURAN_REVIEW,
         checks: { ...VALID_SHUIMURAN_REVIEW.checks, titleKeepsAnswer: false },
         issues: ["标题直接公布了核心答案"],
       }), "director-review-failed");
     }
-    if (calls === 4) {
+    if (calls === 6) {
       return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
     }
-    if (calls === 5) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    if (calls === 7) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "unexpected-extra-call");
   };
 
@@ -544,8 +781,10 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
     }));
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 5);
-    assert.match(prompts[2], /标题直接公布了核心答案/);
+    assert.equal(calls, 7);
+    assert.match(prompts[3], /标题直接公布了核心答案/);
+    assert.match(prompts[4], /70%至80%/);
+    assert.match(prompts[5], new RegExp(COMPRESSED_SHUIMURAN_CONTENT.fullScript.slice(0, 20)));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -561,8 +800,11 @@ test("破六相硬问题即使被模型放行也会触发重写并在二次终�
       messages?: Array<{ content?: string }>;
     };
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
-    if (calls === 1 || calls === 3) {
+    if (calls === 1 || calls === 4) {
       return deepSeekResponse(JSON.stringify(BREAK_SIX_CONTENT), `break-six-content-${calls}`);
+    }
+    if (calls === 2 || calls === 5) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_BREAK_SIX_CONTENT), `break-six-compression-${calls}`);
     }
     return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), `break-six-review-${calls}`);
   };
@@ -574,10 +816,10 @@ test("破六相硬问题即使被模型放行也会触发重写并在二次终�
     }));
 
     assert.equal(response.status, 502);
-    assert.equal(calls, 4);
-    assert.match(prompts[2] ?? "", /禁用开头/);
-    assert.match(prompts[2] ?? "", /机械清单/);
-    assert.match(prompts[2] ?? "", /通用结尾/);
+    assert.equal(calls, 6);
+    assert.match(prompts[3] ?? "", /禁用开头/);
+    assert.match(prompts[3] ?? "", /机械清单/);
+    assert.match(prompts[3] ?? "", /通用结尾/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -596,20 +838,23 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     if (calls === 1) {
       return deepSeekResponse("{内容被截断", "director-content-invalid");
     }
-    if (calls === 2 || calls === 4) {
+    if (calls === 2 || calls === 5) {
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `director-content-${calls}`);
     }
-    if (calls === 3) {
+    if (calls === 3 || calls === 6) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), `director-compression-${calls}`);
+    }
+    if (calls === 4) {
       return deepSeekResponse(JSON.stringify({
         ...VALID_SHUIMURAN_REVIEW,
         checks: { ...VALID_SHUIMURAN_REVIEW.checks, titleKeepsAnswer: false },
         issues: ["标题直接公布了核心答案"],
       }), "director-review-failed");
     }
-    if (calls === 5) {
+    if (calls === 7) {
       return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
     }
-    if (calls === 6) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    if (calls === 8) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "unexpected-extra-call");
   };
 
@@ -620,8 +865,9 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     }));
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 6);
-    assert.match(prompts[3], /标题直接公布了核心答案/);
+    assert.equal(calls, 8);
+    assert.match(prompts[4], /标题直接公布了核心答案/);
+    assert.match(prompts[5], /70%至80%/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -637,17 +883,20 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
   globalThis.fetch = async () => {
     calls += 1;
     if (calls === 1) return deepSeekResponse("{内容被截断", "trace-content-invalid");
-    if (calls === 2 || calls === 4) {
+    if (calls === 2 || calls === 5) {
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `trace-content-${calls}`);
     }
-    if (calls === 3) {
+    if (calls === 3 || calls === 6) {
+      return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), `trace-compression-${calls}`);
+    }
+    if (calls === 4) {
       return deepSeekResponse(JSON.stringify({
         ...VALID_SHUIMURAN_REVIEW,
         checks: { ...VALID_SHUIMURAN_REVIEW.checks, titleKeepsAnswer: false },
         issues: ["标题直接公布了核心答案"],
       }), "trace-review-failed");
     }
-    if (calls === 5) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "trace-review-passed");
+    if (calls === 7) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "trace-review-passed");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "trace-argument-review");
   };
   process.chdir(projectDir);
@@ -667,10 +916,12 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
     assert.deepEqual(callFiles, [
       "001-content-initial.json",
       "002-content-format-retry.json",
-      "003-shuimuran-review.json",
-      "004-content-rewrite.json",
-      "005-shuimuran-review.json",
-      "006-argument-review.json",
+      "003-content-compression.json",
+      "004-shuimuran-review.json",
+      "005-content-rewrite.json",
+      "006-content-compression.json",
+      "007-shuimuran-review.json",
+      "008-argument-review.json",
     ]);
     const records = await Promise.all(callFiles.map(async file =>
       JSON.parse(await readFile(path.join(generationDir, file), "utf8")) as {
@@ -679,8 +930,8 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
       }
     ));
     assert.match(records[1]!.retryReason ?? "", /JSON|解析|截断/);
-    assert.match(records[3]!.retryReason ?? "", /标题直接公布了核心答案/);
-    assert.equal(records[4]!.retryReason, "终审未通过后的二次检查");
+    assert.match(records[4]!.retryReason ?? "", /标题直接公布了核心答案/);
+    assert.equal(records[6]!.retryReason, "终审未通过后的二次检查");
   } finally {
     globalThis.fetch = originalFetch;
     process.chdir(originalCwd);
