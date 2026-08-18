@@ -6,7 +6,6 @@ import {
   addEvaluatedTopicAsset,
   addTopicAsset,
   getScriptAssets,
-  setActiveIPId,
   updateTopicAssetStatus,
 } from "./ip-store";
 import {
@@ -649,11 +648,21 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
   try {
     const { act, render } = await import("@testing-library/react");
     const userEvent = (await import("@testing-library/user-event")).default;
-    const { IPProvider } = await import("./ip-context");
+    const { IPProvider, useIP } = await import("./ip-context");
     const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
     const user = userEvent.setup({ document });
+    function SwitchIPControl() {
+      const { activeIP, switchIP } = useIP();
+      return (
+        <div>
+          <span>{`测试当前IP：${activeIP?.id ?? "无"}`}</span>
+          <button type="button" onClick={() => switchIP(otherIP.id)}>切换到另一个IP</button>
+        </div>
+      );
+    }
     const view = render(
       <IPProvider>
+        <SwitchIPControl />
         <ScriptFactoryPage />
       </IPProvider>,
     );
@@ -661,8 +670,9 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
     await view.findByDisplayValue(topic.title);
     const clickGeneration = user.click(await unlockGeneration(view, user));
     await waitWithTimeout(requested, 3000);
+    await user.click(view.getByRole("button", { name: "切换到另一个IP" }));
+    await view.findByText(`测试当前IP：${otherIP.id}`);
     await act(async () => {
-      setActiveIPId(otherIP.id);
       releaseResponse();
     });
     await clickGeneration;

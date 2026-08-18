@@ -2,7 +2,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
-import { addScriptAsset, getActiveIPId, getKnowledgeEntries, getScriptAssets, recordKnowledgeUsage, getStyleProfile, updateScriptAssetResult } from "@/lib/ip-store";
+import { addScriptAsset, getKnowledgeEntries, getScriptAssets, recordKnowledgeUsage, getStyleProfile, updateScriptAssetResult } from "@/lib/ip-store";
 import { IPProfile, KnowledgeEntry, ScriptAsset, TopicAsset } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { Select, SelectOption } from "@/components/ui/select";
@@ -674,6 +674,8 @@ export default function ScriptFactoryPage() {
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationSequenceRef = useRef(0);
+  const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
+  activeIPIdRef.current = activeIP?.id ?? null;
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -1107,7 +1109,7 @@ export default function ScriptFactoryPage() {
       };
     }
 
-    if (generationSequenceRef.current !== requestSequence || getActiveIPId() !== requestIP.id) return;
+    if (generationSequenceRef.current !== requestSequence || activeIPIdRef.current !== requestIP.id) return;
     setResult(auditedData);
     if (generatedData.generationStatus === "partial") {
       const draft = getPartialScriptDraft(requestIP.id);
@@ -1134,7 +1136,7 @@ export default function ScriptFactoryPage() {
     const caseEvidence = requestMode === "ip" ? getGenerationCaseEvidence() : null;
     let linkedTopicAtRequest: TopicAsset | null = null;
     try {
-      if (getActiveIPId() !== requestIP.id) {
+      if (activeIPIdRef.current !== requestIP.id) {
         throw new Error("当前操盘IP刚刚发生变化，请确认后重新生成。");
       }
       if (linkedTopic) {
@@ -1158,7 +1160,7 @@ export default function ScriptFactoryPage() {
       if (data.ipId !== requestIP.id) {
         throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
       }
-      if (getActiveIPId() !== requestIP.id || generationSequenceRef.current !== requestSequence) {
+      if (activeIPIdRef.current !== requestIP.id || generationSequenceRef.current !== requestSequence) {
         throw new Error("生成期间当前操盘IP已切换，结果未保存；请切回原IP后重新生成。");
       }
       if (linkedTopicAtRequest) {
@@ -1204,7 +1206,7 @@ export default function ScriptFactoryPage() {
           status: "草稿" as const,
           scriptResult: data,
         };
-        if (getActiveIPId() !== requestIP.id) {
+        if (activeIPIdRef.current !== requestIP.id) {
           throw new Error("保存前检测到当前操盘IP已切换，结果未保存。");
         }
         if (linkedTopicAtRequest) {
@@ -1231,7 +1233,7 @@ export default function ScriptFactoryPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "脚本生成失败，请重试");
-      if (getActiveIPId() === requestIP.id) {
+      if (activeIPIdRef.current === requestIP.id) {
         const draft = getPartialScriptDraft(requestIP.id);
         if (draft && isStoredScriptResult(draft.result)) {
           setDraftStorageError(restorePartialDraft(draft as PartialScriptDraft<ScriptResult>, requestIP.id));

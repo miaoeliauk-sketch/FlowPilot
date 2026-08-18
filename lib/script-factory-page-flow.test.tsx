@@ -176,6 +176,51 @@ test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
 });
 
+test("页面显示水木然时不会因底层IP存储格式异常而误判为刚刚切换IP", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const originalFetch = globalThis.fetch;
+  let generationRequestCount = 0;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory") {
+      generationRequestCount += 1;
+      return new Response(JSON.stringify(generatedScript("水木然专属测试")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "水木然专属测试",
+    );
+
+    // 模拟旧同步数据把同一个IP编号写成未JSON序列化的字符串。
+    localStorage.setItem("ipwr:activeIpId", SHUIMURAN.id);
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
+
+    assert.equal(generationRequestCount, 1);
+    assert.equal(view.queryByText("当前操盘IP刚刚发生变化，请确认后重新生成。"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("IP专属生成一次点击先展示并保存正文，再在后台补充团队审核信息", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
