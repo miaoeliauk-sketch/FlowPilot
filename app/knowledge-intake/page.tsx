@@ -17,6 +17,12 @@ import {
   segmentKnowledgeIntakeContent,
   type KnowledgeIntakeSegment,
 } from "@/lib/knowledge-intake-segmentation";
+import {
+  groupKnowledgeMethodCards,
+  mergeKnowledgeMethodCards,
+  type KnowledgeMethodCardSource,
+  type SimilarKnowledgeMethodCardGroup,
+} from "@/lib/knowledge-intake-deduplication";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -48,9 +54,7 @@ interface IntakeItem {
   keywords?: string[];
   selected: boolean;
   categoryOverride?: string;
-  sourceSegmentId?: string;
-  sourceSegmentTitle?: string;
-  sourceSegmentIndex?: number;
+  sourceSegments: KnowledgeMethodCardSource[];
 }
 
 interface SegmentRun {
@@ -72,6 +76,12 @@ const REC_STYLE: Record<string,{bg:string;color:string}> = {
 
 function listText(items?: string[]) {
   return (items ?? []).map(t => t.trim()).filter(Boolean).join("、");
+}
+
+function sourceSegmentsText(sources: KnowledgeMethodCardSource[]) {
+  if (sources.length === 0) return "";
+  const visible = sources.slice(0, 2).map(source => `第${source.index}段·${source.title}`);
+  return `来源：${visible.join("、")}${sources.length > 2 ? ` 等${sources.length}个章节` : ""}`;
 }
 
 function buildMethodCardContent(item: IntakeItem) {
@@ -129,6 +139,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [showSegmentPreview, setShowSegmentPreview] = useState(false);
   const [segmentRuns, setSegmentRuns] = useState<SegmentRun[]>([]);
   const [segmentProgress, setSegmentProgress] = useState<{ current: number; total: number; title: string } | null>(null);
+  const [exactDuplicateCount, setExactDuplicateCount] = useState(0);
+  const [resolvedSimilarGroupIds, setResolvedSimilarGroupIds] = useState<string[]>([]);
   const globalContentLength = rawContent.trim().length;
   const globalContentAboveRecommended = !isIPMode && globalContentLength > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
   const globalSegmentation = useMemo(
@@ -147,11 +159,25 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         ? globalSegmentation.message
       : buildGlobalKnowledgeIntakeLengthMessage(globalContentLength)
     : "";
+  const segmentedDeduplicationActive = !isIPMode && segmentRuns.length > 0;
+  const segmentWorkflowBusy = segmentedDeduplicationActive &&
+    (loading || segmentRuns.some(run => run.status === "pending" || run.status === "processing"));
+  const retryInProgress = segmentRuns.some(run => run.status === "processing");
+  const similarGroups = useMemo(
+    () => segmentedDeduplicationActive ? groupKnowledgeMethodCards(items).similarGroups : [],
+    [items, segmentedDeduplicationActive],
+  );
+  const duplicateReviewReady = segmentedDeduplicationActive && !segmentWorkflowBusy;
+  const unresolvedSimilarGroups = duplicateReviewReady
+    ? similarGroups.filter(group => !resolvedSimilarGroupIds.includes(group.id))
+    : [];
 
   useEffect(() => {
     setShowSegmentPreview(false);
     setSegmentRuns([]);
     setSegmentProgress(null);
+    setExactDuplicateCount(0);
+    setResolvedSimilarGroupIds([]);
   }, [rawContent, isIPMode]);
 
   function mapResponseItems(
@@ -164,10 +190,15 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
       id: `item-${sourceSegment?.id ?? "single"}-${index}-${Date.now()}`,
       selected: it.ingestRecommend === "建议入库" &&
         (!isIPKnowledgeCategory(it.category) || Boolean(it.ipId)),
-      sourceSegmentId: sourceSegment?.id,
-      sourceSegmentTitle: sourceSegment?.title,
-      sourceSegmentIndex: sourceSegment?.index,
+      sourceSegments: sourceSegment ? [sourceSegment] : [],
     }));
+  }
+
+  function applyDuplicateClassification(cards: IntakeItem[], previousExactDuplicateCount = 0) {
+    const result = groupKnowledgeMethodCards(cards);
+    setItems(result.cards);
+    setExactDuplicateCount(previousExactDuplicateCount + result.exactDuplicateCount);
+    setResolvedSimilarGroupIds([]);
   }
 
   async function requestIntake(
@@ -238,6 +269,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     if (isIPMode && !activeIP) { setError("请先选择当前IP"); return; }
     if (globalContentTooLong) { setError(globalLengthWarning); return; }
     setLoading(true); setError(""); setItems([]); setSaved(false);
+    setExactDuplicateCount(0);
+    setResolvedSimilarGroupIds([]);
     try {
       setItems(await requestIntake(rawContent));
     } catch (e) {
@@ -255,7 +288,10 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     setItems([]);
     setSaved(false);
     setShowSegmentPreview(false);
+    setExactDuplicateCount(0);
+    setResolvedSimilarGroupIds([]);
     setSegmentRuns(segments.map(segment => ({ segment, status: "pending" })));
+    let collectedItems: IntakeItem[] = [];
     try {
       for (const [index, segment] of segments.entries()) {
         setSegmentProgress({ current: index + 1, total: segments.length, title: segment.title });
@@ -268,7 +304,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             title: segment.title,
             index: index + 1,
           });
-          setItems(current => [...current, ...segmentItems]);
+          collectedItems = [...collectedItems, ...segmentItems];
+          setItems(collectedItems);
           setSegmentRuns(current => current.map(run => run.segment.id === segment.id
             ? { ...run, status: "completed", error: undefined }
             : run));
@@ -279,6 +316,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         }
       }
     } finally {
+      applyDuplicateClassification(collectedItems);
       setSegmentProgress(null);
       setLoading(false);
     }
@@ -286,7 +324,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
   async function handleRetrySegment(segmentId: string) {
     const run = segmentRuns.find(candidate => candidate.segment.id === segmentId);
-    if (!run || run.status === "processing") return;
+    if (!run || run.status === "processing" || retryInProgress) return;
     const segmentIndex = segmentRuns.findIndex(candidate => candidate.segment.id === segmentId) + 1;
     setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
       ? { ...candidate, status: "processing", error: undefined }
@@ -297,7 +335,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         title: run.segment.title,
         index: segmentIndex,
       });
-      setItems(current => [...current, ...segmentItems]);
+      applyDuplicateClassification([...items, ...segmentItems], exactDuplicateCount);
       setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
         ? { ...candidate, status: "completed", error: undefined }
         : candidate));
@@ -309,9 +347,15 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   }
 
   function resetIntake() {
+    if (retryInProgress) {
+      setError("失败分段正在重试，请等待完成后再重新输入");
+      return;
+    }
     setItems([]);
     setSegmentRuns([]);
     setSegmentProgress(null);
+    setExactDuplicateCount(0);
+    setResolvedSimilarGroupIds([]);
     setRawContent("");
     setFileName("");
     setSourceType("text");
@@ -320,6 +364,14 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   }
 
   function handleSave() {
+    if (segmentWorkflowBusy) {
+      setError("分段内容仍在提炼，请等待全部处理完成后再入库");
+      return;
+    }
+    if (unresolvedSimilarGroups.length > 0) {
+      setError("请先处理疑似重复项，再确认入库");
+      return;
+    }
     const toSave = items.filter(it => it.selected);
     const unboundItem = toSave.find(it => {
       const category = it.categoryOverride || it.category;
@@ -385,6 +437,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         reason: it.confidenceReason,
         matchedRules: [...(it.tags ?? []), ...triggerKeywords],
         needsReview: it.ingestRecommend === "待确认",
+        sourceSegments: it.sourceSegments,
       });
       addKnowledgeEntry({ category: cat, title: it.title, rawContent: buildMethodCardContent(it), tags: it.tags ?? [], keywords: triggerKeywords, ipId: isIPKnowledgeCategory(cat) ? it.ipId : null, sourceTier: (["高","中","低"].includes(it.confidence) ? it.confidence as "高"|"中"|"低" : "低"), sourceTierReason: it.aiUsage || it.confidenceReason, contentDirection: it.applicableScenarios ?? [], sourcePlatform: "智能入库助手", sourceUrl: "", note: ev, extractedAt: new Date().toISOString(), metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null });
       count++;
@@ -394,6 +447,37 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   }
 
   const selectedCount = items.filter(it => it.selected).length;
+
+  function cardsForSimilarGroup(group: SimilarKnowledgeMethodCardGroup) {
+    return group.cardIds
+      .map(cardId => items.find(item => item.id === cardId))
+      .filter((item): item is IntakeItem => Boolean(item));
+  }
+
+  function handleKeepSimilarCard(group: SimilarKnowledgeMethodCardGroup, cardId: string) {
+    if (retryInProgress) return;
+    const groupCardIds = new Set(group.cardIds);
+    setItems(current => current.filter(item => !groupCardIds.has(item.id) || item.id === cardId));
+  }
+
+  function handleMergeSimilarGroup(group: SimilarKnowledgeMethodCardGroup) {
+    if (retryInProgress) return;
+    const groupCards = cardsForSimilarGroup(group);
+    if (groupCards.length < 2) return;
+    const merged = mergeKnowledgeMethodCards(groupCards);
+    const groupCardIds = new Set(group.cardIds);
+    const firstIndex = items.findIndex(item => groupCardIds.has(item.id));
+    setItems(current => {
+      const remaining = current.filter(item => !groupCardIds.has(item.id));
+      remaining.splice(Math.max(0, firstIndex), 0, merged);
+      return remaining;
+    });
+  }
+
+  function handleKeepAllSimilarCards(group: SimilarKnowledgeMethodCardGroup) {
+    if (retryInProgress) return;
+    setResolvedSimilarGroupIds(current => current.includes(group.id) ? current : [...current, group.id]);
+  }
 
   return (
     <div className="min-h-screen p-6 md:p-8">
@@ -527,6 +611,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                   <button
                     type="button"
                     onClick={() => handleRetrySegment(run.segment.id)}
+                    disabled={retryInProgress}
                     className="shrink-0 rounded-[8px] border border-[#D08A8A] bg-white px-3 py-1.5 text-[11.5px] font-bold text-[#A32D2D]"
                   >
                     重试第{index + 1}段
@@ -542,6 +627,65 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         </section>
       )}
 
+      {exactDuplicateCount > 0 && items.length > 0 && !saved && (
+        <div className="mb-4 rounded-[10px] border border-[#DDE8C5] bg-[#F7FBEF] px-4 py-3 text-[12.5px] text-[#4E6C25]">
+          {`已自动合并${exactDuplicateCount}张完全重复方法卡，来源章节已保留。`}
+        </div>
+      )}
+
+      {unresolvedSimilarGroups.length > 0 && items.length > 0 && !saved && (
+        <section className="mb-4 rounded-[12px] border border-[#E7D8A2] bg-[#FFFDF6] p-4">
+          <h2 className="text-[14px] font-bold text-[#4D3F12]">疑似重复项确认</h2>
+          <p className="mt-1 text-[12px] text-[#806F37]">这些方法卡的核心方法和使用场景高度相似。请确认后再入库，系统不会仅凭标题替你删除。</p>
+          <div className="mt-3 space-y-3">
+            {unresolvedSimilarGroups.map((group, groupIndex) => {
+              const groupCards = cardsForSimilarGroup(group);
+              return (
+                <article key={group.id} className="rounded-[10px] border border-[#E9DFC0] bg-white p-3">
+                  <h3 className="text-[12.5px] font-bold text-[#554819]">疑似重复组{groupIndex + 1}</h3>
+                  <div className="mt-2 grid gap-2 md:grid-cols-2">
+                    {groupCards.map(card => (
+                      <div key={card.id} className="rounded-[8px] bg-[#FAFAF8] p-3">
+                        <strong className="text-[12.5px] text-[#333]">{card.title}</strong>
+                        <p className="mt-1 text-[11.5px] leading-5 text-[#666]">{card.summary}</p>
+                        {card.coreMethod && <p className="mt-1 text-[11.5px] text-[#777]">核心方法：{card.coreMethod}</p>}
+                        {sourceSegmentsText(card.sourceSegments) && <p className="mt-1 text-[11px] text-[#73943D]">{sourceSegmentsText(card.sourceSegments)}</p>}
+                        <button
+                          type="button"
+                          onClick={() => handleKeepSimilarCard(group, card.id)}
+                          disabled={retryInProgress}
+                          className="mt-2 rounded-[7px] border border-[#D8D5C9] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#555] disabled:opacity-40"
+                        >
+                          只保留「{card.title}」
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleMergeSimilarGroup(group)}
+                      disabled={retryInProgress}
+                      className="rounded-[8px] bg-[#1C1C1B] px-3 py-1.5 text-[11.5px] font-bold text-white disabled:opacity-40"
+                    >
+                      合并这组
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleKeepAllSimilarCards(group)}
+                      disabled={retryInProgress}
+                      className="rounded-[8px] border border-[#D8D5C9] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#555] disabled:opacity-40"
+                    >
+                      全部保留
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {items.length > 0 && !saved && (
         <>
           <div className="mb-4 flex items-center justify-between">
@@ -550,9 +694,9 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
               <span className="ml-2 text-[13px] text-[#888]">共 {items.length} 条，已选 {selectedCount} 条</span>
             </div>
             <div className="flex gap-2">
-              <button onClick={resetIntake}
-                className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#666]">重新输入</button>
-              <button onClick={handleSave} disabled={selectedCount === 0}
+              <button onClick={resetIntake} disabled={retryInProgress}
+                className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#666] disabled:opacity-40">重新输入</button>
+              <button onClick={handleSave} disabled={selectedCount === 0 || segmentWorkflowBusy || unresolvedSimilarGroups.length > 0}
                 className="rounded-[10px] px-4 py-2 text-[12.5px] font-bold disabled:opacity-40"
                 style={{ background: "#1C1C1B", color: "#fff" }}>
                 {isIPMode ? "写入当前IP知识库" : "写入通用知识库"}（{selectedCount} 条）
@@ -567,16 +711,17 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                 style={{ borderColor: item.selected ? "#639922" : "#E5E4DE" }}>
                 <div className="mb-3 flex items-start gap-3">
                   <button onClick={() => setItems(prev => prev.map((it,j) => j===i ? {...it,selected:!it.selected} : it))}
-                    className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border-2 transition-all"
+                    disabled={retryInProgress}
+                    className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border-2 transition-all disabled:opacity-40"
                     style={{ borderColor: item.selected ? "#639922" : "#CCC", background: item.selected ? "#639922" : "white" }}>
                     {item.selected && <span className="text-[10px] font-bold text-white">✓</span>}
                   </button>
                   <div className="min-w-0 flex-1">
                     <div className="mb-1.5 flex flex-wrap items-center gap-2">
                       <span className="text-[14px] font-bold text-[#1C1C1B]">{item.title}</span>
-                      {item.sourceSegmentTitle && item.sourceSegmentIndex && (
+                      {sourceSegmentsText(item.sourceSegments) && (
                         <span className="rounded-full bg-[#EEF4E2] px-2 py-0.5 text-[10.5px] font-semibold text-[#587B25]">
-                          来源：第{item.sourceSegmentIndex}段·{item.sourceSegmentTitle}
+                          {sourceSegmentsText(item.sourceSegments)}
                         </span>
                       )}
                       <span className="rounded-full px-2 py-0.5 text-[10.5px] font-semibold" style={CONF_STYLE[item.confidence] ?? CONF_STYLE["低"]}>{item.confidence}置信度</span>
@@ -584,7 +729,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                     </div>
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
                       <span className="text-[11.5px] text-[#888]">分类：</span>
-                      <select value={effectiveCategory}
+                      <select value={effectiveCategory} disabled={retryInProgress}
                         onChange={e => setItems(prev => prev.map((it,j) => j===i ? {
                           ...it,
                           categoryOverride: e.target.value,
@@ -602,6 +747,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                         <span className="text-[11.5px] text-[#888]">所属IP：</span>
                         <select
                           value={item.ipId ?? ""}
+                          disabled={retryInProgress}
                           onChange={e => setItems(prev => prev.map((it,j) => j===i ? {
                             ...it,
                             ipId: e.target.value || null,
@@ -637,9 +783,9 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             })}
           </div>
           <div className="mt-4 flex justify-end gap-2">
-            <button onClick={resetIntake}
-              className="rounded-[10px] bg-[#F2F1ED] px-5 py-2.5 text-[13px] font-semibold text-[#666]">重新输入</button>
-            <button onClick={handleSave} disabled={selectedCount === 0}
+            <button onClick={resetIntake} disabled={retryInProgress}
+              className="rounded-[10px] bg-[#F2F1ED] px-5 py-2.5 text-[13px] font-semibold text-[#666] disabled:opacity-40">重新输入</button>
+            <button onClick={handleSave} disabled={selectedCount === 0 || segmentWorkflowBusy || unresolvedSimilarGroups.length > 0}
               className="rounded-[10px] px-5 py-2.5 text-[13px] font-bold disabled:opacity-40"
               style={{ background: "#1C1C1B", color: "#fff" }}>
               {isIPMode ? "写入当前IP知识库" : "写入通用知识库"}（{selectedCount} 条）
