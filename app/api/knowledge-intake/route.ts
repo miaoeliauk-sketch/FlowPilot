@@ -19,7 +19,9 @@ import {
   GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS,
   GLOBAL_KNOWLEDGE_INTAKE_MAX_ITEMS,
   GLOBAL_KNOWLEDGE_INTAKE_MAX_TOKENS,
+  GLOBAL_KNOWLEDGE_INTAKE_TOLERANCE_MAX_CHARS,
 } from "@/lib/knowledge-intake-limits";
+import { segmentKnowledgeIntakeContent } from "@/lib/knowledge-intake-segmentation";
 
 interface AvailableIP {
   id: string;
@@ -401,10 +403,25 @@ export async function POST(req: NextRequest) {
   if (!content) return NextResponse.json({ error: "请提供原始资料" }, { status: 400 });
   const scope = body.scope === "ip" ? "ip" : "global";
   if (scope === "global" && content.length > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS) {
-    return NextResponse.json(
-      { error: buildGlobalKnowledgeIntakeLengthMessage(content.length) },
-      { status: 413 },
-    );
+    if (content.length > GLOBAL_KNOWLEDGE_INTAKE_TOLERANCE_MAX_CHARS) {
+      return NextResponse.json(
+        { error: buildGlobalKnowledgeIntakeLengthMessage(content.length) },
+        { status: 413 },
+      );
+    }
+    const segmentation = segmentKnowledgeIntakeContent(content);
+    const usesDirectTolerance = segmentation.status === "manual_required" &&
+      segmentation.reason === "no_reliable_headings";
+    if (!usesDirectTolerance) {
+      return NextResponse.json(
+        {
+          error: segmentation.status === "manual_required"
+            ? segmentation.message
+            : "已识别到可靠的章节结构，请先使用自动分段后再提炼",
+        },
+        { status: 413 },
+      );
+    }
   }
   if (scope === "ip" && content.length > 20_000) {
     return NextResponse.json(

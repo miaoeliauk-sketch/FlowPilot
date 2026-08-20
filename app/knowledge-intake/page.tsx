@@ -9,7 +9,9 @@ import { IP_CATEGORIES, isIPKnowledgeCategory } from "@/lib/knowledge-categories
 import { getIPDisplayLabel } from "@/lib/ip-display";
 import {
   buildGlobalKnowledgeIntakeLengthMessage,
+  buildGlobalKnowledgeIntakeToleranceMessage,
   GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS,
+  GLOBAL_KNOWLEDGE_INTAKE_TOLERANCE_MAX_CHARS,
 } from "@/lib/knowledge-intake-limits";
 import {
   segmentKnowledgeIntakeContent,
@@ -127,13 +129,23 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [showSegmentPreview, setShowSegmentPreview] = useState(false);
   const [segmentRuns, setSegmentRuns] = useState<SegmentRun[]>([]);
   const [segmentProgress, setSegmentProgress] = useState<{ current: number; total: number; title: string } | null>(null);
-  const globalContentTooLong = !isIPMode && rawContent.trim().length > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
+  const globalContentLength = rawContent.trim().length;
+  const globalContentAboveRecommended = !isIPMode && globalContentLength > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
   const globalSegmentation = useMemo(
-    () => globalContentTooLong ? segmentKnowledgeIntakeContent(rawContent) : null,
-    [globalContentTooLong, rawContent],
+    () => globalContentAboveRecommended ? segmentKnowledgeIntakeContent(rawContent) : null,
+    [globalContentAboveRecommended, rawContent],
   );
-  const globalLengthWarning = globalContentTooLong
-    ? buildGlobalKnowledgeIntakeLengthMessage(rawContent.trim().length)
+  const globalUsesDirectTolerance = globalContentAboveRecommended &&
+    globalContentLength <= GLOBAL_KNOWLEDGE_INTAKE_TOLERANCE_MAX_CHARS &&
+    globalSegmentation?.status === "manual_required" &&
+    globalSegmentation.reason === "no_reliable_headings";
+  const globalContentTooLong = globalContentAboveRecommended && !globalUsesDirectTolerance;
+  const globalLengthWarning = globalContentAboveRecommended
+    ? globalUsesDirectTolerance
+      ? buildGlobalKnowledgeIntakeToleranceMessage(globalContentLength)
+      : globalSegmentation?.status === "manual_required" && globalSegmentation.reason === "section_too_long"
+        ? globalSegmentation.message
+      : buildGlobalKnowledgeIntakeLengthMessage(globalContentLength)
     : "";
 
   useEffect(() => {

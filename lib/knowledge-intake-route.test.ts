@@ -465,17 +465,69 @@ test("Excel序列化内容通过真实路由进入AI提示词", async () => {
   }
 });
 
-test("普通智能入库拒绝超过4000字的内容且不调用AI", async () => {
+test("普通智能入库允许10%容差并在超过4400字时拒绝且不调用AI", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify({
+      items: [{
+        ...BASE_ITEM,
+        category: "选题方法库",
+        ipId: null,
+        ipMatchStatus: "not_applicable",
+      }],
+    }));
+  };
+
+  try {
+    for (const length of [4_000, 4_001, 4_400]) {
+      const response = await POST(intakeRequest({
+        rawContent: "长".repeat(length),
+        sourceType: "text",
+        scope: "global",
+        availableIPs: [],
+      }));
+      assert.equal(response.status, 200, `${length}字应该允许直接提炼`);
+    }
+
+    const response = await POST(intakeRequest({
+      rawContent: "长".repeat(4_401),
+      sourceType: "text",
+      scope: "global",
+      availableIPs: [],
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 413);
+    assert.equal(calls, 3);
+    assert.equal(
+      body.error,
+      "当前内容4401字，单次智能提炼建议不超过4000字，请按章节分成约2段导入",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("普通智能入库不允许有标题但单节过长的内容借容差通道直提", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
     calls += 1;
     return deepSeekResponse(JSON.stringify({ items: [BASE_ITEM] }));
   };
+  const content = [
+    "# 第一章 选题",
+    "甲".repeat(4_050),
+    "## 第二章 开头",
+    "乙".repeat(100),
+  ].join("\n");
 
   try {
+    assert.ok(content.length <= 4_400);
     const response = await POST(intakeRequest({
-      rawContent: "长".repeat(10_372),
+      rawContent: content,
       sourceType: "text",
       scope: "global",
       availableIPs: [],
@@ -486,7 +538,7 @@ test("普通智能入库拒绝超过4000字的内容且不调用AI", async () =>
     assert.equal(calls, 0);
     assert.equal(
       body.error,
-      "当前内容10372字，单次智能提炼建议不超过4000字，请按章节分成约3段导入",
+      "章节「第一章 选题」超过4000字且没有可用的下一层边界，请先手动拆分该章节",
     );
   } finally {
     globalThis.fetch = originalFetch;

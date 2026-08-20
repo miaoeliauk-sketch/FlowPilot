@@ -119,6 +119,83 @@ test("普通智能入库在提交前提示长内容需要分段并阻止提炼",
   );
 });
 
+test("无标题内容在4000至4400字边界内允许直接提炼，超过后阻止", async () => {
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+
+  const view = render(
+    <IPProvider>
+      <KnowledgeIntakePage />
+    </IPProvider>,
+  );
+  const input = view.getByPlaceholderText(/粘贴逐字稿/);
+  const analyzeButton = view.getByRole("button", { name: "AI提炼方法" }) as HTMLButtonElement;
+
+  fireEvent.change(input, { target: { value: "长".repeat(4_000) } });
+  assert.equal(analyzeButton.disabled, false);
+  assert.equal(view.queryByText(/略超4000字推荐长度/), null);
+
+  fireEvent.change(input, { target: { value: "长".repeat(4_001) } });
+  assert.equal(analyzeButton.disabled, false);
+  assert.ok(view.getByText("当前内容4001字，略超4000字推荐长度。本次仍可直接提炼，最多生成4张方法卡；如需更完整覆盖，建议分段导入。"));
+
+  fireEvent.change(input, { target: { value: "长".repeat(4_400) } });
+  assert.equal(analyzeButton.disabled, false);
+  assert.ok(view.getByText("当前内容4400字，略超4000字推荐长度。本次仍可直接提炼，最多生成4张方法卡；如需更完整覆盖，建议分段导入。"));
+
+  fireEvent.change(input, { target: { value: "长".repeat(4_401) } });
+  assert.equal(analyzeButton.disabled, true);
+  assert.ok(view.getByText("当前内容4401字，单次智能提炼建议不超过4000字，请按章节分成约2段导入"));
+});
+
+test("处于容差范围但有可靠标题结构时仍优先自动分段", async () => {
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const view = render(
+    <IPProvider>
+      <KnowledgeIntakePage />
+    </IPProvider>,
+  );
+  const content = [
+    "# 第一章 选题",
+    "甲".repeat(2_050),
+    "## 第二章 开头",
+    "乙".repeat(2_050),
+  ].join("\n");
+
+  fireEvent.change(view.getByPlaceholderText(/粘贴逐字稿/), { target: { value: content } });
+
+  assert.equal((view.getByRole("button", { name: "AI提炼方法" }) as HTMLButtonElement).disabled, true);
+  assert.ok(view.getByRole("button", { name: "预览自动分段" }));
+  assert.equal(view.queryByText(/本次仍可直接提炼/), null);
+});
+
+test("有标题但单节超过4000字时不能借容差通道直接提炼", async () => {
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const view = render(
+    <IPProvider>
+      <KnowledgeIntakePage />
+    </IPProvider>,
+  );
+  const content = [
+    "# 第一章 选题",
+    "甲".repeat(4_050),
+    "## 第二章 开头",
+    "乙".repeat(100),
+  ].join("\n");
+
+  assert.ok(content.length <= 4_400);
+  fireEvent.change(view.getByPlaceholderText(/粘贴逐字稿/), { target: { value: content } });
+
+  assert.equal((view.getByRole("button", { name: "AI提炼方法" }) as HTMLButtonElement).disabled, true);
+  assert.ok(view.getByText(/章节「第一章 选题」超过4000字且没有可用的下一层边界/));
+  assert.equal(view.queryByText(/本次仍可直接提炼/), null);
+});
+
 test("有可靠标题结构的长文可以先预览自动分段结果", async () => {
   const { render } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
