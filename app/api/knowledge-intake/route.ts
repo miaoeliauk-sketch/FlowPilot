@@ -14,6 +14,12 @@ import {
   parseIPUnderstandingResponse,
   type IPUnderstandingCategory,
 } from "@/lib/knowledge-intake-response";
+import {
+  buildGlobalKnowledgeIntakeLengthMessage,
+  GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS,
+  GLOBAL_KNOWLEDGE_INTAKE_MAX_ITEMS,
+  GLOBAL_KNOWLEDGE_INTAKE_MAX_TOKENS,
+} from "@/lib/knowledge-intake-limits";
 
 interface AvailableIP {
   id: string;
@@ -79,13 +85,13 @@ const GLOBAL_PROMPT = (
 
 原始资料：
 """
-${content.slice(0, 4000)}
+${content}
 """
 
 可选IP列表：${ips.length > 0 ? JSON.stringify(ips) : "暂无"}
 当前操盘IP ID：${activeIPId ?? "未选择"}
 
-请从这段资料中提取 1-8 条「短视频方法卡」。
+请从这段资料中提取 1-${GLOBAL_KNOWLEDGE_INTAKE_MAX_ITEMS} 条「短视频方法卡」。
 
 提取规则：
 1. 不要只看文档整体主题，要逐章节、逐方法判断每个方法的真正用途。
@@ -205,11 +211,15 @@ function parseInitialResponse(content: string): IntakeResponse {
       fieldCount: Object.keys(parsedRecord).length,
     });
   }
-  if (parsedRecord.items.length > 8) {
-    throw intakeValidationError("ITEM_COUNT_EXCEEDED", "AI返回的知识条目超过8条", {
-      itemCount: parsedRecord.items.length,
-      fieldCount: Object.keys(parsedRecord).length,
-    });
+  if (parsedRecord.items.length > GLOBAL_KNOWLEDGE_INTAKE_MAX_ITEMS) {
+    throw intakeValidationError(
+      "ITEM_COUNT_EXCEEDED",
+      `AI返回的知识条目超过${GLOBAL_KNOWLEDGE_INTAKE_MAX_ITEMS}条`,
+      {
+        itemCount: parsedRecord.items.length,
+        fieldCount: Object.keys(parsedRecord).length,
+      },
+    );
   }
   for (const [itemIndex, item] of parsedRecord.items.entries()) {
     if (!item || typeof item !== "object") {
@@ -390,6 +400,12 @@ export async function POST(req: NextRequest) {
   const content = (body.rawContent ?? "").trim();
   if (!content) return NextResponse.json({ error: "请提供原始资料" }, { status: 400 });
   const scope = body.scope === "ip" ? "ip" : "global";
+  if (scope === "global" && content.length > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS) {
+    return NextResponse.json(
+      { error: buildGlobalKnowledgeIntakeLengthMessage(content.length) },
+      { status: 413 },
+    );
+  }
   if (scope === "ip" && content.length > 20_000) {
     return NextResponse.json(
       { error: "单次内容理解最多支持2万字，请分段输入，避免AI只理解到部分内容" },
@@ -478,7 +494,7 @@ export async function POST(req: NextRequest) {
       ),
       parse: parseInitialResponse,
       apiKey,
-      maxTokens: 2000,
+      maxTokens: GLOBAL_KNOWLEDGE_INTAKE_MAX_TOKENS,
       temperature: 0.3,
     });
     return NextResponse.json({
@@ -518,7 +534,7 @@ export async function POST(req: NextRequest) {
       inputChars: content.length,
       availableIPCount: availableIPs.length,
       activeIPSelected: activeIPId !== null,
-      maxTokens: 2000,
+      maxTokens: scope === "ip" ? 1800 : GLOBAL_KNOWLEDGE_INTAKE_MAX_TOKENS,
       failureCode,
       attempts: structuredError?.attemptDiagnostics ?? [],
     }));

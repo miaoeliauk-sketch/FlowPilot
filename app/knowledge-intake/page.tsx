@@ -7,6 +7,10 @@ import { apiFetch } from "@/lib/api-fetch";
 import { parseXlsxFile } from "@/lib/xlsx-parser";
 import { IP_CATEGORIES, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
 import { getIPDisplayLabel } from "@/lib/ip-display";
+import {
+  buildGlobalKnowledgeIntakeLengthMessage,
+  GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS,
+} from "@/lib/knowledge-intake-limits";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -107,6 +111,10 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [saveCount, setSaveCount] = useState(0);
+  const globalContentTooLong = !isIPMode && rawContent.trim().length > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
+  const globalLengthWarning = globalContentTooLong
+    ? buildGlobalKnowledgeIntakeLengthMessage(rawContent.trim().length)
+    : "";
 
   async function handleInputFile(file: File) {
     setError("");
@@ -144,6 +152,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   async function handleAnalyze() {
     if (!rawContent.trim()) { setError("请先粘贴原始资料"); return; }
     if (isIPMode && !activeIP) { setError("请先选择当前IP"); return; }
+    if (globalContentTooLong) { setError(globalLengthWarning); return; }
     setLoading(true); setError(""); setItems([]); setSaved(false);
     try {
       const res = await apiFetch("/api/knowledge-intake", {
@@ -311,12 +320,17 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             <span className="text-[12px] text-[#BBB]">{rawContent.length} 字{fileName ? " · " + fileName : ""}</span>
             <button
               onClick={handleAnalyze}
-              disabled={!rawContent.trim() || fileProcessing || loading || (isIPMode && !activeIP)}
+              disabled={!rawContent.trim() || fileProcessing || loading || globalContentTooLong || (isIPMode && !activeIP)}
               className="rounded-[12px] px-6 py-2.5 text-[13px] font-bold disabled:opacity-40"
               style={{ background: "#C8F04A", color: "#1A1A1A" }}>
               {fileProcessing ? "正在读取Excel…" : isIPMode ? "AI理解内容" : "AI提炼方法"}
             </button>
           </div>
+          {globalLengthWarning && (
+            <div className="mt-3 rounded-[8px] bg-[#FBF3D6] px-3 py-2 text-[12.5px] text-[#7A5C00]">
+              {globalLengthWarning}
+            </div>
+          )}
           {error && <div className="mt-3 flex items-center justify-between rounded-[8px] bg-[#FCEBEB] px-3 py-2"><p className="text-[12.5px] text-[#A32D2D]">{error}</p><button onClick={() => setError("")} className="ml-2 text-[12px] text-[#A32D2D] font-bold">✕</button></div>}
         </div>
       )}

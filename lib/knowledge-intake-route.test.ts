@@ -465,6 +465,96 @@ test("Excel序列化内容通过真实路由进入AI提示词", async () => {
   }
 });
 
+test("普通智能入库拒绝超过4000字的内容且不调用AI", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify({ items: [BASE_ITEM] }));
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: "长".repeat(10_372),
+      sourceType: "text",
+      scope: "global",
+      availableIPs: [],
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 413);
+    assert.equal(calls, 0);
+    assert.equal(
+      body.error,
+      "当前内容10372字，单次智能提炼建议不超过4000字，请按章节分成约3段导入",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("普通智能入库每次最多提取4张方法卡并提供4000个输出Token", async () => {
+  const originalFetch = globalThis.fetch;
+  let outboundBody = "";
+  globalThis.fetch = async (_input, init) => {
+    outboundBody = String(init?.body ?? "");
+    return deepSeekResponse(JSON.stringify({ items: [BASE_ITEM] }));
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: "一份需要拆解成少量高质量方法卡的资料。",
+      sourceType: "text",
+      scope: "global",
+      availableIPs: [],
+    }));
+    const outboundRequest = JSON.parse(outboundBody) as {
+      max_tokens: number;
+      messages: Array<{ role: string; content: string }>;
+    };
+    const userPrompt = outboundRequest.messages.find(message => message.role === "user")?.content ?? "";
+
+    assert.equal(response.status, 200);
+    assert.equal(outboundRequest.max_tokens, 4000);
+    assert.match(userPrompt, /提取 1-4 条「短视频方法卡」/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("普通智能入库会拒绝AI返回的第5张方法卡", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return deepSeekResponse(JSON.stringify({
+      items: Array.from({ length: 5 }, (_, index) => ({
+        ...BASE_ITEM,
+        title: `方法卡${index + 1}`,
+        category: "选题方法库",
+        ipId: null,
+      })),
+    }));
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: "一份需要限制提取数量的知识资料。",
+      sourceType: "text",
+      scope: "global",
+      availableIPs: [],
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 500);
+    assert.equal(calls, 2);
+    assert.equal(body.apiMeta.failureCode, "ITEM_COUNT_EXCEEDED");
+    assert.equal(body.items, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("IP内容理解会拒绝结构化关键词并用通用指令重试一次", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
