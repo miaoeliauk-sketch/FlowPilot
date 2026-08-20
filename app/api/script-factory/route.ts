@@ -48,6 +48,7 @@ import {
   type ScriptFactoryPromptTraceMaterials,
   type ScriptFactoryPromptTraceStage,
 } from "@/lib/script-factory-prompt-trace";
+import { SPOKEN_PUNCTUATION_GENERATION_RULES } from "@/lib/script-spoken-punctuation-policy";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -215,6 +216,7 @@ const CONTENT_SYSTEM = `你是一位资深内容主创，专门为下方给出�
 结尾最多使用一个强调式口头禅或反问，不得连续堆叠功能相同的表达。
 使用案例或类比时，必须确保它真正支持核心论点。类比双方必须具有相同的因果机制，并能明确说明哪一项对应哪一项；如果做不到，宁可不用类比。
 IP上下文和参考资料用于确定人设、素材身份、观点边界、推理方式、语气和内容方向。最终JSON结构只以本次用户提示中明确给出的结构为准。
+${SPOKEN_PUNCTUATION_GENERATION_RULES}
 只输出一个合法JSON对象，不要使用Markdown代码块，不要在JSON前后添加解释文字。`;
 
 const CONTENT_PROMPT = (

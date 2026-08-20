@@ -33,6 +33,10 @@ test("水木然增量修正规则追加在原规则之后且只允许IP专属模
   assert.doesNotMatch(block, /胖东来不少门店实行周二闭店/);
   assert.doesNotMatch(block, /胖东来看似退出了规模竞争/);
   assert.match(block, /最终只能输出：[\s\S]*标题[\s\S]*完整口播文案[\s\S]*待核实信息/);
+  assert.match(block, /【水木然口播标点补充】/);
+  assert.match(block, /《道德经》《易经》等正式经典名称保留书名号/);
+  assert.match(block, /老师原话必须逐字对应水木然IP原始内容/);
+  assert.match(block, /普通概念和判断不能用引号制造强调/);
   assert.match(block, /任何一项不符合，都必须修改后再输出/);
 
   assert.equal(shouldUseShuimuranDirector({

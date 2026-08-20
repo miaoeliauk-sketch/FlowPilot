@@ -289,6 +289,10 @@ test("固定脚本生成不要求观点覆盖度，也不启用IP专属编导规
     }));
 
     assert.equal(response.status, 200);
+    assert.match(prompts[0], /正式书籍、经典和影视作品名称保留书名号/);
+    assert.match(prompts[0], /仅用于强调的引号全部删除/);
+    assert.match(prompts[0], /老师原话必须能追溯到本次提供的原始材料/);
+    assert.match(prompts[0], /不能因为加了引号就判定为老师原话/);
     assert.doesNotMatch(prompts[0], /水木然专属内容编导规则/);
     assert.doesNotMatch(prompts[0], /本次已经确认的观点依据/);
     assert.doesNotMatch(prompts[0], /IP原始内容上下文/);
@@ -362,6 +366,8 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
     assert.equal(result.outline.length, 1);
     assert.deepEqual(result.pendingVerification, []);
     assert.equal(result.storyboard.length, 0);
+    assert.match(prompts[0], /正式书籍、经典和影视作品名称保留书名号/);
+    assert.match(prompts[0], /人物对话、经典原文和模拟对话可以保留引号/);
     assert.match(prompts[0], /水木然IP专属脚本生成规则｜老师确认版/);
     assert.match(prompts[0], /不超过24小时，可以直接追热点/);
     assert.doesNotMatch(prompts[0], /主动压缩20%至30%/);
