@@ -8,7 +8,6 @@ import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import {
   callDeepSeek,
   DeepSeekResponseMeta,
-  parseDeepSeekJSON,
   DEEPSEEK_MODEL as MODEL,
 } from "@/lib/deepseek";
 import {
@@ -17,6 +16,7 @@ import {
 } from "@/lib/structured-deepseek";
 import {
   parseScriptContentResponse,
+  parseScriptExecutionResponse,
   parseScriptStoryboardResponse,
   ScriptFactoryResponseError,
 } from "@/lib/script-factory-response";
@@ -75,13 +75,20 @@ function normalizedResponseText(text: string): string {
 }
 
 function unwrapStageError(error: unknown): unknown {
-  return error instanceof ScriptFactoryStageError ? error.cause : error;
+  if (error instanceof ScriptFactoryStageError) return error.cause;
+  if (error instanceof StructuredDeepSeekError) return error.cause;
+  return error;
 }
 
-function getErrorCode(error: unknown): string {
+function getErrorCode(error: unknown, preserveStructuredFailureCode = false): string {
   const cause = unwrapStageError(error);
   if (cause instanceof ScriptFactoryResponseError) return cause.code;
+  if (error instanceof StructuredDeepSeekError && error.stage === "timeout") return "timeout";
   if (error instanceof ScriptFactoryStageError && error.timedOut) return "timeout";
+  if (preserveStructuredFailureCode && error instanceof StructuredDeepSeekError) {
+    const lastFailureCode = error.attemptDiagnostics.at(-1)?.failureCode;
+    if (lastFailureCode === "OUTPUT_TRUNCATED") return lastFailureCode;
+  }
   return "request_failed";
 }
 
@@ -1179,66 +1186,56 @@ ${rawIPBlock}
     if (!isShuimuranDedicatedGeneration && format.supportsStoryboard && (needsStoryboard || needsShootingTips)) {
       failedStage = "storyboard";
       try {
-        const parsedStoryboard = await runScriptFactoryStage(
-          "storyboard",
-          async ({ attempt, signal, retryReason }) => {
-            responseMeta = null;
-            let storyboardRaw: string | null = null;
-            let failureCode: string | null = null;
-            const storyboardUserPrompt = STORYBOARD_PROMPT(
-              ipBlock,
-              topic,
-              outlineText,
-              durationLabel,
-            );
+        const storyboardUserPrompt = STORYBOARD_PROMPT(
+          ipBlock,
+          topic,
+          outlineText,
+          durationLabel,
+        );
+        const storyboardResult = await callStructuredDeepSeek<
+          ReturnType<typeof parseScriptStoryboardResponse>
+        >({
+          systemPrompt: STORYBOARD_SYSTEM,
+          userPrompt: storyboardUserPrompt,
+          maxTokens: 6000,
+          temperature: 0.3,
+          apiKey,
+          timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
+          maxRetries: SCRIPT_STAGE_MAX_RETRIES,
+          rejectTruncatedOutput: true,
+          preserveParserErrorCode: true,
+          parse: raw => parseScriptStoryboardResponse(
+            raw,
+            { needsStoryboard, needsShootingTips },
+          ),
+          buildParseRetryInstruction: () =>
+            "上次返回的JSON格式不完整或缺少必填字段。请重新输出一个完整、合法的JSON对象，严格包含本次要求的storyboard和shootingSuggestions等字段，不要添加JSON以外的文字。",
+          onAttemptPrompt: async input => {
             await promptTrace.recordCall({
               stage: "storyboard",
-              attempt,
-              systemPrompt: STORYBOARD_SYSTEM,
-              userPrompt: storyboardUserPrompt,
-              retryReason,
+              attempt: input.attempt,
+              systemPrompt: input.systemPrompt,
+              userPrompt: input.userPrompt,
+              retryReason: input.retryReason
+                ? `${input.retryReason.stage}:${input.retryReason.failureCode}`
+                : null,
               materials: emptyTraceMaterials,
             });
-            try {
-              storyboardRaw = await callDeepSeek(
-                STORYBOARD_SYSTEM,
-                storyboardUserPrompt,
-                6000,
-                0.3,
-                apiKey,
-                {
-                  thinking: { type: "disabled" },
-                  responseFormat: { type: "json_object" },
-                  onResponseMeta: meta => { responseMeta = meta; },
-                  signal,
-                },
-              );
-              if (getFinishReason(responseMeta) === "length") {
-                throw new ScriptFactoryResponseError(
-                  "invalid_json",
-                  "AI返回的分镜脚本被截断",
-                );
-              }
-              return parseScriptStoryboardResponse(
-                storyboardRaw,
-                { needsStoryboard, needsShootingTips },
-              );
-            } catch (error) {
-              failureCode = getErrorCode(error);
-              throw error;
-            } finally {
-              await recordTraceResult({
-                stage: "storyboard",
-                attempt,
-                rawResponse: storyboardRaw,
-                parsedBody: null,
-                meta: responseMeta,
-                failureCode,
-              });
-            }
           },
-          SCRIPT_STAGE_RETRY_OPTIONS,
-        );
+          onAttemptResult: async input => {
+            responseMeta = input.responseMeta;
+            await recordTraceResult({
+              stage: "storyboard",
+              attempt: input.attempt,
+              rawResponse: input.rawResponse,
+              parsedBody: null,
+              meta: input.responseMeta,
+              failureCode: input.failureCode,
+            });
+          },
+        });
+        const parsedStoryboard = storyboardResult.data;
+        responseMeta = storyboardResult.responseMeta;
         storyboard = parsedStoryboard.storyboard;
         shootingSuggestions = parsedStoryboard.shootingSuggestions;
         shotPrompts = parsedStoryboard.shotPrompts;
@@ -1247,7 +1244,7 @@ ${rawIPBlock}
         const message = getErrorMessage(error);
         partialFailure = {
           stage: "storyboard",
-          errorCode: getErrorCode(error),
+          errorCode: getErrorCode(error, true),
           message: `核心脚本已生成，但分镜与拍摄建议生成失败：${message}`,
         };
         console.error("[script-factory]", {
@@ -1260,79 +1257,51 @@ ${rawIPBlock}
     } else if (!isShuimuranDedicatedGeneration && !format.supportsStoryboard && needsShootingTips) {
       failedStage = "execution";
       try {
-        shootingSuggestions = await runScriptFactoryStage(
-          "execution",
-          async ({ attempt, signal, retryReason }) => {
-            responseMeta = null;
-            let execRaw: string | null = null;
-            let failureCode: string | null = null;
-            const executionUserPrompt = EXECUTION_PROMPT(ipBlock, topic, outlineText, format);
+        const executionUserPrompt = EXECUTION_PROMPT(ipBlock, topic, outlineText, format);
+        const executionResult = await callStructuredDeepSeek<string[]>({
+          systemPrompt: EXECUTION_SYSTEM,
+          userPrompt: executionUserPrompt,
+          maxTokens: 1200,
+          temperature: 0.3,
+          apiKey,
+          timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
+          maxRetries: SCRIPT_STAGE_MAX_RETRIES,
+          rejectTruncatedOutput: true,
+          preserveParserErrorCode: true,
+          parse: parseScriptExecutionResponse,
+          buildParseRetryInstruction: () =>
+            "上次返回的JSON格式不完整或shootingSuggestions字段缺失。请重新输出一个完整、合法的JSON对象，shootingSuggestions必须是包含有效拍摄建议的非空数组，不要添加JSON以外的文字。",
+          onAttemptPrompt: async input => {
             await promptTrace.recordCall({
               stage: "execution",
-              attempt,
-              systemPrompt: EXECUTION_SYSTEM,
-              userPrompt: executionUserPrompt,
-              retryReason,
+              attempt: input.attempt,
+              systemPrompt: input.systemPrompt,
+              userPrompt: input.userPrompt,
+              retryReason: input.retryReason
+                ? `${input.retryReason.stage}:${input.retryReason.failureCode}`
+                : null,
               materials: emptyTraceMaterials,
             });
-            try {
-              execRaw = await callDeepSeek(
-                EXECUTION_SYSTEM,
-                executionUserPrompt,
-                1200,
-                0.3,
-                apiKey,
-                {
-                  thinking: { type: "disabled" },
-                  responseFormat: { type: "json_object" },
-                  onResponseMeta: meta => { responseMeta = meta; },
-                  signal,
-                },
-              );
-              if (getFinishReason(responseMeta) === "length") {
-                throw new ScriptFactoryResponseError(
-                  "invalid_json",
-                  "AI返回的执行建议被截断",
-                );
-              }
-              const ex = parseDeepSeekJSON(
-                execRaw,
-                { shootingSuggestions: [] as string[] },
-              );
-              const suggestions = Array.isArray(ex.shootingSuggestions)
-                ? ex.shootingSuggestions.filter(
-                    (item): item is string =>
-                      typeof item === "string" && Boolean(item.trim()),
-                  )
-                : [];
-              if (suggestions.length === 0) {
-                throw new ScriptFactoryResponseError(
-                  "incomplete_fields",
-                  "脚本结果字段不完整：shootingSuggestions",
-                );
-              }
-              return suggestions;
-            } catch (error) {
-              failureCode = getErrorCode(error);
-              throw error;
-            } finally {
-              await recordTraceResult({
-                stage: "execution",
-                attempt,
-                rawResponse: execRaw,
-                parsedBody: null,
-                meta: responseMeta,
-                failureCode,
-              });
-            }
           },
-          SCRIPT_STAGE_RETRY_OPTIONS,
-        );
+          onAttemptResult: async input => {
+            responseMeta = input.responseMeta;
+            await recordTraceResult({
+              stage: "execution",
+              attempt: input.attempt,
+              rawResponse: input.rawResponse,
+              parsedBody: null,
+              meta: input.responseMeta,
+              failureCode: input.failureCode,
+            });
+          },
+        });
+        shootingSuggestions = executionResult.data;
+        responseMeta = executionResult.responseMeta;
       } catch (error) {
         const message = getErrorMessage(error);
         partialFailure = {
           stage: "execution",
-          errorCode: getErrorCode(error),
+          errorCode: getErrorCode(error, true),
           message: `核心脚本已生成，但执行建议生成失败：${message}`,
         };
         console.error("[script-factory]", {

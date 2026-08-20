@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 // @ts-expect-error Node 24 executes this TypeScript test directly.
-import { ScriptFactoryResponseError, parseScriptContentResponse, parseScriptStoryboardResponse } from "./script-factory-response.ts";
+import { ScriptFactoryResponseError, parseScriptContentResponse, parseScriptExecutionResponse, parseScriptStoryboardResponse } from "./script-factory-response.ts";
 
 const VALID_CONTENT = {
   titles: [{
@@ -172,4 +172,19 @@ test("parses a complete storyboard response", () => {
   );
   assert.equal(result.storyboard.length, 1);
   assert.equal(result.shootingSuggestions.length, 1);
+});
+
+test("rejects execution advice when shooting suggestions are missing", () => {
+  expectError(
+    () => parseScriptExecutionResponse(JSON.stringify({ shootingSuggestions: [] })),
+    "incomplete_fields",
+  );
+});
+
+test("parses complete execution advice", () => {
+  const result = parseScriptExecutionResponse(JSON.stringify({
+    shootingSuggestions: ["使用固定机位录制。"],
+  }));
+
+  assert.deepEqual(result, ["使用固定机位录制。"]);
 });

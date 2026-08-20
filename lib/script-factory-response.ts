@@ -386,3 +386,15 @@ export function parseScriptStoryboardResponse(
     },
   };
 }
+
+export function parseScriptExecutionResponse(content: unknown): string[] {
+  const object = parseJSONObject(content);
+  const shootingSuggestions = stringArray(object.shootingSuggestions);
+  if (shootingSuggestions.length === 0) {
+    throw new ScriptFactoryResponseError(
+      "incomplete_fields",
+      "脚本结果字段不完整：shootingSuggestions",
+    );
+  }
+  return shootingSuggestions;
+}

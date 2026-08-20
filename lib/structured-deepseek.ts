@@ -14,6 +14,8 @@ export interface StructuredDeepSeekOptions<T> {
   temperature?: number;
   timeoutMs?: number;
   maxRetries?: number;
+  rejectTruncatedOutput?: boolean;
+  preserveParserErrorCode?: boolean;
   onAttemptPrompt?: (prompt: {
     attempt: number;
     systemPrompt: string;
@@ -63,6 +65,7 @@ export interface StructuredDeepSeekAttemptDiagnostic {
 
 interface StructuredParseDiagnosticSource {
   diagnosticCode?: unknown;
+  code?: unknown;
   diagnosticDetails?: unknown;
 }
 
@@ -122,9 +125,9 @@ function responseMetaDiagnostic(meta: DeepSeekResponseMeta) {
 }
 
 function safeFailureCode(value: unknown, fallback: string): string {
-  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)
-    ? value
-    : fallback;
+  if (typeof value !== "string") return fallback;
+  const normalized = value.toUpperCase();
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
 }
 
 function safeDiagnosticNumber(value: unknown): number | undefined {
@@ -135,6 +138,7 @@ function safeDiagnosticNumber(value: unknown): number | undefined {
 
 function parseFailureDiagnostic(
   error: unknown,
+  preserveParserErrorCode: boolean,
 ): Pick<StructuredDeepSeekAttemptDiagnostic,
   "failureCode" | "reasonCode" | "validationCode" | "itemCount" | "itemIndex" | "fieldCount"> {
   const source = error && typeof error === "object"
@@ -145,7 +149,10 @@ function parseFailureDiagnostic(
     : {};
   const diagnostic: Pick<StructuredDeepSeekAttemptDiagnostic,
     "failureCode" | "reasonCode" | "validationCode" | "itemCount" | "itemIndex" | "fieldCount"> = {
-    failureCode: safeFailureCode(source.diagnosticCode, "PARSE_FAILED"),
+    failureCode: safeFailureCode(
+      source.diagnosticCode ?? (preserveParserErrorCode ? source.code : undefined),
+      "PARSE_FAILED",
+    ),
   };
   const reasonCode = safeFailureCode(details.reasonCode, "");
   if (reasonCode) diagnostic.reasonCode = reasonCode;
@@ -281,6 +288,9 @@ export async function callStructuredDeepSeek<T>(
     }
 
     try {
+      if (options.rejectTruncatedOutput && responseMeta.finishReason === "length") {
+        throw new Error("AI结构化输出因达到长度上限而截断");
+      }
       const data = options.parse(content);
       await notifyAttemptResult({
         attempt,
@@ -305,7 +315,10 @@ export async function callStructuredDeepSeek<T>(
     } catch (error) {
       lastError = error;
       lastStage = "parse";
-      const parseDiagnostic = parseFailureDiagnostic(error);
+      const parseDiagnostic = parseFailureDiagnostic(
+        error,
+        options.preserveParserErrorCode === true,
+      );
       if (responseMeta.finishReason === "length") {
         parseDiagnostic.failureCode = "OUTPUT_TRUNCATED";
         parseDiagnostic.reasonCode = "OUTPUT_TRUNCATED";

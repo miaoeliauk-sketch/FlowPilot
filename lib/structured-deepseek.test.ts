@@ -222,6 +222,36 @@ test("accepts a complete parseable response even when finish reason is length", 
   }
 });
 
+test("默认结构化调用不读取解析器普通code字段，避免改变其他模块行为", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => deepSeekResponse('{"status":"invalid"}');
+
+  try {
+    await assert.rejects(
+      () => callStructuredDeepSeek({
+        systemPrompt: "system",
+        userPrompt: "user",
+        apiKey: "test-key",
+        maxTokens: 100,
+        timeoutMs: 100,
+        maxRetries: 0,
+        parse: () => {
+          throw Object.assign(new Error("invalid response"), {
+            code: "invalid_json",
+          });
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof StructuredDeepSeekError);
+        assert.equal(error.attemptDiagnostics[0]?.failureCode, "PARSE_FAILED");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("reports stable empty-content diagnostics when both attempts have no final answer", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
