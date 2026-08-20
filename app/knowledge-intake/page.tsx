@@ -11,7 +11,10 @@ import {
   buildGlobalKnowledgeIntakeLengthMessage,
   GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS,
 } from "@/lib/knowledge-intake-limits";
-import { segmentKnowledgeIntakeContent } from "@/lib/knowledge-intake-segmentation";
+import {
+  segmentKnowledgeIntakeContent,
+  type KnowledgeIntakeSegment,
+} from "@/lib/knowledge-intake-segmentation";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -43,6 +46,15 @@ interface IntakeItem {
   keywords?: string[];
   selected: boolean;
   categoryOverride?: string;
+  sourceSegmentId?: string;
+  sourceSegmentTitle?: string;
+  sourceSegmentIndex?: number;
+}
+
+interface SegmentRun {
+  segment: KnowledgeIntakeSegment;
+  status: "pending" | "processing" | "completed" | "failed";
+  error?: string;
 }
 
 const CONF_STYLE: Record<string,{bg:string;color:string}> = {
@@ -113,6 +125,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [saved, setSaved] = useState(false);
   const [saveCount, setSaveCount] = useState(0);
   const [showSegmentPreview, setShowSegmentPreview] = useState(false);
+  const [segmentRuns, setSegmentRuns] = useState<SegmentRun[]>([]);
+  const [segmentProgress, setSegmentProgress] = useState<{ current: number; total: number; title: string } | null>(null);
   const globalContentTooLong = !isIPMode && rawContent.trim().length > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
   const globalSegmentation = useMemo(
     () => globalContentTooLong ? segmentKnowledgeIntakeContent(rawContent) : null,
@@ -124,7 +138,55 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
   useEffect(() => {
     setShowSegmentPreview(false);
+    setSegmentRuns([]);
+    setSegmentProgress(null);
   }, [rawContent, isIPMode]);
+
+  function mapResponseItems(
+    responseItems: IntakeItem[],
+    sourceSegment?: { id: string; title: string; index: number },
+  ): IntakeItem[] {
+    return responseItems.map((it, index) => ({
+      ...it,
+      tags: isIPMode ? it.keywords ?? [] : it.tags ?? [],
+      id: `item-${sourceSegment?.id ?? "single"}-${index}-${Date.now()}`,
+      selected: it.ingestRecommend === "建议入库" &&
+        (!isIPKnowledgeCategory(it.category) || Boolean(it.ipId)),
+      sourceSegmentId: sourceSegment?.id,
+      sourceSegmentTitle: sourceSegment?.title,
+      sourceSegmentIndex: sourceSegment?.index,
+    }));
+  }
+
+  async function requestIntake(
+    content: string,
+    sourceSegment?: { id: string; title: string; index: number },
+  ): Promise<IntakeItem[]> {
+    const res = await apiFetch("/api/knowledge-intake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rawContent: content,
+        sourceType,
+        sourceName: fileName,
+        scope: isIPMode ? "ip" : "global",
+        requestedCategory: isIPMode ? requestedCategory : undefined,
+        activeIPId: activeIP?.id ?? null,
+        availableIPs: ips.map(ip => ({
+          id: ip.id,
+          name: ip.name,
+          positioning: ip.positioning,
+          contentDirection: ip.contentDirection,
+        })),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "分析失败");
+    const responseItems = data.mode === "ip"
+      ? data.item ? [data.item] : []
+      : Array.isArray(data.items) ? data.items : [];
+    return mapResponseItems(responseItems, sourceSegment);
+  }
 
   async function handleInputFile(file: File) {
     setError("");
@@ -165,42 +227,84 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     if (globalContentTooLong) { setError(globalLengthWarning); return; }
     setLoading(true); setError(""); setItems([]); setSaved(false);
     try {
-      const res = await apiFetch("/api/knowledge-intake", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rawContent,
-          sourceType,
-          sourceName: fileName,
-          scope: isIPMode ? "ip" : "global",
-          requestedCategory: isIPMode ? requestedCategory : undefined,
-          activeIPId: activeIP?.id ?? null,
-          availableIPs: ips.map(ip => ({
-            id: ip.id,
-            name: ip.name,
-            positioning: ip.positioning,
-            contentDirection: ip.contentDirection,
-          })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setError(data.error ?? "分析失败"); return; }
-      const responseItems = data.mode === "ip"
-        ? data.item ? [data.item] : []
-        : Array.isArray(data.items) ? data.items : [];
-      const parsed: IntakeItem[] = responseItems.map((it: IntakeItem, i: number) => ({
-        ...it,
-        tags: isIPMode ? it.keywords ?? [] : it.tags ?? [],
-        id: "item-" + i + "-" + Date.now(),
-        selected: it.ingestRecommend === "建议入库" &&
-          (!isIPKnowledgeCategory(it.category) || Boolean(it.ipId)),
-      }));
-      setItems(parsed);
+      setItems(await requestIntake(rawContent));
     } catch (e) {
       setError(e instanceof Error ? e.message : "网络错误");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleSegmentAnalyze() {
+    if (globalSegmentation?.status !== "ready") return;
+    const segments = globalSegmentation.segments;
+    setLoading(true);
+    setError("");
+    setItems([]);
+    setSaved(false);
+    setShowSegmentPreview(false);
+    setSegmentRuns(segments.map(segment => ({ segment, status: "pending" })));
+    try {
+      for (const [index, segment] of segments.entries()) {
+        setSegmentProgress({ current: index + 1, total: segments.length, title: segment.title });
+        setSegmentRuns(current => current.map(run => run.segment.id === segment.id
+          ? { ...run, status: "processing", error: undefined }
+          : run));
+        try {
+          const segmentItems = await requestIntake(segment.content, {
+            id: segment.id,
+            title: segment.title,
+            index: index + 1,
+          });
+          setItems(current => [...current, ...segmentItems]);
+          setSegmentRuns(current => current.map(run => run.segment.id === segment.id
+            ? { ...run, status: "completed", error: undefined }
+            : run));
+        } catch (segmentError) {
+          setSegmentRuns(current => current.map(run => run.segment.id === segment.id
+            ? { ...run, status: "failed", error: segmentError instanceof Error ? segmentError.message : "分析失败" }
+            : run));
+        }
+      }
+    } finally {
+      setSegmentProgress(null);
+      setLoading(false);
+    }
+  }
+
+  async function handleRetrySegment(segmentId: string) {
+    const run = segmentRuns.find(candidate => candidate.segment.id === segmentId);
+    if (!run || run.status === "processing") return;
+    const segmentIndex = segmentRuns.findIndex(candidate => candidate.segment.id === segmentId) + 1;
+    setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
+      ? { ...candidate, status: "processing", error: undefined }
+      : candidate));
+    try {
+      const segmentItems = await requestIntake(run.segment.content, {
+        id: run.segment.id,
+        title: run.segment.title,
+        index: segmentIndex,
+      });
+      setItems(current => [...current, ...segmentItems]);
+      setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
+        ? { ...candidate, status: "completed", error: undefined }
+        : candidate));
+    } catch (segmentError) {
+      setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
+        ? { ...candidate, status: "failed", error: segmentError instanceof Error ? segmentError.message : "分析失败" }
+        : candidate));
+    }
+  }
+
+  function resetIntake() {
+    setItems([]);
+    setSegmentRuns([]);
+    setSegmentProgress(null);
+    setRawContent("");
+    setFileName("");
+    setSourceType("text");
+    setSaved(false);
+    setError("");
   }
 
   function handleSave() {
@@ -371,6 +475,15 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                   </article>
                 ))}
               </div>
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleSegmentAnalyze}
+                  className="rounded-[8px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-bold text-white"
+                >
+                  确认分段并开始提炼
+                </button>
+              </div>
             </section>
           )}
           {error && <div className="mt-3 flex items-center justify-between rounded-[8px] bg-[#FCEBEB] px-3 py-2"><p className="text-[12.5px] text-[#A32D2D]">{error}</p><button onClick={() => setError("")} className="ml-2 text-[12px] text-[#A32D2D] font-bold">✕</button></div>}
@@ -380,8 +493,41 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
       {loading && (
         <div className="flex flex-col items-center gap-3 py-20">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#E5E4DE] border-t-[#639922]" />
-          <p className="text-[13px] text-[#888]">{isIPMode ? "AI正在理解完整内容" : "AI正在提炼资料"}，生成中请稍候，请勿重复提交，最坏约2分钟。</p>
+          <p className="text-[13px] text-[#888]">
+            {segmentProgress
+              ? `正在提炼第${segmentProgress.current}/${segmentProgress.total}段：${segmentProgress.title}`
+              : `${isIPMode ? "AI正在理解完整内容" : "AI正在提炼资料"}，生成中请稍候，请勿重复提交，最坏约2分钟。`}
+          </p>
         </div>
+      )}
+
+      {segmentRuns.length > 0 && !saved && (
+        <section className="mb-4 rounded-[12px] border border-[#E5E4DE] bg-white p-4">
+          <h2 className="text-[13px] font-bold text-[#333]">分段提炼进度</h2>
+          <div className="mt-2 space-y-2">
+            {segmentRuns.map((run, index) => (
+              <div key={run.segment.id} className="flex items-center justify-between gap-3 rounded-[8px] bg-[#FAFAF8] px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-[12.5px] font-semibold text-[#444]">第{index + 1}段·{run.segment.title}</p>
+                  {run.status === "failed" && <p className="mt-0.5 text-[11.5px] text-[#A32D2D]">{run.error ?? "分析失败"}</p>}
+                </div>
+                {run.status === "failed" ? (
+                  <button
+                    type="button"
+                    onClick={() => handleRetrySegment(run.segment.id)}
+                    className="shrink-0 rounded-[8px] border border-[#D08A8A] bg-white px-3 py-1.5 text-[11.5px] font-bold text-[#A32D2D]"
+                  >
+                    重试第{index + 1}段
+                  </button>
+                ) : (
+                  <span className="shrink-0 text-[11.5px] text-[#888]">
+                    {run.status === "completed" ? "已完成" : run.status === "processing" ? "提炼中" : "等待中"}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       {items.length > 0 && !saved && (
@@ -392,7 +538,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
               <span className="ml-2 text-[13px] text-[#888]">共 {items.length} 条，已选 {selectedCount} 条</span>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => { setItems([]); setRawContent(""); setFileName(""); setSourceType("text"); setError(""); }}
+              <button onClick={resetIntake}
                 className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#666]">重新输入</button>
               <button onClick={handleSave} disabled={selectedCount === 0}
                 className="rounded-[10px] px-4 py-2 text-[12.5px] font-bold disabled:opacity-40"
@@ -416,6 +562,11 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                   <div className="min-w-0 flex-1">
                     <div className="mb-1.5 flex flex-wrap items-center gap-2">
                       <span className="text-[14px] font-bold text-[#1C1C1B]">{item.title}</span>
+                      {item.sourceSegmentTitle && item.sourceSegmentIndex && (
+                        <span className="rounded-full bg-[#EEF4E2] px-2 py-0.5 text-[10.5px] font-semibold text-[#587B25]">
+                          来源：第{item.sourceSegmentIndex}段·{item.sourceSegmentTitle}
+                        </span>
+                      )}
                       <span className="rounded-full px-2 py-0.5 text-[10.5px] font-semibold" style={CONF_STYLE[item.confidence] ?? CONF_STYLE["低"]}>{item.confidence}置信度</span>
                       <span className="rounded-full px-2 py-0.5 text-[10.5px] font-semibold" style={REC_STYLE[item.ingestRecommend] ?? REC_STYLE["待确认"]}>{item.ingestRecommend}</span>
                     </div>
@@ -474,7 +625,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             })}
           </div>
           <div className="mt-4 flex justify-end gap-2">
-            <button onClick={() => { setItems([]); setRawContent(""); setFileName(""); setSourceType("text"); setError(""); }}
+            <button onClick={resetIntake}
               className="rounded-[10px] bg-[#F2F1ED] px-5 py-2.5 text-[13px] font-semibold text-[#666]">重新输入</button>
             <button onClick={handleSave} disabled={selectedCount === 0}
               className="rounded-[10px] px-5 py-2.5 text-[13px] font-bold disabled:opacity-40"
@@ -492,7 +643,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
           <p className="text-[16px] font-bold text-[#1C1C1B]">成功写入 {saveCount} 条知识</p>
           <p className="text-[13px] text-[#888]">已保存到知识库，可在知识库中心查看和管理。</p>
           <div className="flex gap-3">
-            <button onClick={() => { setItems([]); setRawContent(""); setFileName(""); setSourceType("text"); setSaved(false); setError(""); }}
+            <button onClick={resetIntake}
               className="rounded-[10px] bg-[#F2F1ED] px-5 py-2.5 text-[13px] font-semibold text-[#666]">继续入库</button>
             <a href="/knowledge-hub" className="rounded-[10px] px-5 py-2.5 text-[13px] font-bold text-white" style={{ background: "#1C1C1B" }}>去知识库查看</a>
           </div>
