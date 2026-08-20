@@ -86,3 +86,35 @@ test("普通智能入库在提交前提示长内容需要分段并阻止提炼",
     true,
   );
 });
+
+test("有可靠标题结构的长文可以先预览自动分段结果", async () => {
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+
+  const view = render(
+    <IPProvider>
+      <KnowledgeIntakePage />
+    </IPProvider>,
+  );
+  const user = userEvent.setup({ document });
+  const content = [
+    "# 第一章 选题",
+    "甲".repeat(2_100),
+    "## 第二章 开头",
+    "乙".repeat(2_100),
+    "## 第三章 结尾",
+    "丙".repeat(1_000),
+  ].join("\n");
+
+  await user.click(view.getByPlaceholderText(/粘贴逐字稿/));
+  await user.paste(content);
+  await user.click(view.getByRole("button", { name: "预览自动分段" }));
+
+  assert.ok(view.getByText("分段预览（共2段）"));
+  assert.ok(view.getByText("1. 第一章 选题"));
+  assert.ok(view.getByText("2. 第二章 开头 等2个章节"));
+  assert.ok(view.getByText(/2109字/));
+  assert.ok(view.getByText(/3121字/));
+});

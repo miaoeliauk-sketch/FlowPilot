@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useIP } from "@/lib/ip-context";
 import { addKnowledgeEntry } from "@/lib/ip-store";
 import type { KnowledgeCategory } from "@/lib/types";
@@ -11,6 +11,7 @@ import {
   buildGlobalKnowledgeIntakeLengthMessage,
   GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS,
 } from "@/lib/knowledge-intake-limits";
+import { segmentKnowledgeIntakeContent } from "@/lib/knowledge-intake-segmentation";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -111,10 +112,19 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [saveCount, setSaveCount] = useState(0);
+  const [showSegmentPreview, setShowSegmentPreview] = useState(false);
   const globalContentTooLong = !isIPMode && rawContent.trim().length > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
+  const globalSegmentation = useMemo(
+    () => globalContentTooLong ? segmentKnowledgeIntakeContent(rawContent) : null,
+    [globalContentTooLong, rawContent],
+  );
   const globalLengthWarning = globalContentTooLong
     ? buildGlobalKnowledgeIntakeLengthMessage(rawContent.trim().length)
     : "";
+
+  useEffect(() => {
+    setShowSegmentPreview(false);
+  }, [rawContent, isIPMode]);
 
   async function handleInputFile(file: File) {
     setError("");
@@ -328,8 +338,40 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
           </div>
           {globalLengthWarning && (
             <div className="mt-3 rounded-[8px] bg-[#FBF3D6] px-3 py-2 text-[12.5px] text-[#7A5C00]">
-              {globalLengthWarning}
+              <div className="flex items-center justify-between gap-3">
+                <span>
+                  {globalSegmentation?.status === "ready"
+                    ? `当前内容${rawContent.trim().length}字，已识别为${globalSegmentation.segments.length}个不超过4000字的分段`
+                    : globalLengthWarning}
+                </span>
+                {globalSegmentation?.status === "ready" && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSegmentPreview(current => !current)}
+                    className="shrink-0 rounded-[8px] border border-[#D8BE63] bg-white px-3 py-1.5 font-bold text-[#6B5100]"
+                  >
+                    {showSegmentPreview ? "收起分段预览" : "预览自动分段"}
+                  </button>
+                )}
+              </div>
             </div>
+          )}
+          {showSegmentPreview && globalSegmentation?.status === "ready" && (
+            <section className="mt-3 rounded-[10px] border border-[#DDE8C5] bg-[#FAFCF5] p-3">
+              <h2 className="text-[13px] font-bold text-[#34451F]">分段预览（共{globalSegmentation.segments.length}段）</h2>
+              <p className="mt-1 text-[11.5px] text-[#788269]">分段只依据标题边界，不会拆开表格、代码块、引用或连续列表。</p>
+              <div className="mt-3 space-y-2">
+                {globalSegmentation.segments.map((segment, index) => (
+                  <article key={segment.id} className="rounded-[8px] border border-[#E5E9DC] bg-white px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <strong className="text-[12.5px] text-[#333]">{index + 1}. {segment.title}</strong>
+                      <span className="shrink-0 text-[11.5px] text-[#888]">{segment.charCount}字</span>
+                    </div>
+                    <p className="mt-1 text-[11.5px] text-[#888]">包含：{segment.chapterTitles.join("、")}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
           )}
           {error && <div className="mt-3 flex items-center justify-between rounded-[8px] bg-[#FCEBEB] px-3 py-2"><p className="text-[12.5px] text-[#A32D2D]">{error}</p><button onClick={() => setError("")} className="ml-2 text-[12px] text-[#A32D2D] font-bold">✕</button></div>}
         </div>
