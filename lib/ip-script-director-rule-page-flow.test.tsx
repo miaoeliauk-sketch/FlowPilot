@@ -124,7 +124,7 @@ afterEach(async () => {
 });
 after(() => { restoreBrowser?.(); });
 
-async function previewRule(rawMarkdown: string) {
+async function previewRule(rawMarkdown: string, protectedEntities = ["示例人物"]) {
   const item = (id: string, text: string, scope: "opening" | "body" | "ending" | "compression" | "output") => ({
     id,
     text,
@@ -177,7 +177,7 @@ async function previewRule(rawMarkdown: string) {
       sourceReference: "导入文档第六节",
       confirmationStatus: "confirmed",
       materialPermission: false,
-      protectedEntities: ["示例人物"],
+      protectedEntities,
     }],
     compression: {
       enabled: true,
@@ -314,5 +314,68 @@ test("超大规则文件在读取到内存前被拒绝", async () => {
     assert.equal((view.getByLabelText("规则文档内容") as HTMLTextAreaElement).value, "");
   } finally {
     if (originalFileReader) Object.defineProperty(globalThis, "FileReader", originalFileReader);
+  }
+});
+
+test("具体名称出现2次时明确提醒但用户仍可保存", async () => {
+  const rawMarkdown = "胖东来只用于标题格式。胖东来不是本次创作素材。";
+  const parsedRule = await previewRule(rawMarkdown, ["胖东来"]);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    rule: parsedRule,
+    apiMeta: { apiCalled: true, attempts: 1 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const { fireEvent, render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const ruleButtons = await view.findAllByTitle("专属编导规则");
+    await user.click(ruleButtons[0]);
+    fireEvent.change(view.getByLabelText("规则文档内容"), { target: { value: rawMarkdown } });
+    await user.click(view.getByRole("button", { name: "AI解析并预览" }));
+
+    assert.ok(await view.findByText("示例名称使用提醒"));
+    assert.ok(view.getByText("胖东来出现2次，可能让AI误把范例当成默认素材"));
+    await user.click(view.getByRole("button", { name: "确认并保存规则" }));
+    assert.equal(getScriptDirectorRules(IP_A.id).length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("具体名称出现超过3次时明确说明原因并禁止保存", async () => {
+  const rawMarkdown = "胖东来演示标题。胖东来演示开头。胖东来演示正文。胖东来不是本次创作素材。";
+  const parsedRule = await previewRule(rawMarkdown, ["胖东来"]);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    rule: parsedRule,
+    apiMeta: { apiCalled: true, attempts: 1 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const { fireEvent, render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const ruleButtons = await view.findAllByTitle("专属编导规则");
+    await user.click(ruleButtons[0]);
+    fireEvent.change(view.getByLabelText("规则文档内容"), { target: { value: rawMarkdown } });
+    await user.click(view.getByRole("button", { name: "AI解析并预览" }));
+
+    assert.ok(await view.findByText("示例名称污染已拦截"));
+    assert.ok(view.getByText("胖东来出现4次，超过允许上限，请减少后重新解析"));
+    const saveButton = view.getByRole("button", { name: "示例污染未通过，无法保存" });
+    assert.equal(saveButton.hasAttribute("disabled"), true);
+    assert.equal(getScriptDirectorRules(IP_A.id).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

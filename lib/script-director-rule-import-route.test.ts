@@ -97,6 +97,10 @@ test("规则解析接口通过统一结构化调用返回当前IP的预览草稿
     assert.equal(requestBodies.length, 1);
     assert.deepEqual(requestBodies[0]?.thinking, { type: "disabled" });
     assert.deepEqual(requestBodies[0]?.response_format, { type: "json_object" });
+    assert.equal(
+      JSON.stringify(requestBodies[0]).includes("都必须逐项写入protectedEntities"),
+      true,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -22,7 +22,7 @@ const SYSTEM_PROMPT = `你是FlowPilot的IP专属编导规则解析助手。你�
 4. enforcement只能是deterministic、model_review、prompt_only。
 5. scope只能是title、opening、body、ending、fact、attribution、compression、output。
 6. maximumCasesPerClaim和targetReduction也必须带level、enforcement、scope；它们通常属于quality_warning和deterministic。
-7. 示例只用于展示格式和语气，materialPermission必须为false，不得把示例人物、企业、事件当作后续创作素材。
+7. 示例只用于展示格式和语气，materialPermission必须为false，不得把示例人物、企业、事件当作后续创作素材。每个示例中的人物、企业、品牌和案例名称都必须逐项写入protectedEntities，不得遗漏。
 8. 没有明确写出的规则使用空数组或null，不要猜测补全。
 9. 只输出JSON对象，不要输出Markdown代码块、解释或系统字段。`;
 

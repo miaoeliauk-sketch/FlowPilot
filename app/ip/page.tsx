@@ -24,6 +24,7 @@ import {
   saveScriptDirectorRule,
   setScriptDirectorRuleActive,
 } from "@/lib/script-director-rule-store";
+import { detectScriptDirectorExampleContamination } from "@/lib/script-director-rule-contamination";
 
 const PLATFORM_OPTIONS = ["抖音", "小红书", "B站", "视频号", "微博", "公众号"];
 
@@ -692,6 +693,11 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
 
   const handleConfirmSave = () => {
     if (!preview) return;
+    const contamination = detectScriptDirectorExampleContamination(preview);
+    if (!contamination.canSave) {
+      setError("示例名称重复超过3次，请修改规则文档后重新解析");
+      return;
+    }
     try {
       saveScriptDirectorRule(preview);
       reloadRules();
@@ -701,6 +707,8 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
       setError(saveError instanceof Error ? saveError.message : "专属编导规则保存失败");
     }
   };
+
+  const contamination = preview ? detectScriptDirectorExampleContamination(preview) : null;
 
   const handleToggle = (rule: ScriptDirectorRule) => {
     try {
@@ -779,8 +787,30 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
                   <div className="text-[14px] font-bold text-[#2A5A0A]">解析预览</div>
                   <div className="mt-0.5 text-[11px] text-[#777]">请核对后再保存。平台定位继续读取IP档案，不在规则中重复存储。</div>
                 </div>
-                <button onClick={handleConfirmSave} className="rounded-[10px] bg-[#C8F04A] px-4 py-2 text-[12.5px] font-bold text-[#1A1A1A]">确认并保存规则</button>
+                <button
+                  onClick={handleConfirmSave}
+                  disabled={contamination?.canSave === false}
+                  className="rounded-[10px] bg-[#C8F04A] px-4 py-2 text-[12.5px] font-bold text-[#1A1A1A] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {contamination?.canSave === false ? "示例污染未通过，无法保存" : "确认并保存规则"}
+                </button>
               </div>
+              {contamination && contamination.items.length > 0 && (
+                <div className={`mb-4 rounded-[10px] px-3 py-2.5 ${contamination.status === "blocked" ? "bg-[#FCEBEB] text-[#A32D2D]" : "bg-[#FFF7DF] text-[#8A5B00]"}`}>
+                  <div className="text-[12.5px] font-bold">
+                    {contamination.status === "blocked" ? "示例名称污染已拦截" : "示例名称使用提醒"}
+                  </div>
+                  <div className="mt-1 space-y-0.5 text-[11.5px]">
+                    {contamination.items.map(item => (
+                      <div key={item.name}>
+                        {item.name}出现{item.count}次，{item.severity === "blocked"
+                          ? "超过允许上限，请减少后重新解析"
+                          : "可能让AI误把范例当成默认素材"}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <section>
                   <div className="mb-2 text-[11.5px] font-bold text-[#639922]">基础信息</div>
