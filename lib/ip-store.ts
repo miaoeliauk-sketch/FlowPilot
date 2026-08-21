@@ -826,14 +826,93 @@ export function getVideoReviews(ipId?: string): VideoReview[] {
   return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export function addVideoReview(input: Omit<VideoReview, "id" | "createdAt" | "savedToKnowledge" | "knowledgeEntryId">): VideoReview {
+type AddVideoReviewInput = Omit<
+  VideoReview,
+  | "id"
+  | "ipId"
+  | "topicId"
+  | "scriptId"
+  | "sourceType"
+  | "traceabilityStatus"
+  | "createdAt"
+  | "savedToKnowledge"
+  | "knowledgeEntryId"
+> & ({
+  ipId: string;
+  topicId: string;
+  scriptId: string;
+  sourceType: "flowpilot";
+  traceabilityStatus: "traceable";
+} | {
+  ipId: string;
+  topicId: null;
+  scriptId: null;
+  sourceType: "external";
+  traceabilityStatus: "external_untraceable";
+});
+
+export function addVideoReview(input: AddVideoReviewInput): VideoReview {
+  const ipId = typeof input.ipId === "string" ? input.ipId.trim() : "";
+  if (!ipId) throw new Error("复盘来源契约不完整：缺少当前IP");
+  if (input.sourceType === "external") {
+    if (
+      input.traceabilityStatus !== "external_untraceable" ||
+      input.topicId !== null ||
+      input.scriptId !== null
+    ) {
+      throw new Error("复盘来源契约不完整：外部内容不能伪造内部关联");
+    }
+  } else if (input.sourceType === "flowpilot") {
+    const script = getScriptAssets(ipId).find(item => item.id === input.scriptId);
+    const topic = getTopicAsset(input.topicId);
+    if (
+      input.traceabilityStatus !== "traceable" ||
+      !script ||
+      !topic ||
+      script.ipId !== ipId ||
+      topic.ipId !== ipId ||
+      script.topicId !== topic.id
+    ) {
+      throw new Error("复盘来源契约不完整：选题、脚本与当前IP关联无效");
+    }
+  } else {
+    throw new Error("复盘来源契约不完整：来源类型无效");
+  }
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
-  const review: VideoReview = { ...input, id: genId(), createdAt: new Date().toISOString(), savedToKnowledge: false, knowledgeEntryId: null };
+  const review: VideoReview = { ...input, ipId, id: genId(), createdAt: new Date().toISOString(), savedToKnowledge: false, knowledgeEntryId: null };
   writeJSON(KEY_VIDEO_REVIEWS, [...all, review]);
   return review;
 }
 
-export function updateVideoReview(id: string, patch: Partial<VideoReview>): void {
+type UpdateVideoReviewPatch = Partial<Omit<
+  VideoReview,
+  | "id"
+  | "ipId"
+  | "topicId"
+  | "scriptId"
+  | "sourceType"
+  | "traceabilityStatus"
+  | "createdAt"
+  | "savedToKnowledge"
+  | "knowledgeEntryId"
+>>;
+
+const VIDEO_REVIEW_PROTECTED_FIELDS = [
+  "id",
+  "ipId",
+  "topicId",
+  "scriptId",
+  "sourceType",
+  "traceabilityStatus",
+  "createdAt",
+  "savedToKnowledge",
+  "knowledgeEntryId",
+] as const;
+
+export function updateVideoReview(id: string, patch: UpdateVideoReviewPatch): void {
+  if (VIDEO_REVIEW_PROTECTED_FIELDS.some(field => Object.prototype.hasOwnProperty.call(patch, field))) {
+    throw new Error("不能修改复盘归属和追溯字段");
+  }
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
   writeJSON(KEY_VIDEO_REVIEWS, all.map(r => r.id === id ? { ...r, ...patch } : r));
 }
@@ -846,6 +925,29 @@ export function deleteVideoReview(id: string): void {
 // 标记某条复盘的经验已保存进知识库（方法论分类）
 export function markReviewSavedToKnowledge(reviewId: string, knowledgeEntryId: string): void {
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
+  const review = all.find(item => item.id === reviewId);
+  if (!review) throw new Error("没有找到需要关联的复盘");
+  const script = review.ipId && review.scriptId
+    ? getScriptAssets(review.ipId).find(item => item.id === review.scriptId)
+    : null;
+  const topic = review.topicId ? getTopicAsset(review.topicId) : null;
+  if (
+    review.sourceType !== "flowpilot" ||
+    review.traceabilityStatus !== "traceable" ||
+    !review.ipId ||
+    !script ||
+    !topic ||
+    script.ipId !== review.ipId ||
+    topic.ipId !== review.ipId ||
+    script.topicId !== topic.id
+  ) {
+    throw new Error("只有可追溯复盘才能进入学习知识库");
+  }
+  const knowledge = getKnowledgeEntries().find(item => item.id === knowledgeEntryId);
+  if (!knowledge) throw new Error("没有找到需要关联的知识条目");
+  if (knowledge.ipId !== review.ipId) {
+    throw new Error("复盘与知识条目不属于同一IP");
+  }
   writeJSON(KEY_VIDEO_REVIEWS, all.map(r => r.id === reviewId ? { ...r, savedToKnowledge: true, knowledgeEntryId } : r));
 }
 

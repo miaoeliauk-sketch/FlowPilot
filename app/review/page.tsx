@@ -1,12 +1,20 @@
 "use client";
 import { apiFetch } from "@/lib/api-fetch";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
 import { VideoReview, ReviewMetrics } from "@/lib/types";
 import {
-  getVideoReviews, addVideoReview, updateVideoReview, deleteVideoReview,
+  getActiveIPId, getVideoReviews, getScriptAssets, updateVideoReview, deleteVideoReview,
   markReviewSavedToKnowledge, addKnowledgeEntry, getKnowledgeEntries,
 } from "@/lib/ip-store";
+import {
+  addVideoReviewForSource,
+  assessVideoReviewTraceability,
+  getLearningEligibleVideoReviews,
+  resolveVideoReviewSource,
+  VideoReviewSourceInvalidError,
+  VIDEO_REVIEW_TRACEABILITY_LABELS,
+} from "@/lib/review-traceability";
 import { Icon } from "@/components/ui/icon";
 import { XlsxUploadPanel } from "@/components/ui/xlsx-upload-panel";
 import type { ImportedData } from "@/components/ui/xlsx-upload-panel";
@@ -56,7 +64,9 @@ function MetricInput({ label, value, onChange }: { label: string; value: string;
 
 // ════════════════════ Tab1 新建复盘 ════════════════════
 function NewReviewTab({ onSaved }: { onSaved: () => void }) {
-  const { activeIP, ips } = useIP();
+  const { activeIP } = useIP();
+  const [reviewSource, setReviewSource] = useState<"flowpilot" | "external">("flowpilot");
+  const [selectedScriptId, setSelectedScriptId] = useState("");
   const [title, setTitle] = useState("");
   const [platform, setPlatform] = useState("抖音");
   const [publishedAt, setPublishedAt] = useState(new Date().toISOString().slice(0, 10));
@@ -72,6 +82,17 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
   const [result, setResult] = useState<VideoReview["analysis"] | null>(null);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [showXlsx, setShowXlsx] = useState(false);
+  const analysisRequestSequence = useRef(0);
+  const availableScripts = activeIP ? getScriptAssets(activeIP.id) : [];
+
+  useEffect(() => {
+    analysisRequestSequence.current += 1;
+    setLoading(false);
+    setSelectedScriptId("");
+    setResult(null);
+    setSavedId(null);
+    setError("");
+  }, [activeIP?.id]);
 
   function handleXlsxImport(data: ImportedData) {
     if (data.mode === "review" && data.reviewMetrics) {
@@ -92,14 +113,32 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
   function n(k: string) { return Number(m[k]) || 0; }
 
   async function handleAnalyze() {
+    if (!activeIP) { setError("请先选择当前操盘IP"); return; }
+    if (reviewSource === "flowpilot" && !selectedScriptId) {
+      setError("请选择这次发布使用的FlowPilot脚本");
+      return;
+    }
+    try {
+      resolveVideoReviewSource({
+        activeIPId: activeIP.id,
+        source: reviewSource === "flowpilot"
+          ? { type: "flowpilot", scriptId: selectedScriptId }
+          : { type: "external" },
+      });
+    } catch (sourceError) {
+      setError(sourceError instanceof Error ? sourceError.message : "内容来源校验失败");
+      return;
+    }
     if (!title.trim()) { setError("请填写视频标题"); return; }
     const hasAnyMetric = Object.values(m).some(v => Number(v) > 0);
     if (!hasAnyMetric) { setError("请至少填写一项数据指标（播放量/点赞等）"); return; }
 
+    const requestSequence = analysisRequestSequence.current + 1;
+    analysisRequestSequence.current = requestSequence;
     setLoading(true); setError(null); setResult(null); setSavedId(null);
 
     // Layer4：历史均值由代码算，不传给AI让它乱猜
-    const history = getVideoReviews(activeIP?.id).filter(r => r.analysis?.layer1);
+    const history = getLearningEligibleVideoReviews(activeIP.id).filter(r => r.analysis?.layer1);
     const avg = (key: keyof ReviewMetrics) => {
       const vals = history.map(r => r.metrics[key]).filter(v => v > 0);
       return vals.length > 0 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
@@ -123,29 +162,52 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
         }),
       });
       const data = await res.json();
+      if (analysisRequestSequence.current !== requestSequence) return;
       if (!res.ok) { setError(data.error ?? `请求失败（${res.status}）`); return; }
+      if (getActiveIPId() !== activeIP.id) {
+        setError("当前操盘IP刚刚发生变化，请确认后重新分析。");
+        return;
+      }
 
       const analysis: VideoReview["analysis"] = {
         layer1: data.layer1, layer2: data.layer2, layer3: data.layer3,
         layer4: data.layer4, layer5: data.layer5, layer6: data.layer6,
       };
-      setResult(analysis);
-
-      const saved = addVideoReview({
-        ipId: activeIP?.id ?? null, title, platform, publishedAt, videoUrl, contentDirection,
-        topicId: null, scriptId: null, scriptText,
-        metrics: { views: n("views"), likes: n("likes"), comments: n("comments"), favorites: n("favorites"), shares: n("shares"), newFollowers: n("newFollowers"), dms: n("dms"), leads: n("leads"), conversions: n("conversions") },
-        analysis,
+      const saved = addVideoReviewForSource({
+        activeIPId: activeIP.id,
+        source: reviewSource === "flowpilot"
+          ? { type: "flowpilot", scriptId: selectedScriptId }
+          : { type: "external" },
+        review: {
+          title, platform, publishedAt, videoUrl, contentDirection, scriptText,
+          metrics: { views: n("views"), likes: n("likes"), comments: n("comments"), favorites: n("favorites"), shares: n("shares"), newFollowers: n("newFollowers"), dms: n("dms"), leads: n("leads"), conversions: n("conversions") },
+          analysis,
+        },
       });
       setSavedId(saved.id);
+      setResult(analysis);
       onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "分析失败，请重试");
-    } finally { setLoading(false); }
+      if (analysisRequestSequence.current !== requestSequence) return;
+      const message = err instanceof Error ? err.message : "分析失败，请重试";
+      setError(
+        reviewSource === "flowpilot" && err instanceof VideoReviewSourceInvalidError
+          ? "来源已失效，本次分析结果无法保存"
+          : message,
+      );
+    } finally {
+      if (analysisRequestSequence.current === requestSequence) setLoading(false);
+    }
   }
 
   function handleSaveToKB() {
-    if (!savedId || !result) return;
+    if (!savedId || !result || !activeIP) return;
+    const eligibleReview = getLearningEligibleVideoReviews(activeIP.id)
+      .find(review => review.id === savedId);
+    if (!eligibleReview) {
+      setError("只有来源完整、可追溯的复盘才能存入复盘经验库");
+      return;
+    }
     const content = [
       `【视频标题】${title}`,
       `【内容方向】${contentDirection}`,
@@ -171,6 +233,49 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
 
   return (
     <div className="flex flex-col gap-5">
+      <Card>
+        <div className="mb-1 text-[13px] font-bold text-[#1C1C1B]">内容来源 *</div>
+        <p className="mb-3 text-[11.5px] text-[#999]">来源完整的内部内容可以追溯到原选题；外部内容仍可复盘，但不会进入学习依据。</p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {([
+            ["flowpilot", "FlowPilot内部内容"],
+            ["external", "外部或临时内容"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setReviewSource(value)}
+              className="rounded-full px-3.5 py-1.5 text-[12px] font-semibold"
+              style={reviewSource === value
+                ? { background: "#1C1C1B", color: "#fff" }
+                : { background: "#F2F1ED", color: "#666" }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {reviewSource === "flowpilot" ? (
+          <div>
+            <label htmlFor="review-script-source" className="mb-1 block text-[11.5px] text-[#888]">选择已发布脚本</label>
+            <select
+              id="review-script-source"
+              value={selectedScriptId}
+              onChange={event => setSelectedScriptId(event.target.value)}
+              className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]"
+            >
+              <option value="">请选择当前IP的脚本</option>
+              {availableScripts.map(script => (
+                <option key={script.id} value={script.id}>{script.title}</option>
+              ))}
+            </select>
+            {availableScripts.length === 0 && (
+              <p className="mt-2 text-[11.5px] text-[#A32D2D]">当前IP还没有可选择的脚本；如需复盘其他内容，请选择“外部或临时内容”。</p>
+            )}
+          </div>
+        ) : (
+          <p className="rounded-[10px] bg-[#FBF3D6] px-3 py-2 text-[11.5px] text-[#7A5C00]">这条复盘会标记为“外部内容不可追溯”，保留记录，但不参与后续学习。</p>
+        )}
+      </Card>
       <Card>
         <div className="mb-3 text-[13px] font-bold text-[#1C1C1B]">视频基础信息</div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -350,9 +455,11 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
                 </div>
               )}
             </div>
-            <div className="mt-3 flex justify-end">
-              <button onClick={handleSaveToKB} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white">存入复盘经验库</button>
-            </div>
+            {savedId && activeIP && getLearningEligibleVideoReviews(activeIP.id).some(review => review.id === savedId) && (
+              <div className="mt-3 flex justify-end">
+                <button onClick={handleSaveToKB} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white">存入复盘经验库</button>
+              </div>
+            )}
           </Card>
 
           {/* Layer6 */}
@@ -404,6 +511,9 @@ function HistoryTab() {
             <div className="flex flex-wrap items-center gap-2">
               {r.analysis?.layer1 && <GradeBadge grade={r.analysis.layer1.grade} />}
               <span className="text-[13px] font-semibold text-[#1C1C1B]">{r.title}</span>
+              <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[10.5px] text-[#666]">
+                {VIDEO_REVIEW_TRACEABILITY_LABELS[assessVideoReviewTraceability(r)]}
+              </span>
               {r.savedToKnowledge && <span className="text-[10.5px] text-[#3B6D11]">已入库</span>}
             </div>
             <div className="flex items-center gap-1.5">

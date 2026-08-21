@@ -3,6 +3,7 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 import { addKnowledgeEntry, getKnowledgeEntries } from "./ip-store";
+import { addVideoReviewForSource } from "./review-traceability";
 import type { IPProfile, KnowledgeCategory } from "./types";
 
 const SHIKONG: IPProfile = {
@@ -684,6 +685,20 @@ test("董事会评审只发送通用和当前IP可见的历史证据", async () 
     const globalEvidence = addBoardKnowledge({ idLabel: "通用", ipId: null, category: "爆款案例" });
     const currentIPEvidence = addBoardKnowledge({ idLabel: "水木然", ipId: SHUIMURAN.id, category: "爆款案例" });
     const otherIPEvidence = addBoardKnowledge({ idLabel: "石空", ipId: SHIKONG.id, category: "爆款案例" });
+    const externalReview = addVideoReviewForSource({
+      activeIPId: SHUIMURAN.id,
+      source: { type: "external" },
+      review: {
+        title: "普通人如何判断一个机会是否真的适合自己？",
+        platform: "视频号",
+        publishedAt: "2026-08-20",
+        videoUrl: "",
+        contentDirection: "机会判断",
+        scriptText: "普通人如何判断一个机会是否真的适合自己？",
+        metrics: { views: 9999, likes: 999, comments: 99, favorites: 99, shares: 99, newFollowers: 99, dms: 0, leads: 0, conversions: 0 },
+        analysis: null,
+      },
+    });
 
     const { act, cleanup, render } = await import("@testing-library/react");
     cleanupPage = cleanup;
@@ -707,6 +722,7 @@ test("董事会评审只发送通用和当前IP可见的历史证据", async () 
 
     assert.deepEqual(evidenceIds, [globalEvidence.id, currentIPEvidence.id].sort());
     assert.equal(evidenceIds?.includes(otherIPEvidence.id), false);
+    assert.equal(evidenceIds?.includes(externalReview.id), false);
   } finally {
     cleanupPage?.();
     globalThis.fetch = originalFetch;

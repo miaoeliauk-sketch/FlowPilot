@@ -520,6 +520,12 @@ export interface VideoReview {
   contentDirection: string;
   topicId: string | null;
   scriptId: string | null;
+  sourceType?: "flowpilot" | "external";
+  traceabilityStatus?:
+    | "traceable"
+    | "external_untraceable"
+    | "legacy_missing_link"
+    | "broken_link";
   scriptText: string; // 用户粘贴的口播稿/逐字稿，Layer3分析的直接依据
   metrics: ReviewMetrics;
   analysis: {

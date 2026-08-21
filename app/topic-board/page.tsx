@@ -5,7 +5,6 @@ import { useState, useEffect, useRef } from "react";
 import {
   getKnowledgeEntries,
   getTopicAssets,
-  getVideoReviews,
   recordKnowledgeUsage,
   getLatestPersonas,
   updateTopicAssetStatus,
@@ -20,6 +19,7 @@ import { TopicBoardContractError, type TopicBoardResult } from "@/lib/topic-boar
 import { saveTopicBoardEvaluation, TopicBoardOwnershipError } from "@/lib/topic-board-history";
 import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
+import { getLearningEligibleVideoReviews } from "@/lib/review-traceability";
 
 // ── Constants ──
 const PHASES = [
@@ -233,7 +233,7 @@ function collectHistoricalData(topic: string, activeIP: IPProfile | null): Histo
       }];
     });
 
-  const reviews = getVideoReviews(activeIP.id).flatMap(review => {
+  const reviews = getLearningEligibleVideoReviews(activeIP.id).flatMap(review => {
     const matchScore = getHistoricalMatchScore(topic, {
       id: review.id,
       title: review.title,

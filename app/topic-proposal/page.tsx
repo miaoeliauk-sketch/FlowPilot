@@ -2,9 +2,10 @@
 
 import { apiFetch } from "@/lib/api-fetch";
 import { useState } from "react";
-import { getKnowledgeEntries, getVideoReviews } from "@/lib/ip-store";
+import { getKnowledgeEntries } from "@/lib/ip-store";
 import { IPProfile, KnowledgeEntry, VideoReview } from "@/lib/types";
 import { useIP } from "@/lib/ip-context";
+import { getLearningEligibleVideoReviews } from "@/lib/review-traceability";
 
 // ── AI 编导提案前端页（/topic-proposal）：每周选题会第0步，为董事会供给候选选题 ──
 
@@ -39,7 +40,7 @@ function collectIntel(activeIP: IPProfile | null) {
     .map(e => `《${e.title}》｜表现：${e.viralEvaluation?.grade ?? "历史案例"}｜${e.rawContent.slice(0, 80)}`)
     .join("\n");
 
-  const reviewNotes = getVideoReviews(activeIP?.id)
+  const reviewNotes = (activeIP ? getLearningEligibleVideoReviews(activeIP.id) : [])
     .slice(0, 3)
     .map((r: VideoReview) => `《${r.title}》｜播放${r.metrics.views ?? "-"}｜赞${r.metrics.likes ?? "-"}｜评论${r.metrics.comments ?? "-"}`)
     .join("\n");
