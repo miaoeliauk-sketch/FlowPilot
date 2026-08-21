@@ -77,3 +77,32 @@ export function saveScriptDirectorRule(rule: ScriptDirectorRule): void {
     throw new Error(`专属编导规则保存失败：${message}`);
   }
 }
+
+export function setScriptDirectorRuleActive(
+  ipId: string,
+  ruleId: string,
+  active: boolean,
+): void {
+  const all = readAllRules();
+  const target = all.find(rule => rule.ipId === ipId && rule.id === ruleId);
+  if (!target) throw new Error("没有找到属于当前IP的专属编导规则");
+
+  const updatedAt = new Date().toISOString();
+  const next = all.map(rule => {
+    if (rule.ipId !== ipId) return rule;
+    if (rule.id === ruleId) {
+      return { ...rule, status: active ? "active" as const : "inactive" as const, updatedAt };
+    }
+    if (active && rule.status === "active") {
+      return { ...rule, status: "inactive" as const, updatedAt };
+    }
+    return rule;
+  });
+
+  try {
+    requireStorage().setItem(SCRIPT_DIRECTOR_RULE_STORAGE_KEY, JSON.stringify(next));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "未知错误";
+    throw new Error(`专属编导规则状态更新失败：${message}`);
+  }
+}

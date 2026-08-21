@@ -10,6 +10,20 @@ import { buildVoiceStyleProfileForSave, getDefaultVoiceStyleSampleIds } from "@/
 import { Icon } from "@/components/ui/icon";
 import { Select } from "@/components/ui/select";
 import { SCRIPT_DIRECTOR_PROFILE_OPTIONS, type ScriptDirectorProfileId } from "@/lib/script-director-profile";
+import {
+  calculateScriptDirectorRuleContentHash,
+  parseScriptDirectorRule,
+  type ScriptDirectorRule,
+  type ScriptDirectorRuleEnforcement,
+  type ScriptDirectorRuleItem,
+  type ScriptDirectorRuleLevel,
+  type ScriptDirectorRuleScope,
+} from "@/lib/script-director-rule";
+import {
+  getScriptDirectorRules,
+  saveScriptDirectorRule,
+  setScriptDirectorRuleActive,
+} from "@/lib/script-director-rule-store";
 
 const PLATFORM_OPTIONS = ["抖音", "小红书", "B站", "视频号", "微博", "公众号"];
 
@@ -524,6 +538,351 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
   );
 }
 
+const DIRECTOR_LEVEL_LABELS: Record<ScriptDirectorRuleLevel, string> = {
+  hard_block: "硬阻断",
+  quality_warning: "质量提醒",
+  preference: "风格偏好",
+};
+
+const DIRECTOR_ENFORCEMENT_LABELS: Record<ScriptDirectorRuleEnforcement, string> = {
+  deterministic: "程序检查",
+  model_review: "模型审查",
+  prompt_only: "Prompt指导",
+};
+
+const DIRECTOR_SCOPE_LABELS: Record<ScriptDirectorRuleScope, string> = {
+  title: "标题",
+  opening: "开头",
+  body: "正文",
+  ending: "结尾",
+  fact: "事实",
+  attribution: "观点归属",
+  compression: "压缩",
+  output: "最终输出",
+};
+
+const MAX_DIRECTOR_RULE_FILE_BYTES = 200_000;
+
+function DirectorRuleItems({ items }: { items: ScriptDirectorRuleItem[] }) {
+  if (items.length === 0) return <div className="text-[11.5px] text-[#AAA]">未识别到明确规则</div>;
+  return (
+    <div className="space-y-2">
+      {items.map(item => (
+        <div key={item.id} className="rounded-[10px] border border-[#EEEDE8] bg-white p-2.5">
+          <div className="text-[12px] leading-5 text-[#333]">{item.text}</div>
+          <div className="mt-1 flex flex-wrap gap-1.5 text-[10px] text-[#777]">
+            <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">{DIRECTOR_LEVEL_LABELS[item.level]}</span>
+            <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">{DIRECTOR_ENFORCEMENT_LABELS[item.enforcement]}</span>
+            <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">作用范围：{DIRECTOR_SCOPE_LABELS[item.scope]}（{item.scope}）</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DirectorPreviewSection({ title, items }: { title: string; items: ScriptDirectorRuleItem[] }) {
+  return (
+    <section>
+      <div className="mb-2 text-[11.5px] font-bold text-[#639922]">{title}</div>
+      <DirectorRuleItems items={items} />
+    </section>
+  );
+}
+
+function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void }) {
+  const [rules, setRules] = useState<ScriptDirectorRule[]>([]);
+  const [rawMarkdown, setRawMarkdown] = useState("");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ScriptDirectorRule | null>(null);
+  const [parsing, setParsing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const reloadRules = () => {
+    try {
+      setRules(getScriptDirectorRules(ip.id));
+      setError(null);
+    } catch (readError) {
+      setError(readError instanceof Error ? readError.message : "专属编导规则读取失败");
+    }
+  };
+
+  useEffect(() => {
+    reloadRules();
+    setRawMarkdown("");
+    setFileName(null);
+    setPreview(null);
+    setNotice(null);
+  }, [ip.id]);
+
+  const handleFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!/\.(md|txt)$/i.test(file.name)) {
+      setError("仅支持.md或.txt规则文档");
+      return;
+    }
+    if (file.size > MAX_DIRECTOR_RULE_FILE_BYTES) {
+      setError("规则文档文件过大，请控制在200KB以内");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === "string" ? reader.result : "";
+      if (!text.trim()) {
+        setError("规则文档内容为空");
+        return;
+      }
+      if (text.length > 50_000) {
+        setError("规则文档最多50000字");
+        return;
+      }
+      setRawMarkdown(text);
+      setFileName(file.name);
+      setPreview(null);
+      setNotice(null);
+      setError(null);
+    };
+    reader.onerror = () => setError("规则文档读取失败，请重新选择");
+    reader.readAsText(file, "utf-8");
+  };
+
+  const handleParse = async () => {
+    const source = rawMarkdown;
+    if (!source.trim()) {
+      setError("请上传或粘贴专属编导规则文档");
+      return;
+    }
+    if (source.length > 50_000) {
+      setError("规则文档最多50000字");
+      return;
+    }
+    setParsing(true);
+    setError(null);
+    setNotice(null);
+    setPreview(null);
+    try {
+      const response = await apiFetch("/api/script-director-rule/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ipProfile: { id: ip.id, name: ip.name, audience: ip.audience },
+          rawMarkdown: source,
+          fileName,
+        }),
+      });
+      const data = await response.json() as { rule?: unknown; error?: string };
+      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const parsed = parseScriptDirectorRule(data.rule);
+      if (!parsed.ok) throw new Error("AI返回的专属规则结构不完整，请重试");
+      if (parsed.rule.ipId !== ip.id) throw new Error("解析结果不属于当前IP，已拒绝预览");
+      if (parsed.rule.source.rawMarkdown !== source
+        || parsed.rule.source.contentHash !== calculateScriptDirectorRuleContentHash(source)) {
+        throw new Error("解析结果与本次规则原文不一致，已拒绝预览");
+      }
+      setPreview(parsed.rule);
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "规则解析失败，请重试");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const handleConfirmSave = () => {
+    if (!preview) return;
+    try {
+      saveScriptDirectorRule(preview);
+      reloadRules();
+      setPreview(null);
+      setNotice("规则已保存，启用后才会参与脚本生成");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "专属编导规则保存失败");
+    }
+  };
+
+  const handleToggle = (rule: ScriptDirectorRule) => {
+    try {
+      setScriptDirectorRuleActive(ip.id, rule.id, rule.status !== "active");
+      reloadRules();
+      setNotice(rule.status === "active" ? "规则已停用" : "规则已启用");
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : "专属编导规则状态更新失败");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-5" onClick={onClose}>
+      <div className="card max-h-[92vh] w-full max-w-[820px] overflow-hidden p-0" onClick={event => event.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-[#F0EFE9] px-5 py-4">
+          <div>
+            <div className="text-[15px] font-bold text-[#1A1A1A]">「{ip.name}」专属编导规则</div>
+            <p className="mt-0.5 text-[11.5px] text-[#999]">上传或粘贴规则文档，AI只负责结构化；确认预览前不会保存。</p>
+          </div>
+          <button disabled={parsing} onClick={onClose} className="text-[13px] text-[#999] disabled:opacity-40">关闭</button>
+        </div>
+
+        <div className="max-h-[calc(92vh-72px)] space-y-5 overflow-y-auto p-5">
+          {error && <div className="rounded-[10px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</div>}
+          {notice && <div className="rounded-[10px] bg-[#FBFEF2] px-3 py-2 text-[12.5px] text-[#3B6D11]">{notice}</div>}
+
+          <section className="rounded-[14px] border border-[#E5E4DE] p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-[13px] font-bold text-[#333]">导入规则文档</div>
+                <div className="mt-0.5 text-[11px] text-[#999]">支持Markdown或纯文本，最多50000字。</div>
+              </div>
+              <label className="cursor-pointer rounded-[10px] bg-[#F2F1ED] px-3 py-1.5 text-[12px] font-semibold text-[#555]">
+                上传.md/.txt
+                <input
+                  aria-label="上传规则文档"
+                  type="file"
+                  accept=".md,.txt,text/markdown,text/plain"
+                  className="hidden"
+                  disabled={parsing}
+                  onChange={handleFile}
+                />
+              </label>
+            </div>
+            {fileName && <div className="mb-2 text-[11px] text-[#639922]">已读取：{fileName}</div>}
+            <textarea
+              aria-label="规则文档内容"
+              value={rawMarkdown}
+              onChange={event => {
+                setRawMarkdown(event.target.value);
+                setFileName(null);
+                setPreview(null);
+                setNotice(null);
+              }}
+              disabled={parsing}
+              rows={10}
+              placeholder="在这里粘贴完整的IP专属编导规则……"
+              className="w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-3.5 py-2.5 text-[12.5px] leading-5 outline-none focus:border-[#C8F04A] disabled:opacity-60"
+            />
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <span className="text-[11px] text-[#AAA]">{rawMarkdown.length}字</span>
+              <button
+                onClick={handleParse}
+                disabled={parsing || !rawMarkdown.trim()}
+                className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-bold text-white disabled:opacity-40"
+              >
+                {parsing ? "AI解析中，请稍候" : "AI解析并预览"}
+              </button>
+            </div>
+          </section>
+
+          {preview && (
+            <section className="rounded-[14px] border border-[#C8F04A] bg-[#FBFEF2] p-4">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-[14px] font-bold text-[#2A5A0A]">解析预览</div>
+                  <div className="mt-0.5 text-[11px] text-[#777]">请核对后再保存。平台定位继续读取IP档案，不在规则中重复存储。</div>
+                </div>
+                <button onClick={handleConfirmSave} className="rounded-[10px] bg-[#C8F04A] px-4 py-2 text-[12.5px] font-bold text-[#1A1A1A]">确认并保存规则</button>
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <section>
+                  <div className="mb-2 text-[11.5px] font-bold text-[#639922]">基础信息</div>
+                  <div className="space-y-1 rounded-[10px] bg-white p-2.5 text-[12px] text-[#333]">
+                    <div>规则名称：{preview.name}</div>
+                    <div>版本：{preview.version}</div>
+                    <div>目标受众：{preview.targetAudience.join("、") || "沿用IP档案"}</div>
+                    <div>原文文件：{preview.source.fileName ?? "粘贴文本"}</div>
+                  </div>
+                </section>
+                <DirectorPreviewSection title="常用口头禅" items={preview.language.catchphrases} />
+                <DirectorPreviewSection title="禁用表达" items={preview.language.forbiddenExpressions} />
+                <DirectorPreviewSection title="语气基调" items={preview.language.toneGuidelines} />
+                <DirectorPreviewSection title="开头必须做到" items={preview.opening.requirements} />
+                <DirectorPreviewSection title="开头禁止形式" items={preview.opening.forbiddenPatterns} />
+                <DirectorPreviewSection title="正文推理顺序" items={preview.body.reasoningSequence} />
+                <section>
+                  <div className="mb-2 text-[11.5px] font-bold text-[#639922]">案例使用规则</div>
+                  <div className="mb-2 rounded-[10px] bg-white p-2.5 text-[12px] text-[#333]">
+                    <div>案例数量限制：{preview.body.casePolicy.maximumCasesPerClaim === null
+                      ? "未设置"
+                      : `每个观点最多${preview.body.casePolicy.maximumCasesPerClaim}个`}</div>
+                    <div className="mt-1 flex flex-wrap gap-1.5 text-[10px] text-[#777]">
+                      <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">{DIRECTOR_LEVEL_LABELS[preview.body.casePolicy.level]}</span>
+                      <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">{DIRECTOR_ENFORCEMENT_LABELS[preview.body.casePolicy.enforcement]}</span>
+                      <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">作用范围：{DIRECTOR_SCOPE_LABELS[preview.body.casePolicy.scope]}（{preview.body.casePolicy.scope}）</span>
+                    </div>
+                  </div>
+                  <DirectorRuleItems items={preview.body.casePolicy.requirements} />
+                </section>
+                <DirectorPreviewSection title="素材使用边界" items={preview.body.materialPolicies} />
+                <DirectorPreviewSection title="结尾必须做到" items={preview.ending.requirements} />
+                <DirectorPreviewSection title="结尾禁止形式" items={preview.ending.forbiddenPatterns} />
+                <section>
+                  <div className="mb-2 text-[11.5px] font-bold text-[#639922]">压缩目标</div>
+                  <div className="mb-2 rounded-[10px] bg-white p-2.5 text-[12px] text-[#333]">
+                    <div>{preview.compression.enabled ? "已启用压缩" : "未启用压缩"}</div>
+                    {preview.compression.targetReduction
+                      ? <>
+                        <div className="mt-1">压缩目标：精简{preview.compression.targetReduction.minimumPercent}%至{preview.compression.targetReduction.maximumPercent}%</div>
+                        <div className="mt-1 flex flex-wrap gap-1.5 text-[10px] text-[#777]">
+                          <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">{DIRECTOR_LEVEL_LABELS[preview.compression.targetReduction.level]}</span>
+                          <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">{DIRECTOR_ENFORCEMENT_LABELS[preview.compression.targetReduction.enforcement]}</span>
+                          <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5">作用范围：{DIRECTOR_SCOPE_LABELS[preview.compression.targetReduction.scope]}（{preview.compression.targetReduction.scope}）</span>
+                        </div>
+                      </>
+                      : <div className="mt-1 text-[#999]">未设置具体压缩比例</div>}
+                  </div>
+                </section>
+                <DirectorPreviewSection title="压缩时必须保留" items={preview.compression.mustKeep} />
+                <DirectorPreviewSection title="压缩时优先删除" items={preview.compression.preferRemove} />
+                <DirectorPreviewSection title="其他压缩要求" items={preview.compression.otherRequirements} />
+                <DirectorPreviewSection title="特别说明" items={preview.specialRules} />
+                <DirectorPreviewSection title="生成前检查" items={preview.validationRequirements} />
+                <section className="md:col-span-2">
+                  <div className="mb-2 text-[11.5px] font-bold text-[#639922]">举例（仅作格式参考）</div>
+                  {preview.examples.length === 0
+                    ? <div className="text-[11.5px] text-[#AAA]">未识别到范例</div>
+                    : preview.examples.map(example => (
+                      <div key={example.id} className="mb-2 rounded-[10px] bg-white p-2.5 text-[12px] leading-5 text-[#333]">
+                        <div>{example.content}</div>
+                        <div className="mt-1 text-[10.5px] text-[#999]">类型：{example.kind}；演示：{example.demonstrates}</div>
+                        <div className="text-[10.5px] text-[#999]">来源：{example.sourceReference}；确认状态：{example.confirmationStatus}</div>
+                        <div className="text-[10.5px] text-[#999]">保护对象：{example.protectedEntities.join("、") || "无"}；不作为创作素材</div>
+                      </div>
+                    ))}
+                </section>
+              </div>
+            </section>
+          )}
+
+          <section>
+            <div className="mb-2 text-[13px] font-bold text-[#333]">已保存规则（{rules.length}）</div>
+            {rules.length === 0
+              ? <div className="rounded-[12px] border border-dashed border-[#E5E4DE] py-6 text-center text-[12px] text-[#999]">当前IP还没有保存专属编导规则</div>
+              : <div className="space-y-2">
+                {rules.map(rule => {
+                  const active = rule.status === "active";
+                  return (
+                    <div key={rule.id} className="flex items-center justify-between gap-3 rounded-[12px] border border-[#E5E4DE] p-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-[12.5px] font-bold text-[#333]">{rule.name} · v{rule.version}</div>
+                        <div className={`mt-1 text-[11px] ${active ? "text-[#3B6D11]" : "text-[#999]"}`}>{active ? "已启用" : "未启用"}</div>
+                      </div>
+                      <button
+                        aria-label={active ? "停用规则" : "启用规则"}
+                        onClick={() => handleToggle(rule)}
+                        className={`rounded-[10px] px-3 py-1.5 text-[11.5px] font-bold ${active ? "bg-[#F2F1ED] text-[#666]" : "bg-[#C8F04A] text-[#1A1A1A]"}`}
+                      >
+                        {active ? "停用" : "启用"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function IPCenterPage() {
   const { ips, activeIP, switchIP, createIP, updateIP, deleteIP, loading } = useIP();
   const [editing, setEditing] = useState<IPProfile | null>(null);
@@ -531,6 +890,7 @@ export default function IPCenterPage() {
   const [deleting, setDeleting] = useState<IPProfile | null>(null);
   const [debugging, setDebugging] = useState<IPProfile | null>(null);
   const [managingSamples, setManagingSamples] = useState<IPProfile | null>(null);
+  const [managingDirectorRules, setManagingDirectorRules] = useState<IPProfile | null>(null);
   const [assetCounts, setAssetCounts] = useState<Record<string, { topics: number; comments: number; scripts: number }>>({});
 
   useEffect(() => {
@@ -588,6 +948,9 @@ export default function IPCenterPage() {
                   </div>
                 </div>
                 <div className="flex gap-1">
+                  <button onClick={() => setManagingDirectorRules(ip)} className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[#999] hover:bg-[#FBFEF2] hover:text-[#639922]" title="专属编导规则">
+                    <Icon name="sparkle" />
+                  </button>
                   <button onClick={() => setManagingSamples(ip)} className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[#999] hover:bg-[#FBFEF2] hover:text-[#639922]" title="口播逐字稿样本库">
                     <Icon name="book" />
                   </button>
@@ -663,6 +1026,8 @@ export default function IPCenterPage() {
       {debugging && <DebugModal ip={debugging} isActive={debugging.id === activeIP?.id} onClose={() => setDebugging(null)} />}
 
       {managingSamples && <VoiceSampleModal ip={managingSamples} onClose={() => setManagingSamples(null)} />}
+
+      {managingDirectorRules && <ScriptDirectorRuleModal ip={managingDirectorRules} onClose={() => setManagingDirectorRules(null)} />}
     </div>
   );
 }

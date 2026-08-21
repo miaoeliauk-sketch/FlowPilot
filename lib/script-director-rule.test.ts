@@ -12,6 +12,7 @@ import {
   getScriptDirectorRuleForIP,
   getScriptDirectorRules,
   saveScriptDirectorRule,
+  setScriptDirectorRuleActive,
 } from "./script-director-rule-store";
 import { buildScriptDirectorBlock } from "./script-director-profile";
 import { resolveScriptDirectorRuleForGeneration } from "./script-director-rule-resolver";
@@ -167,6 +168,43 @@ test("规则库存储完整原文并严格按IP隔离读取", async () => {
   assert.equal(
     getScriptDirectorRuleForIP("ip-pengpeng", ruleA.id)?.source.contentHash,
     ruleA.source.contentHash,
+  );
+});
+
+test("启用规则只会停用同IP的其他规则且不会影响其他IP", async () => {
+  storage.clear();
+  const first = await createScriptDirectorRule(createValidInput());
+  const second = await createScriptDirectorRule(createValidInput({
+    version: "1.1.0",
+    rawMarkdown: "# 彭彭说AI专属编导规则\n\n新版规则。",
+  }));
+  const other = await createScriptDirectorRule(createValidInput({
+    ipId: "ip-other",
+    name: "其他IP专属规则",
+    rawMarkdown: "# 其他IP专属编导规则\n\n其他规则。",
+    profileContext: {
+      ipNameSnapshot: "其他IP",
+      source: "ip_profile",
+      usePlatformPositioningFromProfile: true,
+    },
+  }));
+  saveScriptDirectorRule(first);
+  saveScriptDirectorRule(second);
+  saveScriptDirectorRule(other);
+
+  setScriptDirectorRuleActive(first.ipId, first.id, true);
+  setScriptDirectorRuleActive(second.ipId, second.id, true);
+  setScriptDirectorRuleActive(other.ipId, other.id, true);
+
+  assert.equal(getScriptDirectorRuleForIP(first.ipId, first.id)?.status, "inactive");
+  assert.equal(getScriptDirectorRuleForIP(second.ipId, second.id)?.status, "active");
+  assert.equal(getScriptDirectorRuleForIP(other.ipId, other.id)?.status, "active");
+
+  setScriptDirectorRuleActive(second.ipId, second.id, false);
+  assert.equal(getScriptDirectorRuleForIP(second.ipId, second.id)?.status, "inactive");
+  assert.throws(
+    () => setScriptDirectorRuleActive(first.ipId, other.id, true),
+    /没有找到属于当前IP的专属编导规则/,
   );
 });
 
