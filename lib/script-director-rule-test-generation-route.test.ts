@@ -91,6 +91,8 @@ test("测试生成使用当前IP和完整规则原文并只返回临时稿", asy
       fullScript: "AI真正的问题，不是工具太少，而是没有明确任务。",
     });
     assert.equal(body.temporary, true);
+    assert.equal(typeof body.testProof, "string");
+    assert.equal(body.testProof.split(".").length, 2);
     assert.equal(body.apiMeta.apiCalled, true);
     assert.equal(requests.length, 1);
     const messages = requests[0]?.messages;

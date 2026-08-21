@@ -36,6 +36,7 @@ const SHUIMURAN: IPProfile = {
   color: "#123456",
   createdAt: "2026-08-05T00:00:00.000Z",
   updatedAt: "2026-08-05T00:00:00.000Z",
+  scriptDirectorProfileId: "shuimuran-v1",
 };
 
 function installBrowserEnvironment() {
@@ -176,15 +177,17 @@ test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
 });
 
-test("页面显示水木然时不会因底层IP存储格式异常而误判为刚刚切换IP", async () => {
+test("水木然迁移规则待测试时不会自动启用且底层IP存储格式异常不影响生成", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
   const originalFetch = globalThis.fetch;
   let generationRequestCount = 0;
-  globalThis.fetch = async input => {
+  const requestBodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (input, init) => {
     if (String(input) === "/api/script-factory") {
       generationRequestCount += 1;
+      requestBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
       return new Response(JSON.stringify(generatedScript("水木然专属测试")), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -205,6 +208,7 @@ test("页面显示水木然时不会因底层IP存储格式异常而误判为刚
     const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    assert.equal(view.queryByText("水木然专属编导规则已启用"), null);
     await user.type(
       view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "水木然专属测试",
@@ -215,6 +219,7 @@ test("页面显示水木然时不会因底层IP存储格式异常而误判为刚
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.equal(generationRequestCount, 1);
+    assert.equal(requestBodies[0]?.directorRule, null);
     assert.equal(view.queryByText("当前操盘IP刚刚发生变化，请确认后重新生成。"), null);
   } finally {
     globalThis.fetch = originalFetch;

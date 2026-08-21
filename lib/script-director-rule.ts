@@ -15,6 +15,8 @@ export type ScriptDirectorRuleTestType = "familiar" | "unfamiliar" | "stress";
 export interface ScriptDirectorRuleTestValidation {
   completedAt: string;
   testTypes: ScriptDirectorRuleTestType[];
+  proofs?: Record<ScriptDirectorRuleTestType, string>;
+  activationProof?: string;
 }
 
 export interface ScriptDirectorRuleItem {
@@ -273,13 +275,26 @@ export function parseScriptDirectorRule(value: unknown): ParseScriptDirectorRule
     if (error) return validationError(error);
   }
   if (value.testValidation !== undefined) {
-    if (!isRecord(value.testValidation)) return validationError("testValidation");
-    if (!isNonEmptyString(value.testValidation.completedAt)) return validationError("testValidation.completedAt");
-    if (!Array.isArray(value.testValidation.testTypes)
-      || value.testValidation.testTypes.length !== RULE_TEST_TYPES.size
-      || !value.testValidation.testTypes.every(item => RULE_TEST_TYPES.has(item as ScriptDirectorRuleTestType))
-      || new Set(value.testValidation.testTypes).size !== RULE_TEST_TYPES.size) {
+    const testValidation = value.testValidation;
+    if (!isRecord(testValidation)) return validationError("testValidation");
+    if (!isNonEmptyString(testValidation.completedAt)) return validationError("testValidation.completedAt");
+    if (!Array.isArray(testValidation.testTypes)
+      || testValidation.testTypes.length !== RULE_TEST_TYPES.size
+      || !testValidation.testTypes.every(item => RULE_TEST_TYPES.has(item as ScriptDirectorRuleTestType))
+      || new Set(testValidation.testTypes).size !== RULE_TEST_TYPES.size) {
       return validationError("testValidation.testTypes");
+    }
+    const proofs = testValidation.proofs;
+    if (proofs !== undefined) {
+      if (!isRecord(proofs)
+        || Object.keys(proofs).length !== RULE_TEST_TYPES.size
+        || [...RULE_TEST_TYPES].some(testType => !isNonEmptyString(proofs[testType]))) {
+        return validationError("testValidation.proofs");
+      }
+    }
+    if (testValidation.activationProof !== undefined
+      && !isNonEmptyString(testValidation.activationProof)) {
+      return validationError("testValidation.activationProof");
     }
   }
   if (!isNonEmptyString(value.createdAt)) return validationError("createdAt");

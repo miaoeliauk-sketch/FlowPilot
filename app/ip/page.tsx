@@ -612,6 +612,8 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
   const [testing, setTesting] = useState(false);
   const [testProgress, setTestProgress] = useState<string | null>(null);
   const testRunSequence = useRef(0);
+  const [togglingRuleId, setTogglingRuleId] = useState<string | null>(null);
+  const toggleRequestInFlight = useRef(false);
 
   const reloadRules = () => {
     try {
@@ -732,13 +734,44 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
 
   const contamination = preview ? detectScriptDirectorExampleContamination(preview) : null;
 
-  const handleToggle = (rule: ScriptDirectorRule) => {
+  const handleToggle = async (rule: ScriptDirectorRule) => {
+    if (toggleRequestInFlight.current) return;
+    toggleRequestInFlight.current = true;
+    setTogglingRuleId(rule.id);
+    setError(null);
     try {
-      setScriptDirectorRuleActive(ip.id, rule.id, rule.status !== "active");
+      if (rule.status === "active") {
+        const activationProof = rule.testValidation?.activationProof;
+        if (!activationProof?.trim()) {
+          throw new Error("当前规则缺少有效的启用凭证，请刷新后重试");
+        }
+        const response = await apiFetch("/api/script-director-rule/deactivate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ipId: ip.id, ruleId: rule.id, activationProof }),
+        });
+        const data = await response.json() as { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "专属编导规则服务端停用失败");
+        setScriptDirectorRuleActive(ip.id, rule.id, false);
+      } else {
+        const response = await apiFetch("/api/script-director-rule/activate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ipId: ip.id, rule }),
+        });
+        const data = await response.json() as { activationProof?: string; error?: string };
+        if (!response.ok || typeof data.activationProof !== "string" || !data.activationProof.trim()) {
+          throw new Error(data.error ?? "专属编导规则服务端核验失败");
+        }
+        setScriptDirectorRuleActive(ip.id, rule.id, true, data.activationProof);
+      }
       reloadRules();
       setNotice(rule.status === "active" ? "规则已停用" : "规则已启用");
     } catch (toggleError) {
       setError(toggleError instanceof Error ? toggleError.message : "专属编导规则状态更新失败");
+    } finally {
+      toggleRequestInFlight.current = false;
+      setTogglingRuleId(null);
     }
   };
 
@@ -765,6 +798,7 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
     setNotice(null);
     setTestResults({});
     const completed: Partial<Record<ScriptDirectorRuleTestType, ScriptDirectorRuleTestGenerationResult>> = {};
+    const proofs: Partial<Record<ScriptDirectorRuleTestType, string>> = {};
     try {
       const knowledgeContext = getKnowledgeEntries()
         .filter(entry => entry.ipId === ip.id)
@@ -783,23 +817,31 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ipProfile: ip, rule, testType, topic: testTopics[testType], knowledgeContext }),
         });
-        const data = await response.json() as { result?: ScriptDirectorRuleTestGenerationResult; error?: string };
+        const data = await response.json() as {
+          result?: ScriptDirectorRuleTestGenerationResult;
+          testProof?: string;
+          error?: string;
+        };
         if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
         if (!data.result
           || data.result.testType !== testType
           || data.result.topic !== testTopics[testType].trim()
           || !data.result.title.trim()
-          || !data.result.fullScript.trim()) {
+          || !data.result.fullScript.trim()
+          || typeof data.testProof !== "string"
+          || !data.testProof.trim()) {
           throw new Error("测试生成返回内容不完整，请重试");
         }
         if (testRunSequence.current !== runId) return;
         completed[testType] = data.result;
+        proofs[testType] = data.testProof;
         setTestResults({ ...completed });
       }
       if (testRunSequence.current !== runId) return;
       markScriptDirectorRuleTestCompleted(ip.id, rule.id, {
         completedAt: new Date().toISOString(),
         testTypes,
+        proofs: proofs as Record<ScriptDirectorRuleTestType, string>,
       });
       reloadRules();
       setNotice("三类测试已完成，现在可以正式启用这份规则");
@@ -984,7 +1026,7 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
               ? <div className="rounded-[12px] border border-dashed border-[#E5E4DE] py-6 text-center text-[12px] text-[#999]">当前IP还没有保存专属编导规则</div>
               : <div className="space-y-2">
                 {rules.map(rule => {
-                  const tested = Boolean(rule.testValidation);
+                  const tested = Boolean(rule.testValidation?.proofs);
                   const active = rule.status === "active" && tested;
                   const testingThisRule = testingRuleId === rule.id;
                   return (
@@ -1008,11 +1050,11 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
                           {(active || tested) && (
                             <button
                               aria-label={active ? "停用规则" : "启用规则"}
-                              disabled={testing}
+                              disabled={testing || togglingRuleId !== null}
                               onClick={() => handleToggle(rule)}
                               className={`rounded-[10px] px-3 py-1.5 text-[11.5px] font-bold disabled:opacity-40 ${active ? "bg-[#F2F1ED] text-[#666]" : "bg-[#C8F04A] text-[#1A1A1A]"}`}
                             >
-                              {active ? "停用" : "启用"}
+                              {togglingRuleId === rule.id ? "处理中" : active ? "停用" : "启用"}
                             </button>
                           )}
                         </div>

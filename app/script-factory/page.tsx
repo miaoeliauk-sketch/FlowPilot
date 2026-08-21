@@ -27,7 +27,9 @@ import type {
 import { parseScriptPostGenerationAudit } from "@/lib/script-factory-contract";
 import { addScriptAssetForTopic, resolveTopicForScript, TopicScriptLinkError } from "@/lib/topic-script-link";
 import type { CaseDecision, CoverageAssessment, CoverageSourceReference } from "@/lib/script-factory-coverage";
-import { shouldUseShuimuranDirector } from "@/lib/script-director-profile";
+import type { ScriptDirectorRule } from "@/lib/script-director-rule";
+import { getScriptDirectorRules } from "@/lib/script-director-rule-store";
+import { ensureShuimuranDirectorRuleMigrated } from "@/lib/shuimuran-director-rule-migration";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -745,6 +747,7 @@ export default function ScriptFactoryPage() {
   const [partialDraftSavedAt, setPartialDraftSavedAt] = useState<string | null>(null);
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
   const [linkedTopic, setLinkedTopic] = useState<TopicAsset | null>(null);
+  const [activeDirectorRule, setActiveDirectorRule] = useState<ScriptDirectorRule | null>(null);
 
   const currentFormat = FORMAT_CATEGORIES.find(f => f.id === formatCategory) ?? FORMAT_CATEGORIES[0];
   const caseCandidates = getKnowledgeEntries().filter(entry => {
@@ -753,11 +756,7 @@ export default function ScriptFactoryPage() {
     return category === "爆款案例" || category === "选题案例" || category === "IP历史内容" || category === "IP高表现内容";
   });
   const selectedKnowledgeCase = caseCandidates.find(entry => entry.id === selectedCaseId) ?? null;
-  const isShuimuranDedicatedMode = shouldUseShuimuranDirector({
-    generationMode,
-    ipName: activeIP?.name,
-    profileId: activeIP?.scriptDirectorProfileId,
-  });
+  const isDirectorRuleEnabled = generationMode === "ip" && activeDirectorRule !== null;
   function switchGenerationMode(nextMode: GenerationMode) {
     generationSequenceRef.current += 1;
     setGenerationMode(nextMode);
@@ -781,6 +780,33 @@ export default function ScriptFactoryPage() {
         extractionStatus: item.extractionStatus,
       })));
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRule = async () => {
+      if (!activeIP) {
+        setActiveDirectorRule(null);
+        return;
+      }
+      setActiveDirectorRule(null);
+      try {
+        await ensureShuimuranDirectorRuleMigrated({
+          ipId: activeIP.id,
+          ipName: activeIP.name,
+          legacyProfileId: activeIP.scriptDirectorProfileId,
+        });
+        const activeRule = getScriptDirectorRules(activeIP.id)
+          .find(rule => rule.status === "active"
+            && rule.testValidation
+            && rule.testValidation.activationProof) ?? null;
+        if (!cancelled) setActiveDirectorRule(activeRule);
+      } catch {
+        if (!cancelled) setActiveDirectorRule(null);
+      }
+    };
+    void loadRule();
+    return () => { cancelled = true; };
+  }, [activeIP?.id, activeIP?.name, activeIP?.scriptDirectorProfileId]);
 
   useEffect(() => {
     setCaseDecision(null);
@@ -992,6 +1018,7 @@ export default function ScriptFactoryPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           generationMode: requestMode,
+          directorRule: requestMode === "ip" ? activeDirectorRule : undefined,
           ipProfile: ip, topic: t,
           styleProfile: getStyleProfile(ip.id) ?? null,
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
@@ -1293,8 +1320,8 @@ export default function ScriptFactoryPage() {
               {activeIP?.avatar ?? "?"}
             </span>
             当前以 <b>{activeIP?.name ?? "未选择IP"}</b> 的人设、受众、表达风格与拍摄习惯生成内容。
-            {isShuimuranDedicatedMode && (
-              <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-[#639922]">水木然专属编导规则已启用</span>
+            {isDirectorRuleEnabled && (
+              <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-[#639922]">{activeDirectorRule.name}已启用</span>
             )}
           </div>
           <button onClick={() => setShowContext(true)} disabled={!activeIP} className="whitespace-nowrap rounded-[10px] bg-white px-3 py-1.5 text-[12px] font-semibold text-[#7A5C00] disabled:opacity-50">

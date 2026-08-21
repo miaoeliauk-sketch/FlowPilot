@@ -401,7 +401,15 @@ test("用户填写三类选题完成临时测试后才能启用且测试稿不�
     topic: string;
     knowledgeContext: Array<{ id: string; ipId: string; title: string }>;
   }> = [];
+  const activationRequests: Array<{ ipId: string; rule: { id: string } }> = [];
   globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/script-director-rule/activate") {
+      activationRequests.push(JSON.parse(String(init?.body)) as { ipId: string; rule: { id: string } });
+      return new Response(JSON.stringify({ activationProof: "server-signed-activation-proof" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     if (String(input) !== "/api/script-director-rule/test-generate") {
       return new Response(JSON.stringify({ error: "未知测试接口" }), { status: 404 });
     }
@@ -413,6 +421,7 @@ test("用户填写三类选题完成临时测试后才能启用且测试稿不�
     testRequests.push(request);
     return new Response(JSON.stringify({
       temporary: true,
+      testProof: `proof-${request.testType}`,
       result: {
         testType: request.testType,
         topic: request.topic,
@@ -459,6 +468,115 @@ test("用户填写三类选题完成临时测试后才能启用且测试稿不�
     assert.ok(view.getByText("测试稿仅用于验证规则，不会进入正式脚本库或学习数据"));
     assert.ok(view.getByRole("button", { name: "启用规则" }));
     assert.equal(getScriptDirectorRules(IP_A.id)[0]?.testValidation?.testTypes.length, 3);
+    assert.deepEqual(getScriptDirectorRules(IP_A.id)[0]?.testValidation?.proofs, {
+      familiar: "proof-familiar",
+      unfamiliar: "proof-unfamiliar",
+      stress: "proof-stress",
+    });
+    await user.click(view.getByRole("button", { name: "启用规则" }));
+    assert.equal(activationRequests.length, 1);
+    assert.equal(activationRequests[0]?.ipId, IP_A.id);
+    assert.equal(getScriptDirectorRules(IP_A.id)[0]?.status, "active");
+    assert.equal(
+      getScriptDirectorRules(IP_A.id)[0]?.testValidation?.activationProof,
+      "server-signed-activation-proof",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("启用请求进行期间锁定按钮并拒绝连续发起第二次请求", async () => {
+  const rule = await previewRule("# IP A专属编导规则\n\n启用请求不能重复发送。");
+  rule.testValidation = {
+    completedAt: "2026-08-21T13:00:00.000Z",
+    testTypes: ["familiar", "unfamiliar", "stress"],
+    proofs: { familiar: "proof-familiar", unfamiliar: "proof-unfamiliar", stress: "proof-stress" },
+  };
+  localStorage.setItem("ipwr:script_director_rules_v1", JSON.stringify([rule]));
+  const originalFetch = globalThis.fetch;
+  let activationRequests = 0;
+  let resolveActivation: ((response: Response) => void) | undefined;
+  globalThis.fetch = async input => {
+    if (String(input) !== "/api/script-director-rule/activate") {
+      return new Response(JSON.stringify({ error: "未知测试接口" }), { status: 404 });
+    }
+    activationRequests += 1;
+    return new Promise<Response>(resolve => { resolveActivation = resolve; });
+  };
+
+  try {
+    const { fireEvent, render, waitFor } = await import("@testing-library/react");
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const ruleButtons = await view.findAllByTitle("专属编导规则");
+    fireEvent.click(ruleButtons[0]);
+    const activateButton = await view.findByRole("button", { name: "启用规则" });
+    fireEvent.click(activateButton);
+    fireEvent.click(activateButton);
+
+    await waitFor(() => assert.equal(activationRequests, 1));
+    assert.equal(activateButton.hasAttribute("disabled"), true);
+
+    resolveActivation?.(new Response(JSON.stringify({ activationProof: "server-signed-activation-proof" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    await waitFor(() => assert.equal(getScriptDirectorRules(IP_A.id)[0]?.status, "active"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("停用请求进行期间锁定按钮并拒绝连续发起第二次请求", async () => {
+  const rule = await previewRule("# IP A专属编导规则\n\n停用请求不能重复发送。");
+  rule.status = "active";
+  rule.testValidation = {
+    completedAt: "2026-08-21T13:00:00.000Z",
+    testTypes: ["familiar", "unfamiliar", "stress"],
+    proofs: { familiar: "proof-familiar", unfamiliar: "proof-unfamiliar", stress: "proof-stress" },
+    activationProof: "server-signed-activation-proof",
+  };
+  localStorage.setItem("ipwr:script_director_rules_v1", JSON.stringify([rule]));
+  const originalFetch = globalThis.fetch;
+  let deactivationRequests = 0;
+  let capturedActivationProof = "";
+  let resolveDeactivation: ((response: Response) => void) | undefined;
+  globalThis.fetch = async (input, init) => {
+    if (String(input) !== "/api/script-director-rule/deactivate") {
+      return new Response(JSON.stringify({ error: "未知测试接口" }), { status: 404 });
+    }
+    deactivationRequests += 1;
+    const requestBody: unknown = JSON.parse(String(init?.body));
+    if (isRecord(requestBody) && typeof requestBody.activationProof === "string") {
+      capturedActivationProof = requestBody.activationProof;
+    }
+    return new Promise<Response>(resolve => { resolveDeactivation = resolve; });
+  };
+
+  try {
+    const { fireEvent, render, waitFor } = await import("@testing-library/react");
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const ruleButtons = await view.findAllByTitle("专属编导规则");
+    fireEvent.click(ruleButtons[0]);
+    const deactivateButton = await view.findByRole("button", { name: "停用规则" });
+    fireEvent.click(deactivateButton);
+    fireEvent.click(deactivateButton);
+
+    await waitFor(() => assert.equal(deactivationRequests, 1));
+    assert.equal(capturedActivationProof, "server-signed-activation-proof");
+    assert.equal(deactivateButton.hasAttribute("disabled"), true);
+
+    resolveDeactivation?.(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    await waitFor(() => assert.equal(getScriptDirectorRules(IP_A.id)[0]?.status, "inactive"));
   } finally {
     globalThis.fetch = originalFetch;
   }

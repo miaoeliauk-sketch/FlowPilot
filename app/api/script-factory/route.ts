@@ -2,7 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import type { IPProfile, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
-import { buildScriptDirectorBlock, shouldUseShuimuranDirector } from "@/lib/script-director-profile";
+import { getActiveScriptDirectorRuleOnServer } from "@/lib/script-director-rule-activation-registry";
+import { resolveScriptDirectorRuleForGeneration } from "@/lib/script-director-rule-resolver";
+import type { ScriptDirectorRule } from "@/lib/script-director-rule";
+import { isMigratedShuimuranDirectorRule } from "@/lib/shuimuran-director-rule-migration";
+import {
+  getScriptDirectorRuleProofSecret,
+  verifyScriptDirectorRuleActivationProof,
+  verifyScriptDirectorRuleTestProof,
+} from "@/lib/script-director-rule-proof";
 import { parseRequiredIPProfile } from "@/lib/ip-profile-validation";
 import { parseIPStyleProfileForIP } from "@/lib/ip-style-profile-validation";
 import {
@@ -52,6 +60,7 @@ import { SPOKEN_PUNCTUATION_GENERATION_RULES } from "@/lib/script-spoken-punctua
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
+const MAX_DIRECTOR_RULE_CHARS = 50_000;
 // 60秒×（首次请求+1次重试）×2个阶段=最坏4分钟。
 const SCRIPT_STAGE_RETRY_OPTIONS = {
   timeoutMs: SCRIPT_STAGE_TIMEOUT_MS,
@@ -143,6 +152,11 @@ interface RequestBody {
     sourceUrl?: string;
     occurredAt?: string;
   } | null;
+  directorRule?: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ── 内容形式配置：每种形式对应完全不同的内容架构指令，不是简单改字数 ──
@@ -516,11 +530,125 @@ export async function POST(req: NextRequest) {
   }
   const generationMode = body.generationMode === "ip" ? "ip" : "standard";
   const isIPSpecificGeneration = generationMode === "ip";
-  const isShuimuranDedicatedGeneration = shouldUseShuimuranDirector({
-    generationMode,
-    ipName: ip.name,
-    profileId: ip.scriptDirectorProfileId,
-  });
+  let submittedDirectorRule: ScriptDirectorRule | null = null;
+  let serverActiveDirectorRule: ReturnType<typeof getActiveScriptDirectorRuleOnServer> = null;
+  if (isIPSpecificGeneration
+    && !Object.prototype.hasOwnProperty.call(body, "directorRule")) {
+    return NextResponse.json({
+      error: "缺少专属编导规则状态，请刷新页面后重新生成。",
+      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+    }, { status: 400 });
+  }
+  if (isIPSpecificGeneration) {
+    try {
+      serverActiveDirectorRule = getActiveScriptDirectorRuleOnServer(ip.id);
+    } catch {
+      return NextResponse.json({
+        error: "专属编导规则启用状态暂时无法核实，请稍后重试。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 500 });
+    }
+    if (serverActiveDirectorRule && body.directorRule === null) {
+      return NextResponse.json({
+        error: "当前IP已有启用的专属编导规则，请刷新页面后重新生成。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+    if (!serverActiveDirectorRule && body.directorRule !== null) {
+      return NextResponse.json({
+        error: "专属编导规则启用状态已经失效，请返回IP身份中心重新启用。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+  }
+  if (isIPSpecificGeneration && body.directorRule !== null) {
+    if (!isRecord(body.directorRule) || typeof body.directorRule.id !== "string") {
+      return NextResponse.json({
+        error: "专属编导规则格式错误，请返回IP身份中心重新确认。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+    const resolution = resolveScriptDirectorRuleForGeneration({
+      generationMode,
+      ipId: ip.id,
+      activeRuleId: body.directorRule.id,
+      repository: { getForIP: () => body.directorRule as ScriptDirectorRule },
+    });
+    if (!resolution.enabled) {
+      return NextResponse.json({
+        error: resolution.reason === "rule_ip_mismatch"
+          ? "专属编导规则不属于当前IP，已拒绝生成。"
+          : "专属编导规则无效或未启用，请返回IP身份中心重新确认。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+    submittedDirectorRule = resolution.rule;
+    if (submittedDirectorRule.source.rawMarkdown.length > MAX_DIRECTOR_RULE_CHARS) {
+      return NextResponse.json({
+        error: `专属编导规则原文最多${MAX_DIRECTOR_RULE_CHARS}字，请精简后重试。`,
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+  }
+  const isShuimuranDedicatedGeneration = submittedDirectorRule !== null
+    && isMigratedShuimuranDirectorRule({
+      ipId: ip.id,
+      ipName: ip.name,
+      rule: submittedDirectorRule,
+    });
+  if (submittedDirectorRule) {
+    const proofs = submittedDirectorRule.testValidation?.proofs;
+    if ((submittedDirectorRule.source.type !== "markdown" && !isShuimuranDedicatedGeneration) || !proofs) {
+      return NextResponse.json({
+        error: "专属编导规则测试凭证无效，请重新完成三类测试后再启用。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+    let proofSecret: string;
+    try {
+      proofSecret = await getScriptDirectorRuleProofSecret();
+    } catch {
+      return NextResponse.json({
+        error: "专属编导规则验证服务暂不可用，请稍后重试。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 500 });
+    }
+    const proofValid = (["familiar", "unfamiliar", "stress"] as const).every(testType => (
+      verifyScriptDirectorRuleTestProof(proofs[testType], {
+        ipId: ip.id,
+        ruleId: submittedDirectorRule.id,
+        contentHash: submittedDirectorRule.source.contentHash,
+        testType,
+      }, proofSecret)
+    ));
+    if (!proofValid) {
+      return NextResponse.json({
+        error: "专属编导规则测试凭证无效，请重新完成三类测试后再启用。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+    const activationProof = submittedDirectorRule.testValidation?.activationProof;
+    const active = serverActiveDirectorRule;
+    if (!active
+      || active.ruleId !== submittedDirectorRule.id
+      || active.contentHash !== submittedDirectorRule.source.contentHash) {
+      return NextResponse.json({
+        error: "专属编导规则启用状态已经失效，请返回IP身份中心重新启用。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+    if (!activationProof || !verifyScriptDirectorRuleActivationProof(activationProof, {
+      ipId: ip.id,
+      ruleId: submittedDirectorRule.id,
+      contentHash: submittedDirectorRule.source.contentHash,
+      activationId: active.activationId,
+    }, proofSecret)) {
+      return NextResponse.json({
+        error: "专属编导规则启用凭证无效，请返回IP身份中心重新启用。",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 400 });
+    }
+  }
   const sourceContextResult = parseIPSourceContext(
     isIPSpecificGeneration ? body.ipSourceContext : undefined,
     ip.id,
@@ -613,9 +741,7 @@ export async function POST(req: NextRequest) {
     durationSeconds,
   );
 
-  const directorBlock = isShuimuranDedicatedGeneration
-    ? buildScriptDirectorBlock(ip.scriptDirectorProfileId)
-    : "";
+  const directorBlock = submittedDirectorRule?.source.rawMarkdown ?? "";
   const rawIPBlock = [buildIPContextBlock(ip, styleProfile).slice(0, 6000), directorBlock]
     .filter(Boolean)
     .join("\n\n");

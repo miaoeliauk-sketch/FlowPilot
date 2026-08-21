@@ -52,7 +52,7 @@ function requestFor(extra: Record<string, unknown> = {}): NextRequest {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
     body: JSON.stringify({
-      generationMode: "ip", ipProfile: IP, topic: "变化背后的原因",
+      generationMode: "ip", directorRule: null, ipProfile: IP, topic: "变化背后的原因",
       formatCategory: "short", needsStoryboard: false, needsShootingTips: false,
       ...extra,
     }),

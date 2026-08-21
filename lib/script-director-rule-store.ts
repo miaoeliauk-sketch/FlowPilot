@@ -86,6 +86,7 @@ export function setScriptDirectorRuleActive(
   ipId: string,
   ruleId: string,
   active: boolean,
+  activationProof?: string,
 ): void {
   const all = readAllRules();
   const target = all.find(rule => rule.ipId === ipId && rule.id === ruleId);
@@ -93,12 +94,26 @@ export function setScriptDirectorRuleActive(
   if (active && !target.testValidation) {
     throw new Error("专属编导规则至少完成一次三类测试生成后才能启用");
   }
+  if (active && target.source.type === "markdown" && !activationProof?.trim()) {
+    throw new Error("专属编导规则必须通过服务端核验后才能启用");
+  }
 
   const updatedAt = new Date().toISOString();
   const next = all.map(rule => {
     if (rule.ipId !== ipId) return rule;
     if (rule.id === ruleId) {
-      return { ...rule, status: active ? "active" as const : "inactive" as const, updatedAt };
+      return {
+        ...rule,
+        status: active ? "active" as const : "inactive" as const,
+        testValidation: rule.testValidation
+          ? {
+              ...rule.testValidation,
+              ...(active && activationProof ? { activationProof } : {}),
+              ...(!active ? { activationProof: undefined } : {}),
+            }
+          : undefined,
+        updatedAt,
+      };
     }
     if (active && rule.status === "active") {
       return { ...rule, status: "inactive" as const, updatedAt };

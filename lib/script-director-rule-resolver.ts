@@ -1,5 +1,3 @@
-import type { ScriptDirectorProfileId } from "./script-director-profile";
-import { buildScriptDirectorBlock, shouldUseShuimuranDirector } from "./script-director-profile";
 import {
   calculateScriptDirectorRuleContentHash,
   parseScriptDirectorRule,
@@ -15,8 +13,9 @@ export type ResolvedScriptDirectorRule =
     enabled: true;
     ruleId: string;
     version: string;
-    source: "stored" | "legacy_builtin";
+    source: "stored";
     promptBlock: string;
+    rule: ScriptDirectorRule;
   }
   | {
     enabled: false;
@@ -26,9 +25,7 @@ export type ResolvedScriptDirectorRule =
 export function resolveScriptDirectorRuleForGeneration(input: {
   generationMode: "standard" | "ip";
   ipId: string;
-  ipName: string;
   activeRuleId: string | null | undefined;
-  legacyProfileId: ScriptDirectorProfileId | null | undefined;
   repository?: ScriptDirectorRuleRepository;
 }): ResolvedScriptDirectorRule {
   if (input.generationMode !== "ip") {
@@ -52,20 +49,7 @@ export function resolveScriptDirectorRuleForGeneration(input: {
       version: parsed.rule.version,
       source: "stored",
       promptBlock: parsed.rule.source.rawMarkdown,
-    };
-  }
-
-  if (shouldUseShuimuranDirector({
-    generationMode: input.generationMode,
-    ipName: input.ipName,
-    profileId: input.legacyProfileId,
-  })) {
-    return {
-      enabled: true,
-      ruleId: "shuimuran-v1",
-      version: "1.0.0",
-      source: "legacy_builtin",
-      promptBlock: buildScriptDirectorBlock("shuimuran-v1"),
+      rule: parsed.rule,
     };
   }
 

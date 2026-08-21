@@ -16,7 +16,6 @@ import {
   saveScriptDirectorRule,
   setScriptDirectorRuleActive,
 } from "./script-director-rule-store";
-import { buildScriptDirectorBlock } from "./script-director-profile";
 import { resolveScriptDirectorRuleForGeneration } from "./script-director-rule-resolver";
 
 class MemoryStorage implements Storage {
@@ -201,9 +200,9 @@ test("启用规则只会停用同IP的其他规则且不会影响其他IP", asyn
     });
   }
 
-  setScriptDirectorRuleActive(first.ipId, first.id, true);
-  setScriptDirectorRuleActive(second.ipId, second.id, true);
-  setScriptDirectorRuleActive(other.ipId, other.id, true);
+  setScriptDirectorRuleActive(first.ipId, first.id, true, "signed-first-activation-proof");
+  setScriptDirectorRuleActive(second.ipId, second.id, true, "signed-second-activation-proof");
+  setScriptDirectorRuleActive(other.ipId, other.id, true, "signed-other-activation-proof");
 
   assert.equal(getScriptDirectorRuleForIP(first.ipId, first.id)?.status, "inactive");
   assert.equal(getScriptDirectorRuleForIP(second.ipId, second.id)?.status, "active");
@@ -212,7 +211,7 @@ test("启用规则只会停用同IP的其他规则且不会影响其他IP", asyn
   setScriptDirectorRuleActive(second.ipId, second.id, false);
   assert.equal(getScriptDirectorRuleForIP(second.ipId, second.id)?.status, "inactive");
   assert.throws(
-    () => setScriptDirectorRuleActive(first.ipId, other.id, true),
+    () => setScriptDirectorRuleActive(first.ipId, other.id, true, "signed-activation-proof"),
     /没有找到属于当前IP的专属编导规则/,
   );
 });
@@ -238,8 +237,12 @@ test("规则完成三类测试前不能启用，完成后才允许启用", async
     testTypes: ["familiar", "unfamiliar", "stress"],
   });
 
-  setScriptDirectorRuleActive(rule.ipId, rule.id, true);
+  setScriptDirectorRuleActive(rule.ipId, rule.id, true, "signed-activation-proof");
   assert.equal(getScriptDirectorRuleForIP(rule.ipId, rule.id)?.status, "active");
+  assert.equal(
+    getScriptDirectorRuleForIP(rule.ipId, rule.id)?.testValidation?.activationProof,
+    "signed-activation-proof",
+  );
 });
 
 test("普通保存接口不能伪造三类测试完成凭证", async () => {
@@ -300,22 +303,15 @@ test("规则库损坏时明确报错并阻止覆盖原始数据", async () => {
   assert.equal(storage.getItem(SCRIPT_DIRECTOR_RULE_STORAGE_KEY), corrupted);
 });
 
-test("旧shuimuran-v1绑定通过兼容层保持完全相同的生成规则", () => {
+test("旧shuimuran-v1绑定不再绕过标准规则库直接启用", () => {
   storage.clear();
   const resolved = resolveScriptDirectorRuleForGeneration({
     generationMode: "ip",
     ipId: "ip-shuimuran",
-    ipName: "水木然",
     activeRuleId: null,
-    legacyProfileId: "shuimuran-v1",
   });
 
-  assert.equal(resolved.enabled, true);
-  if (!resolved.enabled) return;
-  assert.equal(resolved.ruleId, "shuimuran-v1");
-  assert.equal(resolved.version, "1.0.0");
-  assert.equal(resolved.source, "legacy_builtin");
-  assert.equal(resolved.promptBlock, buildScriptDirectorBlock("shuimuran-v1"));
+  assert.deepEqual(resolved, { enabled: false, reason: "no_applicable_rule" });
 });
 
 test("兼容层不会把水木然规则泄漏到固定生成、其他IP或旧空记录", () => {
@@ -324,23 +320,17 @@ test("兼容层不会把水木然规则泄漏到固定生成、其他IP或旧空
     {
       generationMode: "standard" as const,
       ipId: "ip-shuimuran",
-      ipName: "水木然",
       activeRuleId: null,
-      legacyProfileId: "shuimuran-v1" as const,
     },
     {
       generationMode: "ip" as const,
       ipId: "ip-other",
-      ipName: "其他IP",
       activeRuleId: null,
-      legacyProfileId: "shuimuran-v1" as const,
     },
     {
       generationMode: "ip" as const,
       ipId: "ip-old",
-      ipName: "旧IP",
       activeRuleId: null,
-      legacyProfileId: null,
     },
   ];
 
@@ -366,9 +356,7 @@ test("生成规则解析会复核存储层返回的IP归属并拒绝跨IP规则"
   const resolved = resolveScriptDirectorRuleForGeneration({
     generationMode: "ip",
     ipId: "ip-pengpeng",
-    ipName: "彭彭说AI",
     activeRuleId: otherIPRule.id,
-    legacyProfileId: null,
     repository: {
       getForIP: () => ({ ...otherIPRule, status: "active" }),
     },
@@ -386,9 +374,7 @@ test("生成入口拒绝未完成三类测试的历史启用规则", async () =>
   assert.deepEqual(resolveScriptDirectorRuleForGeneration({
     generationMode: "ip",
     ipId: untested.ipId,
-    ipName: untested.profileContext.ipNameSnapshot,
     activeRuleId: untested.id,
-    legacyProfileId: null,
     repository: { getForIP: () => ({ ...untested, status: "active" }) },
   }), {
     enabled: false,
@@ -461,9 +447,7 @@ test("生成入口拒绝存储适配器返回的正文哈希不一致规则", as
   assert.deepEqual(resolveScriptDirectorRuleForGeneration({
     generationMode: "ip",
     ipId: valid.ipId,
-    ipName: valid.profileContext.ipNameSnapshot,
     activeRuleId: valid.id,
-    legacyProfileId: null,
     repository: { getForIP: () => tampered },
   }), {
     enabled: false,

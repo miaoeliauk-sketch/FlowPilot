@@ -11,6 +11,10 @@ import {
 import {
   parseScriptDirectorRuleTestGeneration,
 } from "@/lib/script-director-rule-test-generation";
+import {
+  createScriptDirectorRuleTestProof,
+  getScriptDirectorRuleProofSecret,
+} from "@/lib/script-director-rule-proof";
 import { callStructuredDeepSeek, StructuredDeepSeekError } from "@/lib/structured-deepseek";
 
 const TEST_TYPES = new Set<ScriptDirectorRuleTestType>(["familiar", "unfamiliar", "stress"]);
@@ -175,9 +179,17 @@ ${parsedRule.rule.source.rawMarkdown}
       timeoutMs: 60_000,
       maxRetries: 1,
     });
+    const proofSecret = await getScriptDirectorRuleProofSecret();
+    const testProof = createScriptDirectorRuleTestProof({
+      ipId: parsedIP.ipProfile.id,
+      ruleId: parsedRule.rule.id,
+      contentHash: parsedRule.rule.source.contentHash,
+      testType,
+    }, proofSecret);
     return NextResponse.json({
       result: result.data,
       temporary: true,
+      testProof,
       apiMeta: {
         apiCalled: true,
         model: DEEPSEEK_MODEL,

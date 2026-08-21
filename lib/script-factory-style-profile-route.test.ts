@@ -3,6 +3,22 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {
+  calculateScriptDirectorRuleContentHash,
+  type ScriptDirectorRule,
+  type ScriptDirectorRuleTestValidation,
+} from "./script-director-rule";
+import {
+  activateScriptDirectorRuleOnServer,
+  deactivateScriptDirectorRuleOnServer,
+  getActiveScriptDirectorRuleOnServer,
+  setScriptDirectorRuleActivationStorePathForTests,
+} from "./script-director-rule-activation-registry";
+import {
+  createScriptDirectorRuleActivationProof,
+  createScriptDirectorRuleTestProof,
+} from "./script-director-rule-proof";
+import { buildMigratedShuimuranDirectorRule } from "./shuimuran-director-rule-migration";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/script-factory/route";
 import type { IPProfile, IPStyleProfile } from "./types";
@@ -40,6 +56,38 @@ const SHUIMURAN: IPProfile = {
   createdAt: "2026-08-05T00:00:00.000Z",
   updatedAt: "2026-08-05T00:00:00.000Z",
 };
+
+const DIRECTOR_PROOF_SECRET = "test-only-script-director-proof-secret-32-bytes";
+let directorRegistryDirectory = "";
+
+test.before(async () => {
+  directorRegistryDirectory = await mkdtemp(path.join(os.tmpdir(), "flowpilot-script-factory-director-"));
+  setScriptDirectorRuleActivationStorePathForTests(path.join(directorRegistryDirectory, "active.json"));
+  process.env.FLOWPILOT_SCRIPT_DIRECTOR_PROOF_SECRET = DIRECTOR_PROOF_SECRET;
+});
+
+test.after(async () => {
+  setScriptDirectorRuleActivationStorePathForTests(null);
+  await rm(directorRegistryDirectory, { recursive: true, force: true });
+});
+
+function createRuleTestProofs(rule: {
+  id: string;
+  ipId: string;
+  source: { contentHash: string };
+}) {
+  return Object.fromEntries(
+    (["familiar", "unfamiliar", "stress"] as const).map(testType => [
+      testType,
+      createScriptDirectorRuleTestProof({
+        ipId: rule.ipId,
+        ruleId: rule.id,
+        contentHash: rule.source.contentHash,
+        testType,
+      }, DIRECTOR_PROOF_SECRET),
+    ]),
+  ) as Record<"familiar" | "unfamiliar" | "stress", string>;
+}
 
 const LEARNED_STYLE: IPStyleProfile = {
   ipId: SHUIMURAN.id,
@@ -234,7 +282,56 @@ function scriptFactoryRequest(
   styleProfile: unknown,
   ipProfile: IPProfile = SHUIMURAN,
   generationMode: "standard" | "ip" = "ip",
+  useDirectorRule = ipProfile.id === SHUIMURAN.id
+    && ipProfile.name === "水木然"
+    && ipProfile.scriptDirectorProfileId === "shuimuran-v1",
+  topic = "普通人如何判断下一轮行业变化",
 ): NextRequest {
+  type TestedDirectorRule = ScriptDirectorRule & {
+    testValidation: ScriptDirectorRuleTestValidation;
+  };
+  let directorRule: TestedDirectorRule | null | undefined;
+  if (generationMode === "ip" && useDirectorRule) {
+    const baseRule = buildMigratedShuimuranDirectorRule({
+      ipId: ipProfile.id,
+      ipName: ipProfile.name,
+      migratedAt: "2026-08-21T12:00:00.000Z",
+    });
+    const testValidation: ScriptDirectorRuleTestValidation = {
+      completedAt: "2026-08-21T12:00:00.000Z",
+      testTypes: ["familiar", "unfamiliar", "stress"],
+      proofs: createRuleTestProofs(baseRule),
+    };
+    directorRule = {
+      ...baseRule,
+      status: "active",
+      testValidation,
+    };
+  } else {
+    directorRule = generationMode === "ip" ? null : undefined;
+  }
+  if (directorRule) {
+    const active = activateScriptDirectorRuleOnServer({
+      ipId: directorRule.ipId,
+      ruleId: directorRule.id,
+      contentHash: directorRule.source.contentHash,
+    });
+    directorRule = {
+      ...directorRule,
+      testValidation: {
+        ...directorRule.testValidation,
+        activationProof: createScriptDirectorRuleActivationProof({
+          ipId: directorRule.ipId,
+          ruleId: directorRule.id,
+          contentHash: directorRule.source.contentHash,
+          activationId: active.activationId,
+        }, DIRECTOR_PROOF_SECRET),
+      },
+    };
+  } else if (generationMode === "ip") {
+    const active = getActiveScriptDirectorRuleOnServer(ipProfile.id);
+    if (active) deactivateScriptDirectorRuleOnServer(ipProfile.id, active.ruleId, active.activationId);
+  }
   return new NextRequest("http://localhost/api/script-factory", {
     method: "POST",
     headers: {
@@ -243,9 +340,10 @@ function scriptFactoryRequest(
     },
     body: JSON.stringify({
       generationMode,
+      directorRule,
       ipProfile,
       styleProfile,
-      topic: "普通人如何判断下一轮行业变化",
+      topic,
       platform: "视频号",
       formatCategory: "short",
       durationSeconds: 60,
@@ -301,6 +399,126 @@ test("固定脚本生成不要求观点覆盖度，也不启用IP专属编导规
   }
 });
 
+test("IP专属生成缺少专属规则字段时在调用AI前明确拒绝", async () => {
+  const request = scriptFactoryRequest(null, {
+    ...SHUIMURAN,
+    scriptDirectorProfileId: null,
+  }, "ip", false);
+  const requestBody = await request.json() as Record<string, unknown>;
+  delete requestBody.directorRule;
+  let apiCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    apiCalled = true;
+    return deepSeekResponse(JSON.stringify(VALID_CONTENT), "unexpected-request");
+  };
+
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.match(result.error, /缺少专属编导规则状态/);
+    assert.equal(result.apiMeta.apiCalled, false);
+    assert.equal(apiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("服务端已有启用规则时不能用空规则状态绕过", async () => {
+  const prepared = scriptFactoryRequest(LEARNED_STYLE, {
+    ...SHUIMURAN,
+    scriptDirectorProfileId: null,
+  }, "ip", true);
+  const requestBody = await prepared.json() as Record<string, unknown>;
+  requestBody.directorRule = null;
+  let apiCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    apiCalled = true;
+    return deepSeekResponse(JSON.stringify(VALID_CONTENT), "unexpected-request");
+  };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+    assert.equal(response.status, 400);
+    assert.match(result.error, /当前IP已有启用的专属编导规则/);
+    assert.equal(apiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("规则停用后旧启用凭证不能继续生成", async () => {
+  const prepared = scriptFactoryRequest(LEARNED_STYLE, {
+    ...SHUIMURAN,
+    scriptDirectorProfileId: null,
+  }, "ip", true);
+  const requestBody = await prepared.json() as { directorRule: { id: string } };
+  const active = getActiveScriptDirectorRuleOnServer(SHUIMURAN.id);
+  assert.ok(active);
+  deactivateScriptDirectorRuleOnServer(SHUIMURAN.id, requestBody.directorRule.id, active.activationId);
+  let apiCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    apiCalled = true;
+    return deepSeekResponse(JSON.stringify(VALID_CONTENT), "unexpected-request");
+  };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+    assert.equal(response.status, 400);
+    assert.match(result.error, /启用状态已经失效/);
+    assert.equal(apiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("水木然迁移规则缺少签名凭证时不能进入特殊生成流程", async () => {
+  const prepared = scriptFactoryRequest(LEARNED_STYLE, {
+    ...SHUIMURAN,
+    scriptDirectorProfileId: null,
+  }, "ip", true);
+  const requestBody = await prepared.json() as {
+    directorRule: { testValidation?: { proofs?: unknown; activationProof?: unknown } };
+  };
+  delete requestBody.directorRule.testValidation?.proofs;
+  delete requestBody.directorRule.testValidation?.activationProof;
+  let apiCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    apiCalled = true;
+    return deepSeekResponse(JSON.stringify(VALID_CONTENT), "unexpected-request");
+  };
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+    assert.equal(response.status, 400);
+    assert.match(result.error, /测试凭证无效/);
+    assert.equal(apiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("其他IP即使误带水木然规则编号也不注入老师确认版规则", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
@@ -331,7 +549,7 @@ test("其他IP即使误带水木然规则编号也不注入老师确认版规则
   }
 });
 
-test("只有水木然IP专属生成才会注入老师确认版规则", async () => {
+test("标准通用规则记录而非旧IP字段启用水木然专属生成", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
   let calls = 0;
@@ -356,8 +574,8 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
   try {
     const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
       ...SHUIMURAN,
-      scriptDirectorProfileId: "shuimuran-v1",
-    }));
+      scriptDirectorProfileId: null,
+    }, "ip", true));
     const result = await response.json();
 
     assert.equal(response.status, 200);
@@ -376,6 +594,218 @@ test("只有水木然IP专属生成才会注入老师确认版规则", async () 
     assert.match(prompts[0], /"fullScript"/);
     assert.match(prompts[0], /"pendingVerification"/);
     assert.doesNotMatch(prompts[0], /"coverCopy"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("其他IP启用通用专属规则后仍走标准生成流程且不会进入水木然压缩终审", async () => {
+  const otherIP: IPProfile = {
+    ...SHUIMURAN,
+    id: "ip-generic-director",
+    name: "彭彭说AI",
+    scriptDirectorProfileId: null,
+  };
+  const genericRawMarkdown = "# 彭彭说AI专属编导规则\n\n开头直接给判断，正文用真实工具案例解释，结尾回到具体行动。";
+  const genericBaseRule = buildMigratedShuimuranDirectorRule({
+    ipId: otherIP.id,
+    ipName: otherIP.name,
+    migratedAt: "2026-08-21T12:00:00.000Z",
+  });
+  const baseRequest = scriptFactoryRequest(null, otherIP, "ip", false, "普通人怎样避免被AI工具牵着走");
+  const requestBody = await baseRequest.json() as Record<string, unknown>;
+  const active = activateScriptDirectorRuleOnServer({
+    ipId: genericBaseRule.ipId,
+    ruleId: genericBaseRule.id,
+    contentHash: calculateScriptDirectorRuleContentHash(genericRawMarkdown),
+  });
+  const genericRule = {
+    ...genericBaseRule,
+    name: "彭彭说AI专属编导规则",
+    status: "active" as const,
+    source: {
+      ...genericBaseRule.source,
+      type: "markdown" as const,
+      rawMarkdown: genericRawMarkdown,
+      contentHash: calculateScriptDirectorRuleContentHash(genericRawMarkdown),
+    },
+    testValidation: {
+      completedAt: "2026-08-21T12:00:00.000Z",
+      testTypes: ["familiar", "unfamiliar", "stress"] as Array<"familiar" | "unfamiliar" | "stress">,
+      proofs: createRuleTestProofs({
+        id: genericBaseRule.id,
+        ipId: genericBaseRule.ipId,
+        source: { contentHash: calculateScriptDirectorRuleContentHash(genericRawMarkdown) },
+      }),
+      activationProof: createScriptDirectorRuleActivationProof({
+        ipId: genericBaseRule.ipId,
+        ruleId: genericBaseRule.id,
+        contentHash: calculateScriptDirectorRuleContentHash(genericRawMarkdown),
+        activationId: active.activationId,
+      }, DIRECTOR_PROOF_SECRET),
+    },
+  };
+  requestBody.directorRule = genericRule;
+
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content?: string }> };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(VALID_CONTENT), "generic-content");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "generic-review");
+    return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "generic-storyboard");
+  };
+
+  try {
+    process.env.FLOWPILOT_SCRIPT_DIRECTOR_PROOF_SECRET = DIRECTOR_PROOF_SECRET;
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.outputMode, "default");
+    assert.equal(result.storyboard.length > 0, true);
+    assert.equal(calls, 3);
+    assert.match(prompts[0] ?? "", /彭彭说AI专属编导规则/);
+    assert.doesNotMatch(prompts.join("\n"), /水木然IP专属脚本的压缩编辑/);
+    assert.doesNotMatch(prompts.join("\n"), /水木然IP专属脚本的独立终审员/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("脚本生成拒绝前端伪造的已启用和已测试通用规则", async () => {
+  const otherIP: IPProfile = {
+    ...SHUIMURAN,
+    id: "ip-forged-director",
+    name: "彭彭说AI",
+    scriptDirectorProfileId: null,
+  };
+  const rawMarkdown = "# 彭彭说AI规则\n\n开头直接给判断。";
+  const forgedBase = buildMigratedShuimuranDirectorRule({
+    ipId: otherIP.id,
+    ipName: otherIP.name,
+    migratedAt: "2026-08-21T12:00:00.000Z",
+  });
+  const baseRequest = scriptFactoryRequest(null, otherIP, "ip", false);
+  const requestBody = await baseRequest.json() as Record<string, unknown>;
+  activateScriptDirectorRuleOnServer({
+    ipId: forgedBase.ipId,
+    ruleId: forgedBase.id,
+    contentHash: calculateScriptDirectorRuleContentHash(rawMarkdown),
+  });
+  const forgedRule = {
+    ...forgedBase,
+    status: "active" as const,
+    source: {
+      ...forgedBase.source,
+      type: "markdown" as const,
+      rawMarkdown,
+      contentHash: calculateScriptDirectorRuleContentHash(rawMarkdown),
+    },
+    testValidation: {
+      completedAt: "2026-08-21T12:00:00.000Z",
+      testTypes: ["familiar", "unfamiliar", "stress"] as Array<"familiar" | "unfamiliar" | "stress">,
+      proofs: createRuleTestProofs({
+        id: forgedBase.id,
+        ipId: forgedBase.ipId,
+        source: { contentHash: calculateScriptDirectorRuleContentHash(rawMarkdown) },
+      }),
+      activationProof: "forged-activation-proof",
+    },
+  };
+  requestBody.directorRule = forgedRule;
+  const originalFetch = globalThis.fetch;
+  let apiCalled = false;
+  globalThis.fetch = async () => {
+    apiCalled = true;
+    return deepSeekResponse(JSON.stringify(VALID_CONTENT), "unexpected-request");
+  };
+
+  try {
+    process.env.FLOWPILOT_SCRIPT_DIRECTOR_PROOF_SECRET = DIRECTOR_PROOF_SECRET;
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.match(result.error, /启用凭证无效/);
+    assert.equal(result.apiMeta.apiCalled, false);
+    assert.equal(apiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("脚本生成在调用AI前拒绝超长专属规则原文", async () => {
+  const baseRequest = scriptFactoryRequest(LEARNED_STYLE, SHUIMURAN, "ip", true);
+  const requestBody = await baseRequest.json() as {
+    directorRule: ReturnType<typeof buildMigratedShuimuranDirectorRule>;
+  };
+  const rawMarkdown = "规".repeat(50_001);
+  requestBody.directorRule.source.rawMarkdown = rawMarkdown;
+  requestBody.directorRule.source.contentHash = calculateScriptDirectorRuleContentHash(rawMarkdown);
+
+  const originalFetch = globalThis.fetch;
+  let apiCalled = false;
+  globalThis.fetch = async () => {
+    apiCalled = true;
+    return deepSeekResponse(JSON.stringify(VALID_CONTENT), "unexpected-request");
+  };
+
+  try {
+    const response = await POST(new NextRequest("http://localhost/api/script-factory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+      body: JSON.stringify(requestBody),
+    }));
+    const result = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.match(result.error, /专属编导规则原文最多50000字/);
+    assert.equal(result.apiMeta.apiCalled, false);
+    assert.equal(apiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("追星女粉丝选题通过迁移后的标准规则生成且完整注入老师确认规则", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content?: string }> };
+    prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
+    if (calls === 1) return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), "fan-content");
+    if (calls === 2) return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), "fan-compression");
+    if (calls === 3) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "fan-review");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "fan-argument-review");
+  };
+
+  try {
+    const response = await POST(scriptFactoryRequest(
+      LEARNED_STYLE,
+      { ...SHUIMURAN, scriptDirectorProfileId: null },
+      "ip",
+      true,
+      "那些沉迷追星的女粉丝，真正失去的是什么",
+    ));
+    assert.equal(response.status, 200);
+    assert.match(prompts[0] ?? "", /那些沉迷追星的女粉丝/);
+    assert.match(prompts[0] ?? "", /大家有没有发现一个很有意思的现象/);
+    assert.match(prompts[0] ?? "", /每篇内容只保留一条核心思想/);
+    assert.match(prompts[0] ?? "", /普通概念和判断不能用引号制造强调/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1176,7 +1606,7 @@ test("破六相硬问题即使被模型放行也会触发重写并在二次终�
     const response = await POST(scriptFactoryRequest(LEARNED_STYLE, {
       ...SHUIMURAN,
       scriptDirectorProfileId: "shuimuran-v1",
-    }));
+    }, "ip", true, "破六相"));
 
     assert.equal(response.status, 502);
     assert.equal(calls, 6);
