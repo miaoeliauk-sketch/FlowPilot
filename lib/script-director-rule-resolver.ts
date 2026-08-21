@@ -20,7 +20,7 @@ export type ResolvedScriptDirectorRule =
   }
   | {
     enabled: false;
-    reason: "no_applicable_rule" | "rule_not_found" | "rule_not_active" | "rule_invalid" | "rule_ip_mismatch";
+    reason: "no_applicable_rule" | "rule_not_found" | "rule_not_active" | "rule_not_tested" | "rule_invalid" | "rule_ip_mismatch";
   };
 
 export function resolveScriptDirectorRuleForGeneration(input: {
@@ -44,6 +44,7 @@ export function resolveScriptDirectorRuleForGeneration(input: {
     if (calculateScriptDirectorRuleContentHash(parsed.rule.source.rawMarkdown) !== parsed.rule.source.contentHash) {
       return { enabled: false, reason: "rule_invalid" };
     }
+    if (!parsed.rule.testValidation) return { enabled: false, reason: "rule_not_tested" };
     if (parsed.rule.status !== "active") return { enabled: false, reason: "rule_not_active" };
     return {
       enabled: true,

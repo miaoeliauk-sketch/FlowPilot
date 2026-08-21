@@ -10,6 +10,12 @@ export type ScriptDirectorRuleScope =
   | "attribution"
   | "compression"
   | "output";
+export type ScriptDirectorRuleTestType = "familiar" | "unfamiliar" | "stress";
+
+export interface ScriptDirectorRuleTestValidation {
+  completedAt: string;
+  testTypes: ScriptDirectorRuleTestType[];
+}
 
 export interface ScriptDirectorRuleItem {
   id: string;
@@ -89,6 +95,7 @@ export interface ScriptDirectorRule {
   };
   specialRules: ScriptDirectorRuleItem[];
   validationRequirements: ScriptDirectorRuleItem[];
+  testValidation?: ScriptDirectorRuleTestValidation;
   createdAt: string;
   updatedAt: string;
 }
@@ -113,6 +120,7 @@ const RULE_SCOPES = new Set<ScriptDirectorRuleScope>([
   "title", "opening", "body", "ending", "fact", "attribution", "compression", "output",
 ]);
 const RULE_STATUSES = new Set<ScriptDirectorRuleStatus>(["draft", "pending_validation", "active", "inactive"]);
+const RULE_TEST_TYPES = new Set<ScriptDirectorRuleTestType>(["familiar", "unfamiliar", "stress"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -263,6 +271,16 @@ export function parseScriptDirectorRule(value: unknown): ParseScriptDirectorRule
   for (const field of ["specialRules", "validationRequirements"] as const) {
     const error = validateRuleItems(value[field], field);
     if (error) return validationError(error);
+  }
+  if (value.testValidation !== undefined) {
+    if (!isRecord(value.testValidation)) return validationError("testValidation");
+    if (!isNonEmptyString(value.testValidation.completedAt)) return validationError("testValidation.completedAt");
+    if (!Array.isArray(value.testValidation.testTypes)
+      || value.testValidation.testTypes.length !== RULE_TEST_TYPES.size
+      || !value.testValidation.testTypes.every(item => RULE_TEST_TYPES.has(item as ScriptDirectorRuleTestType))
+      || new Set(value.testValidation.testTypes).size !== RULE_TEST_TYPES.size) {
+      return validationError("testValidation.testTypes");
+    }
   }
   if (!isNonEmptyString(value.createdAt)) return validationError("createdAt");
   if (!isNonEmptyString(value.updatedAt)) return validationError("updatedAt");

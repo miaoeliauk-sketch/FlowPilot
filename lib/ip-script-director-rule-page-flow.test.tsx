@@ -4,7 +4,8 @@ import { JSDOM } from "jsdom";
 import React from "react";
 
 import { createScriptDirectorRule } from "./script-director-rule";
-import { getScriptDirectorRules } from "./script-director-rule-store";
+import { getScriptDirectorRules, saveScriptDirectorRule } from "./script-director-rule-store";
+import { addKnowledgeEntry, getKnowledgeEntries, getScriptAssets, getVideoReviews } from "./ip-store";
 import type { IPProfile } from "./types";
 
 function installBrowserEnvironment() {
@@ -197,7 +198,7 @@ async function previewRule(rawMarkdown: string, protectedEntities = ["示例人�
   });
 }
 
-test("用户确认完整解析预览后才保存原始规则并可启用和停用", async () => {
+test("用户确认完整解析预览后保存原始规则但测试前不能启用", async () => {
   const rawMarkdown = " \n# IP A专属编导规则\n\n开头必须直接进入判断。\n ";
   const parsedRule = await previewRule(rawMarkdown);
   const originalFetch = globalThis.fetch;
@@ -245,18 +246,13 @@ test("用户确认完整解析预览后才保存原始规则并可启用和停�
     assert.ok(view.getByText(/来源：导入文档第六节/));
 
     await user.click(view.getByRole("button", { name: "确认并保存规则" }));
-    assert.ok(await view.findByText("规则已保存，启用后才会参与脚本生成"));
+    assert.ok(await view.findByText("规则已保存，完成三类测试后才能启用"));
     assert.equal(getScriptDirectorRules(IP_A.id).length, 1);
     assert.equal(getScriptDirectorRules(IP_B.id).length, 0);
     assert.equal(getScriptDirectorRules(IP_A.id)[0]?.source.rawMarkdown, rawMarkdown);
 
-    await user.click(view.getByRole("button", { name: "启用规则" }));
-    assert.ok(await view.findByText("已启用"));
-    assert.equal(getScriptDirectorRules(IP_A.id)[0]?.status, "active");
-
-    await user.click(view.getByRole("button", { name: "停用规则" }));
-    assert.ok(await view.findByText("未启用"));
-    assert.equal(getScriptDirectorRules(IP_A.id)[0]?.status, "inactive");
+    assert.ok(await view.findByText("待完成测试"));
+    assert.equal(view.queryByRole("button", { name: "启用规则" }), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -375,6 +371,143 @@ test("具体名称出现超过3次时明确说明原因并禁止保存", async (
     const saveButton = view.getByRole("button", { name: "示例污染未通过，无法保存" });
     assert.equal(saveButton.hasAttribute("disabled"), true);
     assert.equal(getScriptDirectorRules(IP_A.id).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("用户填写三类选题完成临时测试后才能启用且测试稿不进入脚本库", async () => {
+  const rule = await previewRule("# IP A专属编导规则\n\n开头必须直接进入判断。");
+  saveScriptDirectorRule(rule);
+  const knowledgeA = addKnowledgeEntry({
+    category: "IP原始内容",
+    title: "IP A课程原文",
+    rawContent: "IP A认为工具必须服务于真实任务。",
+    tags: [], keywords: [], ipId: IP_A.id, sourceTier: "高", sourceTierReason: "用户上传原文",
+    contentDirection: [], sourcePlatform: "课程", sourceUrl: "", note: "", extractedAt: null,
+    metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+  });
+  const knowledgeB = addKnowledgeEntry({
+    category: "IP原始内容",
+    title: "IP B课程原文",
+    rawContent: "IP B的内容不能进入IP A测试。",
+    tags: [], keywords: [], ipId: IP_B.id, sourceTier: "高", sourceTierReason: "用户上传原文",
+    contentDirection: [], sourcePlatform: "课程", sourceUrl: "", note: "", extractedAt: null,
+    metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+  });
+  const originalFetch = globalThis.fetch;
+  const testRequests: Array<{
+    testType: string;
+    topic: string;
+    knowledgeContext: Array<{ id: string; ipId: string; title: string }>;
+  }> = [];
+  globalThis.fetch = async (input, init) => {
+    if (String(input) !== "/api/script-director-rule/test-generate") {
+      return new Response(JSON.stringify({ error: "未知测试接口" }), { status: 404 });
+    }
+    const request = JSON.parse(String(init?.body)) as {
+      testType: string;
+      topic: string;
+      knowledgeContext: Array<{ id: string; ipId: string; title: string }>;
+    };
+    testRequests.push(request);
+    return new Response(JSON.stringify({
+      temporary: true,
+      result: {
+        testType: request.testType,
+        topic: request.topic,
+        title: `${request.testType}测试标题`,
+        fullScript: `${request.topic}的临时测试正文`,
+      },
+      apiMeta: { apiCalled: true, attempts: 1 },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const ruleButtons = await view.findAllByTitle("专属编导规则");
+    await user.click(ruleButtons[0]);
+    assert.ok(await view.findByText("待完成测试"));
+    assert.equal(view.queryByRole("button", { name: "启用规则" }), null);
+
+    await user.click(view.getByRole("button", { name: "测试规则" }));
+    await user.type(view.getByLabelText("熟悉题测试选题"), "AI工具怎么真正提高创作效率");
+    await user.type(view.getByLabelText("陌生题测试选题"), "一家餐厅为什么突然排队");
+    await user.type(view.getByLabelText("压力题测试选题"), "一夜暴富的方法到底存不存在");
+    await user.click(view.getByRole("button", { name: "运行三类测试" }));
+
+    assert.ok(await view.findByText("familiar测试标题"));
+    assert.ok(view.getByText("unfamiliar测试标题"));
+    assert.ok(view.getByText("stress测试标题"));
+    assert.deepEqual(testRequests.map(item => item.testType), ["familiar", "unfamiliar", "stress"]);
+    assert.deepEqual(testRequests.map(item => item.knowledgeContext.map(entry => entry.id)), [
+      [knowledgeA.id],
+      [knowledgeA.id],
+      [knowledgeA.id],
+    ]);
+    assert.equal(testRequests.some(item => item.knowledgeContext.some(entry => entry.id === knowledgeB.id)), false);
+    assert.equal(getScriptAssets(IP_A.id).length, 0);
+    assert.equal(getKnowledgeEntries().filter(entry => entry.ipId === IP_A.id).length, 1);
+    assert.equal(getKnowledgeEntries().find(entry => entry.id === knowledgeA.id)?.usageRecords.length, 0);
+    assert.equal(getVideoReviews(IP_A.id).length, 0);
+    assert.ok(view.getByText("测试稿仅用于验证规则，不会进入正式脚本库或学习数据"));
+    assert.ok(view.getByRole("button", { name: "启用规则" }));
+    assert.equal(getScriptDirectorRules(IP_A.id)[0]?.testValidation?.testTypes.length, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("专属规则弹窗卸载重开后旧测试请求不能写入完成凭证", async () => {
+  const rule = await previewRule("# IP A专属编导规则\n\n旧请求不能在弹窗关闭后生效。");
+  saveScriptDirectorRule(rule);
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  let resolveFirstRequest: ((response: Response) => void) | undefined;
+  const responseFor = (testType: string, topic: string) => new Response(JSON.stringify({
+    temporary: true,
+    result: { testType, topic, title: `${testType}标题`, fullScript: `${topic}测试正文` },
+    apiMeta: { apiCalled: true, attempts: 1 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { testType: string; topic: string };
+    requestCount += 1;
+    if (requestCount === 1) {
+      return new Promise<Response>(resolve => { resolveFirstRequest = resolve; });
+    }
+    return responseFor(request.testType, request.topic);
+  };
+
+  try {
+    const { render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const ruleButtons = await view.findAllByTitle("专属编导规则");
+    await user.click(ruleButtons[0]);
+    await user.click(view.getByRole("button", { name: "测试规则" }));
+    await user.type(view.getByLabelText("熟悉题测试选题"), "熟悉题");
+    await user.type(view.getByLabelText("陌生题测试选题"), "陌生题");
+    await user.type(view.getByLabelText("压力题测试选题"), "压力题");
+    await user.click(view.getByRole("button", { name: "运行三类测试" }));
+    await waitFor(() => assert.equal(requestCount, 1));
+
+    view.unmount();
+    resolveFirstRequest?.(responseFor("familiar", "熟悉题"));
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(requestCount, 1);
+    assert.equal(getScriptDirectorRules(IP_A.id)[0]?.testValidation, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

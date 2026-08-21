@@ -1,10 +1,10 @@
 "use client";
 import { apiFetch } from "@/lib/api-fetch";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
 import { getIPDisplayLabel } from "@/lib/ip-display";
 import { IPProfile, VoiceSample, IPStyleProfile } from "@/lib/types";
-import { getTopicAssets, getCommentAssets, getScriptAssets, getVoiceSamples, addVoiceSample, deleteVoiceSample, getStyleProfile, saveStyleProfile } from "@/lib/ip-store";
+import { getTopicAssets, getCommentAssets, getScriptAssets, getKnowledgeEntries, getVoiceSamples, addVoiceSample, deleteVoiceSample, getStyleProfile, saveStyleProfile } from "@/lib/ip-store";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { buildVoiceStyleProfileForSave, getDefaultVoiceStyleSampleIds } from "@/lib/voice-style-profile";
 import { Icon } from "@/components/ui/icon";
@@ -18,13 +18,16 @@ import {
   type ScriptDirectorRuleItem,
   type ScriptDirectorRuleLevel,
   type ScriptDirectorRuleScope,
+  type ScriptDirectorRuleTestType,
 } from "@/lib/script-director-rule";
 import {
   getScriptDirectorRules,
+  markScriptDirectorRuleTestCompleted,
   saveScriptDirectorRule,
   setScriptDirectorRuleActive,
 } from "@/lib/script-director-rule-store";
 import { detectScriptDirectorExampleContamination } from "@/lib/script-director-rule-contamination";
+import type { ScriptDirectorRuleTestGenerationResult } from "@/lib/script-director-rule-test-generation";
 
 const PLATFORM_OPTIONS = ["抖音", "小红书", "B站", "视频号", "微博", "公众号"];
 
@@ -599,6 +602,16 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
   const [parsing, setParsing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [testingRuleId, setTestingRuleId] = useState<string | null>(null);
+  const [testTopics, setTestTopics] = useState<Record<ScriptDirectorRuleTestType, string>>({
+    familiar: "",
+    unfamiliar: "",
+    stress: "",
+  });
+  const [testResults, setTestResults] = useState<Partial<Record<ScriptDirectorRuleTestType, ScriptDirectorRuleTestGenerationResult>>>({});
+  const [testing, setTesting] = useState(false);
+  const [testProgress, setTestProgress] = useState<string | null>(null);
+  const testRunSequence = useRef(0);
 
   const reloadRules = () => {
     try {
@@ -615,6 +628,15 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
     setFileName(null);
     setPreview(null);
     setNotice(null);
+    setTestingRuleId(null);
+    setTestTopics({ familiar: "", unfamiliar: "", stress: "" });
+    setTestResults({});
+    setTesting(false);
+    setTestProgress(null);
+    testRunSequence.current += 1;
+    return () => {
+      testRunSequence.current += 1;
+    };
   }, [ip.id]);
 
   const handleFile = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -702,7 +724,7 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
       saveScriptDirectorRule(preview);
       reloadRules();
       setPreview(null);
-      setNotice("规则已保存，启用后才会参与脚本生成");
+      setNotice("规则已保存，完成三类测试后才能启用");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "专属编导规则保存失败");
     }
@@ -720,15 +742,89 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
     }
   };
 
+  const openRuleTest = (rule: ScriptDirectorRule) => {
+    testRunSequence.current += 1;
+    setTestingRuleId(rule.id);
+    setTestTopics({ familiar: "", unfamiliar: "", stress: "" });
+    setTestResults({});
+    setTestProgress(null);
+    setError(null);
+    setNotice(null);
+  };
+
+  const handleRunRuleTests = async (rule: ScriptDirectorRule) => {
+    const testTypes: ScriptDirectorRuleTestType[] = ["familiar", "unfamiliar", "stress"];
+    if (testTypes.some(testType => !testTopics[testType].trim())) {
+      setError("请填写熟悉题、陌生题和压力题后再开始测试");
+      return;
+    }
+    const runId = testRunSequence.current + 1;
+    testRunSequence.current = runId;
+    setTesting(true);
+    setError(null);
+    setNotice(null);
+    setTestResults({});
+    const completed: Partial<Record<ScriptDirectorRuleTestType, ScriptDirectorRuleTestGenerationResult>> = {};
+    try {
+      const knowledgeContext = getKnowledgeEntries()
+        .filter(entry => entry.ipId === ip.id)
+        .map(entry => ({
+          id: entry.id,
+          ipId: entry.ipId,
+          category: entry.category,
+          title: entry.title,
+          rawContent: entry.rawContent,
+        }));
+      for (let index = 0; index < testTypes.length; index += 1) {
+        const testType = testTypes[index]!;
+        setTestProgress(`正在生成第${index + 1}/3类测试稿`);
+        const response = await apiFetch("/api/script-director-rule/test-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ipProfile: ip, rule, testType, topic: testTopics[testType], knowledgeContext }),
+        });
+        const data = await response.json() as { result?: ScriptDirectorRuleTestGenerationResult; error?: string };
+        if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!data.result
+          || data.result.testType !== testType
+          || data.result.topic !== testTopics[testType].trim()
+          || !data.result.title.trim()
+          || !data.result.fullScript.trim()) {
+          throw new Error("测试生成返回内容不完整，请重试");
+        }
+        if (testRunSequence.current !== runId) return;
+        completed[testType] = data.result;
+        setTestResults({ ...completed });
+      }
+      if (testRunSequence.current !== runId) return;
+      markScriptDirectorRuleTestCompleted(ip.id, rule.id, {
+        completedAt: new Date().toISOString(),
+        testTypes,
+      });
+      reloadRules();
+      setNotice("三类测试已完成，现在可以正式启用这份规则");
+    } catch (testError) {
+      if (testRunSequence.current !== runId) return;
+      setError(testError instanceof Error ? testError.message : "测试生成失败，请重试");
+    } finally {
+      if (testRunSequence.current === runId) {
+        setTesting(false);
+        setTestProgress(null);
+      }
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-5" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-5" onClick={() => {
+      if (!parsing && !testing) onClose();
+    }}>
       <div className="card max-h-[92vh] w-full max-w-[820px] overflow-hidden p-0" onClick={event => event.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-[#F0EFE9] px-5 py-4">
           <div>
             <div className="text-[15px] font-bold text-[#1A1A1A]">「{ip.name}」专属编导规则</div>
             <p className="mt-0.5 text-[11.5px] text-[#999]">上传或粘贴规则文档，AI只负责结构化；确认预览前不会保存。</p>
           </div>
-          <button disabled={parsing} onClick={onClose} className="text-[13px] text-[#999] disabled:opacity-40">关闭</button>
+          <button disabled={parsing || testing} onClick={onClose} className="text-[13px] text-[#999] disabled:opacity-40">关闭</button>
         </div>
 
         <div className="max-h-[calc(92vh-72px)] space-y-5 overflow-y-auto p-5">
@@ -888,20 +984,92 @@ function ScriptDirectorRuleModal({ ip, onClose }: { ip: IPProfile; onClose: () =
               ? <div className="rounded-[12px] border border-dashed border-[#E5E4DE] py-6 text-center text-[12px] text-[#999]">当前IP还没有保存专属编导规则</div>
               : <div className="space-y-2">
                 {rules.map(rule => {
-                  const active = rule.status === "active";
+                  const tested = Boolean(rule.testValidation);
+                  const active = rule.status === "active" && tested;
+                  const testingThisRule = testingRuleId === rule.id;
                   return (
-                    <div key={rule.id} className="flex items-center justify-between gap-3 rounded-[12px] border border-[#E5E4DE] p-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-[12.5px] font-bold text-[#333]">{rule.name} · v{rule.version}</div>
-                        <div className={`mt-1 text-[11px] ${active ? "text-[#3B6D11]" : "text-[#999]"}`}>{active ? "已启用" : "未启用"}</div>
+                    <div key={rule.id} className="rounded-[12px] border border-[#E5E4DE] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-[12.5px] font-bold text-[#333]">{rule.name} · v{rule.version}</div>
+                          <div className={`mt-1 text-[11px] ${active ? "text-[#3B6D11]" : "text-[#999]"}`}>
+                            {active ? "已启用" : tested ? "未启用" : "待完成测试"}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            aria-label="测试规则"
+                            disabled={testing}
+                            onClick={() => openRuleTest(rule)}
+                            className="rounded-[10px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-bold text-[#555] disabled:opacity-40"
+                          >
+                            {tested ? "重新测试" : "测试规则"}
+                          </button>
+                          {(active || tested) && (
+                            <button
+                              aria-label={active ? "停用规则" : "启用规则"}
+                              disabled={testing}
+                              onClick={() => handleToggle(rule)}
+                              className={`rounded-[10px] px-3 py-1.5 text-[11.5px] font-bold disabled:opacity-40 ${active ? "bg-[#F2F1ED] text-[#666]" : "bg-[#C8F04A] text-[#1A1A1A]"}`}
+                            >
+                              {active ? "停用" : "启用"}
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <button
-                        aria-label={active ? "停用规则" : "启用规则"}
-                        onClick={() => handleToggle(rule)}
-                        className={`rounded-[10px] px-3 py-1.5 text-[11.5px] font-bold ${active ? "bg-[#F2F1ED] text-[#666]" : "bg-[#C8F04A] text-[#1A1A1A]"}`}
-                      >
-                        {active ? "停用" : "启用"}
-                      </button>
+                      {testingThisRule && (
+                        <div className="mt-3 border-t border-[#EEEDE8] pt-3">
+                          <div className="text-[12px] font-bold text-[#333]">三类测试生成</div>
+                          <p className="mt-1 text-[11px] text-[#888]">请分别填写你熟悉的题、较陌生的题和容易诱发模板化或越界的压力题。</p>
+                          <p className="mt-1 text-[11px] font-semibold text-[#639922]">测试稿仅用于验证规则，不会进入正式脚本库或学习数据</p>
+                          <div className="mt-3 grid gap-2">
+                            {([
+                              ["familiar", "熟悉题", "例如：你长期讲、最能判断是否像本人的选题"],
+                              ["unfamiliar", "陌生题", "例如：当前IP较少谈论、容易暴露规则泛化能力的选题"],
+                              ["stress", "压力题", "例如：容易诱发模板化、极端判断或事实越界的选题"],
+                            ] as const).map(([testType, label, placeholder]) => (
+                              <label key={testType} className="block">
+                                <span className="mb-1 block text-[11px] font-semibold text-[#555]">{label}</span>
+                                <input
+                                  aria-label={`${label}测试选题`}
+                                  value={testTopics[testType]}
+                                  maxLength={500}
+                                  disabled={testing}
+                                  onChange={event => setTestTopics(current => ({ ...current, [testType]: event.target.value }))}
+                                  placeholder={placeholder}
+                                  className="w-full rounded-[9px] border border-[#E5E4DE] bg-white px-3 py-2 text-[12px] outline-none focus:border-[#C8F04A] disabled:opacity-60"
+                                />
+                              </label>
+                            ))}
+                          </div>
+                          <div className="mt-3 flex items-center justify-between gap-3">
+                            <span className="text-[11px] text-[#888]">{testProgress ?? (tested ? "已完成过测试，可再次验证新选题" : "完成本轮三类测试后解锁启用")}</span>
+                            <button
+                              onClick={() => handleRunRuleTests(rule)}
+                              disabled={testing || Object.values(testTopics).some(topic => !topic.trim())}
+                              className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[12px] font-bold text-white disabled:opacity-40"
+                            >
+                              {testing ? "测试生成中" : "运行三类测试"}
+                            </button>
+                          </div>
+                          {Object.keys(testResults).length > 0 && (
+                            <div className="mt-3 space-y-2">
+                              {(["familiar", "unfamiliar", "stress"] as const).map(testType => {
+                                const result = testResults[testType];
+                                if (!result) return null;
+                                const label = testType === "familiar" ? "熟悉题" : testType === "unfamiliar" ? "陌生题" : "压力题";
+                                return (
+                                  <article key={testType} className="rounded-[10px] bg-[#FAFAF8] p-3">
+                                    <div className="text-[10.5px] font-bold text-[#639922]">{label}临时测试稿</div>
+                                    <div className="mt-1 text-[12.5px] font-bold text-[#222]">{result.title}</div>
+                                    <div className="mt-1 whitespace-pre-wrap text-[12px] leading-5 text-[#555]">{result.fullScript}</div>
+                                  </article>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

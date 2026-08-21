@@ -6,11 +6,13 @@ import {
   createScriptDirectorRule,
   parseScriptDirectorRule,
   type CreateScriptDirectorRuleInput,
+  type ScriptDirectorRuleTestType,
 } from "./script-director-rule";
 import {
   SCRIPT_DIRECTOR_RULE_STORAGE_KEY,
   getScriptDirectorRuleForIP,
   getScriptDirectorRules,
+  markScriptDirectorRuleTestCompleted,
   saveScriptDirectorRule,
   setScriptDirectorRuleActive,
 } from "./script-director-rule-store";
@@ -192,6 +194,13 @@ test("启用规则只会停用同IP的其他规则且不会影响其他IP", asyn
   saveScriptDirectorRule(second);
   saveScriptDirectorRule(other);
 
+  for (const rule of [first, second, other]) {
+    markScriptDirectorRuleTestCompleted(rule.ipId, rule.id, {
+      completedAt: "2026-08-21T11:00:00.000Z",
+      testTypes: ["familiar", "unfamiliar", "stress"],
+    });
+  }
+
   setScriptDirectorRuleActive(first.ipId, first.id, true);
   setScriptDirectorRuleActive(second.ipId, second.id, true);
   setScriptDirectorRuleActive(other.ipId, other.id, true);
@@ -206,6 +215,78 @@ test("启用规则只会停用同IP的其他规则且不会影响其他IP", asyn
     () => setScriptDirectorRuleActive(first.ipId, other.id, true),
     /没有找到属于当前IP的专属编导规则/,
   );
+});
+
+test("规则完成三类测试前不能启用，完成后才允许启用", async () => {
+  storage.clear();
+  const rule = await createScriptDirectorRule(createValidInput());
+  saveScriptDirectorRule(rule);
+
+  assert.throws(
+    () => setScriptDirectorRuleActive(rule.ipId, rule.id, true),
+    /至少完成一次三类测试生成后才能启用/,
+  );
+
+  markScriptDirectorRuleTestCompleted(rule.ipId, rule.id, {
+    completedAt: "2026-08-21T11:30:00.000Z",
+    testTypes: ["familiar", "unfamiliar", "stress"],
+  });
+  const tested = getScriptDirectorRuleForIP(rule.ipId, rule.id);
+  assert.equal(tested?.status, "inactive");
+  assert.deepEqual(tested?.testValidation, {
+    completedAt: "2026-08-21T11:30:00.000Z",
+    testTypes: ["familiar", "unfamiliar", "stress"],
+  });
+
+  setScriptDirectorRuleActive(rule.ipId, rule.id, true);
+  assert.equal(getScriptDirectorRuleForIP(rule.ipId, rule.id)?.status, "active");
+});
+
+test("普通保存接口不能伪造三类测试完成凭证", async () => {
+  storage.clear();
+  const rule = await createScriptDirectorRule(createValidInput());
+  const forgedTestTypes: ScriptDirectorRuleTestType[] = ["familiar", "unfamiliar", "stress"];
+  const forged = {
+    ...rule,
+    testValidation: {
+      completedAt: "2026-08-21T11:45:00.000Z",
+      testTypes: forgedTestTypes,
+    },
+  };
+
+  assert.throws(
+    () => saveScriptDirectorRule(forged),
+    /测试完成凭证只能由完整测试流程写入/,
+  );
+  assert.equal(getScriptDirectorRules(rule.ipId).length, 0);
+});
+
+test("标记测试完成时即使规则ID重复也不会覆盖其他IP", async () => {
+  storage.clear();
+  const ruleA = await createScriptDirectorRule(createValidInput());
+  const ruleBSource = await createScriptDirectorRule(createValidInput({
+    ipId: "ip-other",
+    name: "其他IP专属规则",
+    rawMarkdown: "# 其他IP专属规则\n\n保留其他IP自己的规则内容。",
+    profileContext: {
+      ipNameSnapshot: "其他IP",
+      source: "ip_profile",
+      usePlatformPositioningFromProfile: true,
+    },
+  }));
+  const ruleB = { ...ruleBSource, id: ruleA.id };
+  storage.setItem(SCRIPT_DIRECTOR_RULE_STORAGE_KEY, JSON.stringify([ruleA, ruleB]));
+
+  markScriptDirectorRuleTestCompleted(ruleA.ipId, ruleA.id, {
+    completedAt: "2026-08-21T12:00:00.000Z",
+    testTypes: ["familiar", "unfamiliar", "stress"],
+  });
+
+  const storedA = getScriptDirectorRuleForIP(ruleA.ipId, ruleA.id);
+  const storedB = getScriptDirectorRuleForIP(ruleB.ipId, ruleB.id);
+  assert.equal(storedA?.testValidation?.completedAt, "2026-08-21T12:00:00.000Z");
+  assert.equal(storedB?.testValidation, undefined);
+  assert.equal(storedB?.source.rawMarkdown, ruleB.source.rawMarkdown);
 });
 
 test("规则库损坏时明确报错并阻止覆盖原始数据", async () => {
@@ -296,6 +377,22 @@ test("生成规则解析会复核存储层返回的IP归属并拒绝跨IP规则"
   assert.deepEqual(resolved, {
     enabled: false,
     reason: "rule_ip_mismatch",
+  });
+});
+
+test("生成入口拒绝未完成三类测试的历史启用规则", async () => {
+  const untested = await createScriptDirectorRule(createValidInput());
+
+  assert.deepEqual(resolveScriptDirectorRuleForGeneration({
+    generationMode: "ip",
+    ipId: untested.ipId,
+    ipName: untested.profileContext.ipNameSnapshot,
+    activeRuleId: untested.id,
+    legacyProfileId: null,
+    repository: { getForIP: () => ({ ...untested, status: "active" }) },
+  }), {
+    enabled: false,
+    reason: "rule_not_tested",
   });
 });
 
