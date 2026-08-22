@@ -5,6 +5,7 @@ import {
   addVideoReview,
   addScriptAsset,
   addEvaluatedTopicAsset,
+  completeVideoReview,
   deleteVideoReview,
   getKnowledgeEntries,
   getVideoReviews,
@@ -995,7 +996,7 @@ test("其他IP不能借用当前IP的脚本和选题创建复盘", () => {
   assert.deepEqual(getVideoReviews("ip-other"), []);
 });
 
-test("四种追溯状态可区分，只有完整关联记录具备学习资格", () => {
+test("四种追溯状态可区分，只有关联完整且完成人工复盘的记录具备学习资格", () => {
   const boardResult = createValidTopicBoardResult();
   const topic = addEvaluatedTopicAsset({
     ipId: boardResult.ipId,
@@ -1015,6 +1016,10 @@ test("四种追溯状态可区分，只有完整关联记录具备学习资格",
     source: { type: "flowpilot", scriptId: script.id },
     review: reviewInput,
   });
+  const completedTraceable = completeVideoReview(traceable.id, {
+    tags: ["选题角度新颖"],
+    note: "人工确认该选题角度与真实发布表现有关。",
+  });
   const external = addVideoReviewForSource({
     activeIPId: topic.ipId,
     source: { type: "external" },
@@ -1024,7 +1029,7 @@ test("四种追溯状态可区分，只有完整关联记录具备学习资格",
   storage.setItem("ipwr:videoReviews", JSON.stringify([
     ...stored,
     {
-      ...traceable,
+      ...completedTraceable,
       id: "review-legacy",
       sourceType: undefined,
       traceabilityStatus: undefined,
@@ -1032,7 +1037,7 @@ test("四种追溯状态可区分，只有完整关联记录具备学习资格",
       scriptId: null,
     },
     {
-      ...traceable,
+      ...completedTraceable,
       id: "review-broken",
       scriptId: "script-missing",
     },
@@ -1122,6 +1127,10 @@ test("知识关联拒绝跨IP条目和不可追溯复盘", () => {
     activeIPId: topic.ipId,
     source: { type: "flowpilot", scriptId: script.id },
     review: reviewInput,
+  });
+  completeVideoReview(traceable.id, {
+    tags: ["引用具体案例或经典原文"],
+    note: "先完成可信人工复盘，再单独验证跨IP归属保护。",
   });
   assert.throws(
     () => markReviewSavedToKnowledge(traceable.id, otherIPKnowledge.id),

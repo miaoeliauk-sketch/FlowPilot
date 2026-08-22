@@ -5,7 +5,7 @@ import { useIP } from "@/lib/ip-context";
 import { VideoReview, ReviewMetrics } from "@/lib/types";
 import {
   getActiveIPId, getVideoReviews, getScriptAssets, updateVideoReview, deleteVideoReview,
-  markReviewSavedToKnowledge, addKnowledgeEntry, getKnowledgeEntries,
+  saveReviewExperienceToKnowledge, getKnowledgeEntries,
 } from "@/lib/ip-store";
 import {
   addVideoReviewForSource,
@@ -217,19 +217,24 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
       result.layer5.reusableFormulas.length > 0 ? `【可复用公式】${result.layer5.reusableFormulas.join("；")}` : "",
     ].filter(Boolean).join("\n");
 
-    const entry = addKnowledgeEntry({
-      category: "复盘经验库", title: `复盘经验：${title.slice(0, 20)}`,
-      rawContent: content, tags: [contentDirection, platform, result.layer1.performanceType],
-      keywords: [result.layer1.grade + "级", result.layer1.performanceType],
-      ipId: activeIP?.id ?? null, sourceTier: "高",
-      sourceTierReason: "来自真实发布视频的数据复盘，有具体指标支撑",
-      contentDirection: [contentDirection], sourcePlatform: platform, sourceUrl: videoUrl,
-      note: "", extractedAt: new Date().toISOString(),
-      metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
-    });
-    markReviewSavedToKnowledge(savedId, entry.id);
-    alert("经验已存入知识库「方法论」分类");
-    onSaved();
+    try {
+      saveReviewExperienceToKnowledge(savedId, {
+        category: "复盘经验库", title: `复盘经验：${title.slice(0, 20)}`,
+        rawContent: content, tags: [contentDirection, platform, result.layer1.performanceType],
+        keywords: [result.layer1.grade + "级", result.layer1.performanceType],
+        ipId: activeIP?.id ?? null, sourceTier: "高",
+        sourceTierReason: "来自真实发布视频的数据复盘，有具体指标支撑",
+        contentDirection: [contentDirection], sourcePlatform: platform, sourceUrl: videoUrl,
+        note: "", extractedAt: new Date().toISOString(),
+        metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+      });
+      setSavedId(null);
+      setError(null);
+      alert("经验已存入知识库「方法论」分类");
+      onSaved();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "经验保存失败，请稍后重试");
+    }
   }
 
   return (

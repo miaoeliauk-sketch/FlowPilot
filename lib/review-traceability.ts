@@ -18,6 +18,10 @@ type ReviewPayload = Omit<
   | "traceabilityStatus"
   | "knowledgeEffectStatus"
   | "createdAt"
+  | "updatedAt"
+  | "manualReviewStatus"
+  | "manualReviewTags"
+  | "manualReviewNote"
   | "savedToKnowledge"
   | "knowledgeEntryId"
 >;
@@ -95,7 +99,15 @@ export function assessVideoReviewTraceability(
 
 export function getLearningEligibleVideoReviews(ipId: string): VideoReview[] {
   return getVideoReviews(ipId).filter(
-    review => assessVideoReviewTraceability(review) === "traceable",
+    review => review.manualReviewStatus === "completed" &&
+      assessVideoReviewTraceability(review) === "traceable",
+  );
+}
+
+export function getPendingManualVideoReviews(ipId: string): VideoReview[] {
+  return getVideoReviews(ipId).filter(review =>
+    review.manualReviewStatus === "pending" &&
+    assessVideoReviewTraceability(review) === "traceable"
   );
 }
 

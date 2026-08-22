@@ -11,6 +11,13 @@ import {
   isTrustedKnowledgeUsageForScript,
   parseVerifiedScriptKnowledgeTracking,
 } from "./knowledge-effect-contract";
+import {
+  completeManualReview,
+  createPendingManualReviewFields,
+  migrateManualReviewFields,
+  transitionManualReviewStatus,
+  type CompleteManualReviewInput,
+} from "./review-workflow";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -105,8 +112,11 @@ function writeJSONStrict<T>(key: string, value: T, failureMessage: string): void
   }
 }
 
-function writeVideoReviewsStrict(value: VideoReview[]): void {
-  writeJSONStrict(KEY_VIDEO_REVIEWS, value, "复盘保存失败，请稍后重试");
+function writeVideoReviewsStrict(
+  value: VideoReview[],
+  failureMessage = "复盘保存失败，请稍后重试",
+): void {
+  writeJSONStrict(KEY_VIDEO_REVIEWS, value, failureMessage);
 }
 
 function writeKnowledgeEntriesStrict(
@@ -1136,7 +1146,8 @@ function retryPendingVideoReviewKnowledgeStatuses(
 }
 
 export function getVideoReviews(ipId?: string): VideoReview[] {
-  const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
+  const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, [])
+    .map(migrateManualReviewFields);
   const collapseResult = collapseDuplicateVideoReviews(all);
   maintainCollapsedVideoReviews(collapseResult);
   collapseResult.reviews = retryPendingVideoReviewKnowledgeStatuses(
@@ -1163,7 +1174,7 @@ function isReadableVideoReview(value: unknown): value is VideoReview {
 export function getVideoReviewsReadOnly(ipId?: string): VideoReviewReadOnlySnapshot {
   const storedReviews = readJSON<unknown>(KEY_VIDEO_REVIEWS, []);
   const readableReviews = Array.isArray(storedReviews)
-    ? storedReviews.filter(isReadableVideoReview)
+    ? storedReviews.filter(isReadableVideoReview).map(migrateManualReviewFields)
     : [];
   const collapseResult = collapseDuplicateVideoReviews(
     readableReviews,
@@ -1187,6 +1198,10 @@ type AddVideoReviewInput = Omit<
   | "traceabilityStatus"
   | "knowledgeEffectStatus"
   | "createdAt"
+  | "updatedAt"
+  | "manualReviewStatus"
+  | "manualReviewTags"
+  | "manualReviewNote"
   | "savedToKnowledge"
   | "knowledgeEntryId"
 > & ({
@@ -1240,11 +1255,24 @@ export function addVideoReview(input: AddVideoReviewInput): VideoReview {
     : [];
   const existingReview = reviewsForScript
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const now = new Date().toISOString();
+  const createdAt = existingReview?.createdAt ?? now;
+  const existingManualReview = existingReview
+    ? migrateManualReviewFields(existingReview)
+    : null;
   let review: VideoReview = {
     ...input,
     ipId,
     id: existingReview?.id ?? genId(),
-    createdAt: existingReview?.createdAt ?? new Date().toISOString(),
+    createdAt,
+    ...(existingManualReview
+      ? {
+          manualReviewStatus: existingManualReview.manualReviewStatus,
+          manualReviewTags: existingManualReview.manualReviewTags,
+          manualReviewNote: existingManualReview.manualReviewNote,
+          updatedAt: now,
+        }
+      : createPendingManualReviewFields(createdAt)),
     savedToKnowledge: existingReview?.savedToKnowledge ?? false,
     knowledgeEntryId: existingReview?.knowledgeEntryId ?? null,
     knowledgeEffectStatus: input.sourceType === "flowpilot"
@@ -1320,6 +1348,10 @@ type UpdateVideoReviewPatch = Partial<Omit<
   | "traceabilityStatus"
   | "knowledgeEffectStatus"
   | "createdAt"
+  | "updatedAt"
+  | "manualReviewStatus"
+  | "manualReviewTags"
+  | "manualReviewNote"
   | "savedToKnowledge"
   | "knowledgeEntryId"
 >>;
@@ -1333,16 +1365,63 @@ const VIDEO_REVIEW_PROTECTED_FIELDS = [
   "traceabilityStatus",
   "knowledgeEffectStatus",
   "createdAt",
+  "updatedAt",
+  "manualReviewStatus",
+  "manualReviewTags",
+  "manualReviewNote",
   "savedToKnowledge",
   "knowledgeEntryId",
 ] as const;
 
 export function updateVideoReview(id: string, patch: UpdateVideoReviewPatch): void {
   if (VIDEO_REVIEW_PROTECTED_FIELDS.some(field => Object.prototype.hasOwnProperty.call(patch, field))) {
-    throw new Error("不能修改复盘归属和追溯字段");
+    throw new Error("不能修改复盘归属、追溯或人工复盘契约字段");
   }
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
-  writeJSON(KEY_VIDEO_REVIEWS, all.map(r => r.id === id ? { ...r, ...patch } : r));
+  writeVideoReviewsStrict(
+    all.map(r => r.id === id ? { ...r, ...patch } : r),
+    "复盘更新保存失败，请稍后重试",
+  );
+}
+
+function updateManualReviewStatus(
+  id: string,
+  targetStatus: "pending" | "deferred",
+): VideoReview {
+  const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
+  const review = all.find(item => item.id === id);
+  if (!review) throw new Error("没有找到需要更新的复盘");
+  const updated = transitionManualReviewStatus(
+    review,
+    targetStatus,
+    new Date().toISOString(),
+  );
+  writeVideoReviewsStrict(all.map(item => item.id === id ? updated : item));
+  return updated;
+}
+
+export function deferVideoReview(id: string): VideoReview {
+  return updateManualReviewStatus(id, "deferred");
+}
+
+export function restoreVideoReview(id: string): VideoReview {
+  return updateManualReviewStatus(id, "pending");
+}
+
+export function completeVideoReview(
+  id: string,
+  input: CompleteManualReviewInput,
+): VideoReview {
+  const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
+  const review = all.find(item => item.id === id);
+  if (!review) throw new Error("没有找到需要完成的复盘");
+  const completed = completeManualReview(
+    review,
+    input,
+    new Date().toISOString(),
+  );
+  writeVideoReviewsStrict(all.map(item => item.id === id ? completed : item));
+  return completed;
 }
 
 export function deleteVideoReview(id: string): void {
@@ -1388,11 +1467,14 @@ export function deleteVideoReview(id: string): void {
   }
 }
 
-// 标记某条复盘的经验已保存进知识库（方法论分类）
-export function markReviewSavedToKnowledge(reviewId: string, knowledgeEntryId: string): void {
+function getValidatedReviewKnowledgeContext(reviewId: string): {
+  all: VideoReview[];
+  review: VideoReview;
+} {
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
-  const review = all.find(item => item.id === reviewId);
-  if (!review) throw new Error("没有找到需要关联的复盘");
+  const storedReview = all.find(item => item.id === reviewId);
+  if (!storedReview) throw new Error("没有找到需要关联的复盘");
+  const review = migrateManualReviewFields(storedReview);
   const script = review.ipId && review.scriptId
     ? getScriptAssets(review.ipId).find(item => item.id === review.scriptId)
     : null;
@@ -1409,12 +1491,93 @@ export function markReviewSavedToKnowledge(reviewId: string, knowledgeEntryId: s
   ) {
     throw new Error("只有可追溯复盘才能进入学习知识库");
   }
+  if (review.manualReviewStatus !== "completed") {
+    throw new Error("只有已完成人工复盘的内部内容才能进入学习知识库");
+  }
+  return { all, review };
+}
+
+// 标记某条复盘的经验已保存进知识库（方法论分类）
+export function markReviewSavedToKnowledge(reviewId: string, knowledgeEntryId: string): void {
+  const { all, review } = getValidatedReviewKnowledgeContext(reviewId);
   const knowledge = getKnowledgeEntries().find(item => item.id === knowledgeEntryId);
   if (!knowledge) throw new Error("没有找到需要关联的知识条目");
   if (knowledge.ipId !== review.ipId) {
     throw new Error("复盘与知识条目不属于同一IP");
   }
-  writeJSON(KEY_VIDEO_REVIEWS, all.map(r => r.id === reviewId ? { ...r, savedToKnowledge: true, knowledgeEntryId } : r));
+  writeVideoReviewsStrict(
+    all.map(r => r.id === reviewId ? { ...r, savedToKnowledge: true, knowledgeEntryId } : r),
+    "知识库标记保存失败，请稍后重试",
+  );
+}
+
+export function saveReviewExperienceToKnowledge(
+  reviewId: string,
+  input: Omit<KnowledgeEntry, "id" | "createdAt">,
+): KnowledgeEntry {
+  const { review } = getValidatedReviewKnowledgeContext(reviewId);
+  const allKnowledge = readKnowledgeEntriesStrict();
+  if (review.savedToKnowledge) {
+    const existing = review.knowledgeEntryId
+      ? allKnowledge.find(item => item.id === review.knowledgeEntryId)
+      : null;
+    if (
+      !existing ||
+      existing.category !== "复盘经验库" ||
+      existing.ipId !== review.ipId
+    ) {
+      throw new Error("复盘已有知识标记，但原关联数据不完整，请前往知识库检查");
+    }
+    return migrateKnowledgeEntry(existing);
+  }
+  if (input.category !== "复盘经验库" || input.ipId !== review.ipId) {
+    throw new Error("复盘经验知识的分类或IP归属不正确");
+  }
+  const knowledgeId = `review-experience:${reviewId}`;
+  const residualKnowledge = allKnowledge.find(item => item.id === knowledgeId);
+  if (
+    residualKnowledge &&
+    (
+      residualKnowledge.category !== input.category ||
+      residualKnowledge.ipId !== input.ipId ||
+      residualKnowledge.title !== input.title ||
+      residualKnowledge.rawContent !== input.rawContent
+    )
+  ) {
+    throw new Error("复盘存在同编号知识，但内容或归属不一致，已拒绝重复保存");
+  }
+  let persistedKnowledge = residualKnowledge;
+  if (!persistedKnowledge) {
+    const knowledge: KnowledgeEntry = {
+      ...input,
+      id: knowledgeId,
+      createdAt: new Date().toISOString(),
+    };
+    writeKnowledgeEntriesStrict(
+      [...allKnowledge, knowledge],
+      "知识条目保存失败，请稍后重试",
+    );
+    persistedKnowledge = readKnowledgeEntriesStrict()
+      .find(item => item.id === knowledge.id);
+    if (!persistedKnowledge) {
+      throw new Error("知识条目保存失败，请稍后重试");
+    }
+  }
+  try {
+    markReviewSavedToKnowledge(reviewId, persistedKnowledge.id);
+  } catch (associationError) {
+    try {
+      const current = readKnowledgeEntriesStrict();
+      writeKnowledgeEntriesStrict(
+        current.filter(item => item.id !== persistedKnowledge.id),
+        "知识回滚失败",
+      );
+    } catch {
+      throw new Error("关联失败且知识回滚失败，可能存在待清理知识，请前往知识库检查");
+    }
+    throw associationError;
+  }
+  return migrateKnowledgeEntry(persistedKnowledge);
 }
 
 // ── 用户人格：从评论聚类生成，保存至评论需求库KnowledgeEntry，额外维护独立列表供选题董事会调用 ──

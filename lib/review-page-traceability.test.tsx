@@ -8,6 +8,7 @@ import {
   addScriptAsset,
   deleteScriptAsset,
   deleteTopicAsset,
+  completeVideoReview,
   getKnowledgeEntries,
   getVideoReviews,
   recordKnowledgeUsage,
@@ -236,6 +237,114 @@ test("页面成功分析内部脚本后保存完整的选题和脚本关联", as
     assert.equal(saved?.traceabilityStatus, "traceable");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("知识库标记写入失败时页面显示失败且不误报保存成功", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId: ip.id,
+    title: "标记失败测试脚本",
+    cover: "",
+    content: "脚本正文",
+    status: "定稿",
+  });
+  const originalFetch = globalThis.fetch;
+  const originalAlert = Object.getOwnPropertyDescriptor(globalThis, "alert");
+  const alertMessages: string[] = [];
+  globalThis.fetch = async () => new Response(JSON.stringify(createReviewResponse()), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  Object.defineProperty(globalThis, "alert", {
+    configurable: true,
+    value: (message?: unknown) => {
+      alertMessages.push(String(message));
+    },
+  });
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ReviewPage = (await import("../app/review/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+    await user.selectOptions(await view.findByLabelText("选择已发布脚本"), script.id);
+    await user.type(view.getByPlaceholderText("填写发布的标题"), "标记失败复盘");
+    await user.type(view.getAllByPlaceholderText("0")[0]!, "1000");
+    await user.click(view.getByRole("button", { name: "开始六层复盘分析" }));
+    await view.findByText("第一层 · 数据结果");
+
+    const saved = getVideoReviews(ip.id).find(item => item.title === "标记失败复盘");
+    assert.ok(saved);
+    completeVideoReview(saved.id, {
+      tags: ["选题角度新颖"],
+      note: "标题角度带来了明显的播放增长。",
+    });
+    await user.type(view.getByPlaceholderText("仅作引用记录，不自动抓取"), "https://example.com/video");
+
+    const stored = localStorage;
+    const originalGlobalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const originalWindowStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
+    const failingReviewStorage = {
+      getItem: stored.getItem.bind(stored),
+      setItem(key: string, value: string) {
+        if (key === "ipwr:videoReviews") throw new Error("review marker write failed");
+        stored.setItem(key, value);
+      },
+      removeItem: stored.removeItem.bind(stored),
+      clear: stored.clear.bind(stored),
+      key: stored.key.bind(stored),
+      get length() { return stored.length; },
+    };
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: failingReviewStorage });
+    Object.defineProperty(window, "localStorage", { configurable: true, value: failingReviewStorage });
+    const restoreStorage = () => {
+      if (originalGlobalStorage) Object.defineProperty(globalThis, "localStorage", originalGlobalStorage);
+      else delete (globalThis as Record<string, unknown>).localStorage;
+      if (originalWindowStorage) Object.defineProperty(window, "localStorage", originalWindowStorage);
+      else delete (window as unknown as Record<string, unknown>).localStorage;
+    };
+
+    try {
+      await user.click(await view.findByRole("button", { name: "存入复盘经验库" }));
+      assert.ok(await view.findByText("知识库标记保存失败，请稍后重试"));
+      assert.deepEqual(alertMessages, []);
+      assert.equal(getVideoReviews(ip.id).find(item => item.id === saved.id)?.savedToKnowledge, false);
+      assert.deepEqual(getKnowledgeEntries("复盘经验库"), []);
+
+      restoreStorage();
+      await user.click(view.getByRole("button", { name: "存入复盘经验库" }));
+      assert.deepEqual(alertMessages, ["经验已存入知识库「方法论」分类"]);
+      const storedKnowledge = getKnowledgeEntries("复盘经验库");
+      assert.equal(storedKnowledge.length, 1);
+      assert.equal(
+        getVideoReviews(ip.id).find(item => item.id === saved.id)?.knowledgeEntryId,
+        storedKnowledge[0]?.id,
+      );
+      assert.equal(
+        Boolean(view.queryByRole("button", { name: "存入复盘经验库" })),
+        false,
+      );
+    } finally {
+      restoreStorage();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalAlert) Object.defineProperty(globalThis, "alert", originalAlert);
+    else delete (globalThis as Record<string, unknown>).alert;
   }
 });
 

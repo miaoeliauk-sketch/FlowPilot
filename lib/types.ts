@@ -560,6 +560,21 @@ export interface ReviewLayer6 {
   recommendedTitles: string[];    // 推荐标题（3-5条）
 }
 
+export type ManualReviewStatus =
+  | "pending"
+  | "deferred"
+  | "completed"
+  | "legacy_needs_manual_review";
+
+export type ManualReviewTag =
+  | "选题角度新颖"
+  | "引用具体案例或经典原文"
+  | "标题结构有效"
+  | "表达风格贴合IP"
+  | "蹭中热点或时事"
+  | "发布时间平台选得好"
+  | "其他";
+
 export interface VideoReview {
   id: string;
   ipId: string | null;
@@ -594,4 +609,8 @@ export interface VideoReview {
   savedToKnowledge: boolean;
   knowledgeEntryId: string | null;
   createdAt: string;
+  updatedAt: string;
+  manualReviewStatus: ManualReviewStatus;
+  manualReviewTags: ManualReviewTag[];
+  manualReviewNote: string;
 }
