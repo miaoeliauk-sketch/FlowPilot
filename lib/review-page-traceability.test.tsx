@@ -129,7 +129,357 @@ test("新建复盘明确区分内部内容和外部内容并只列出当前IP脚
   const selector = view.getByLabelText("选择已发布脚本");
   assert.ok(within(selector).getByRole("option", { name: script.title }));
   await user.click(view.getByRole("button", { name: "外部或临时内容" }));
-  assert.ok(view.getByText(/暂不计入知识使用统计/));
+  assert.ok(view.getByText(/仅存档，不参与学习/));
+});
+
+test("分析结果渲染不会顺带维护或改写历史复盘数据", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "带历史重复复盘的脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  const historicalReview = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title, platform: "视频号", publishedAt: "2026-08-18", videoUrl: "",
+      contentDirection: "商业洞察", scriptText: script.content,
+      metrics: { views: 100, likes: 8, comments: 1, favorites: 2, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  let releaseResponse: ((response: Response) => void) | undefined;
+  globalThis.fetch = () => new Promise<Response>(resolve => {
+    releaseResponse = resolve;
+  });
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ReviewPage = (await import("../app/review/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+    await user.click(await view.findByRole("button", { name: "外部或临时内容" }));
+    await user.type(view.getByPlaceholderText("填写发布的标题"), "仅用于验证渲染边界的外部复盘");
+    await user.type(view.getAllByPlaceholderText("0")[0]!, "1000");
+    await user.click(view.getByRole("button", { name: "开始六层复盘分析" }));
+    localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+      { ...historicalReview, id: "historical-review-old", createdAt: "2026-08-18T08:00:00.000Z" },
+      { ...historicalReview, id: "historical-review-new", createdAt: "2026-08-19T08:00:00.000Z" },
+    ]));
+    releaseResponse?.(new Response(JSON.stringify(createReviewResponse()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    await view.findByText("第一层 · 数据结果");
+
+    const stored = JSON.parse(localStorage.getItem("ipwr:videoReviews") ?? "[]") as VideoReview[];
+    assert.equal(stored.length, 3);
+    assert.ok(stored.some(review => review.id === "historical-review-old"));
+    assert.ok(stored.some(review => review.id === "historical-review-new"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("待复盘和复盘记录页签加载时只读折叠且不改写历史数据", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "页签只读折叠测试脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title, platform: "视频号", publishedAt: "2026-08-18", videoUrl: "",
+      contentDirection: "商业洞察", scriptText: script.content,
+      metrics: { views: 100, likes: 8, comments: 1, favorites: 2, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+    { ...review, id: "tab-review-old", createdAt: "2026-08-18T08:00:00.000Z" },
+    { ...review, id: "tab-review-new", createdAt: "2026-08-19T08:00:00.000Z" },
+  ]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "待复盘" }));
+  assert.equal((view.getAllByText(script.title)).length, 2);
+  assert.equal((JSON.parse(localStorage.getItem("ipwr:videoReviews") ?? "[]") as VideoReview[]).length, 2);
+
+  await user.click(view.getByRole("button", { name: "复盘记录" }));
+  assert.equal((await view.findAllByText(script.title)).length, 1);
+  assert.equal((JSON.parse(localStorage.getItem("ipwr:videoReviews") ?? "[]") as VideoReview[]).length, 2);
+});
+
+test("没有当前IP时复盘记录不展示任何跨IP数据", async () => {
+  const otherIP = createTopicBoardIPProfile();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([]));
+  localStorage.removeItem("ipwr:activeIpId");
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    id: "other-ip-review",
+    ipId: otherIP.id,
+    title: "不应展示的其他IP复盘",
+    platform: "视频号",
+    contentDirection: "商业洞察",
+    publishedAt: "2026-08-20",
+    metrics: { views: 1000, likes: 80, comments: 10, favorites: 20, shares: 5, newFollowers: 3, dms: 0, leads: 0, conversions: 0 },
+    createdAt: "2026-08-20T08:00:00.000Z",
+    analysis: null,
+  }]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "复盘记录" }));
+  assert.ok(await view.findByText(/还没有复盘记录/));
+  assert.equal(Boolean(view.queryByText("不应展示的其他IP复盘")), false);
+});
+
+test("待复盘页签可以登记内部脚本已发布并立即进入待复盘清单", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId: ip.id,
+    title: "已经发布、稍后复盘的脚本",
+    cover: "",
+    content: "已发布脚本正文",
+    status: "定稿",
+  });
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "待复盘" }));
+  await user.selectOptions(view.getByLabelText("选择已发布脚本"), script.id);
+  await user.click(view.getByRole("button", { name: "登记为已发布" }));
+
+  assert.ok((await view.findAllByText(script.title)).length >= 1);
+  assert.ok(view.getAllByText("待复盘").length >= 2);
+  const [stored] = getVideoReviews(ip.id);
+  assert.equal(stored?.scriptId, script.id);
+  assert.equal(stored?.manualReviewStatus, "pending");
+  assert.equal(stored?.analysis, null);
+});
+
+test("待复盘表单拒绝无意义说明并用多选标签完成原记录", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "等待填写人工复盘的脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title, platform: "视频号", publishedAt: "2026-08-20", videoUrl: "",
+      contentDirection: "商业洞察", scriptText: script.content,
+      metrics: { views: 1000, likes: 80, comments: 10, favorites: 20, shares: 5, newFollowers: 3, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "待复盘" }));
+  await user.click(await view.findByRole("button", { name: "开始人工复盘" }));
+  await user.click(view.getByRole("checkbox", { name: "其他" }));
+  await user.type(view.getByLabelText("复盘说明"), "！！！");
+  await user.click(view.getByRole("button", { name: "完成复盘" }));
+  assert.ok(await view.findByText("请填写有实际内容的复盘说明"));
+
+  await user.clear(view.getByLabelText("复盘说明"));
+  await user.type(view.getByLabelText("复盘说明"), "发布时间与平台选择带来了更高的真实互动。" );
+  await user.click(view.getByRole("button", { name: "完成复盘" }));
+
+  const [stored] = getVideoReviews(ip.id);
+  assert.equal(stored?.id, review.id);
+  assert.equal(stored?.createdAt, review.createdAt);
+  assert.equal(stored?.manualReviewStatus, "completed");
+  assert.deepEqual(stored?.manualReviewTags, ["其他"]);
+  assert.equal(stored?.manualReviewNote, "发布时间与平台选择带来了更高的真实互动。");
+  assert.notEqual(stored?.updatedAt, review.updatedAt);
+});
+
+test("待复盘内容可以暂不复盘并恢复且始终不冒充已完成", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "暂缓后再复盘的脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title, platform: "视频号", publishedAt: "2026-08-20", videoUrl: "",
+      contentDirection: "商业洞察", scriptText: script.content,
+      metrics: { views: 0, likes: 0, comments: 0, favorites: 0, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "待复盘" }));
+  await user.click(await view.findByRole("button", { name: "暂不复盘" }));
+  assert.equal(getVideoReviews(ip.id).find(item => item.id === review.id)?.manualReviewStatus, "deferred");
+  assert.ok(await view.findByText("已标记为暂不复盘"));
+  assert.equal(Boolean(view.queryByText("已完成人工复盘")), false);
+
+  await user.click(view.getByRole("button", { name: "恢复复盘" }));
+  assert.equal(getVideoReviews(ip.id).find(item => item.id === review.id)?.manualReviewStatus, "pending");
+  assert.ok(await view.findByRole("button", { name: "开始人工复盘" }));
+});
+
+test("已完成复盘可以修改原记录并保留创建时间", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "需要修改人工复盘的脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title, platform: "视频号", publishedAt: "2026-08-20", videoUrl: "",
+      contentDirection: "商业洞察", scriptText: script.content,
+      metrics: { views: 1000, likes: 80, comments: 10, favorites: 20, shares: 5, newFollowers: 3, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+  completeVideoReview(review.id, {
+    tags: ["标题结构有效"],
+    note: "原标题结构带来了比较清晰的点击反馈。",
+  });
+  const [completed] = getVideoReviews(ip.id);
+  const originalCreatedAt = completed!.createdAt;
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+    { ...completed, updatedAt: "2026-08-20T08:00:00.000Z" },
+  ]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "复盘记录" }));
+  await user.click(await view.findByRole("button", { name: "修改人工复盘" }));
+  assert.equal((view.getByRole("checkbox", { name: "标题结构有效" }) as HTMLInputElement).checked, true);
+  await user.click(view.getByRole("checkbox", { name: "表达风格贴合IP" }));
+  await user.clear(view.getByLabelText("复盘说明"));
+  await user.type(view.getByLabelText("复盘说明"), "修改后确认，标题和表达风格共同提升了真实互动。" );
+  await user.click(view.getByRole("button", { name: "保存修改" }));
+
+  const stored = getVideoReviews(ip.id);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.id, review.id);
+  assert.equal(stored[0]?.createdAt, originalCreatedAt);
+  assert.notEqual(stored[0]?.updatedAt, "2026-08-20T08:00:00.000Z");
+  assert.deepEqual(stored[0]?.manualReviewTags, ["标题结构有效", "表达风格贴合IP"]);
+  assert.equal(stored[0]?.manualReviewNote, "修改后确认，标题和表达风格共同提升了真实互动。");
+});
+
+test("经验库只展示当前IP且只读取复盘经验库分类", async () => {
+  const ip = createTopicBoardIPProfile();
+  const otherIP = { ...ip, id: "ip-other-review-experience", name: "其他IP" };
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip, otherIP]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const addExperience = (
+    category: "复盘经验库" | "方法论",
+    title: string,
+    ipId: string | null,
+  ) => addKnowledgeEntry({
+    category,
+    title: `复盘经验：${title}`,
+    rawContent: `${title}正文`,
+    tags: [], keywords: [], ipId,
+    sourceTier: "高", sourceTierReason: "测试", contentDirection: [],
+    sourcePlatform: "", sourceUrl: "", note: "", extractedAt: "2026-08-20T00:00:00.000Z",
+    metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+  });
+  addExperience("复盘经验库", "当前IP真实经验", ip.id);
+  addExperience("复盘经验库", "其他IP私有经验", otherIP.id);
+  addExperience("复盘经验库", "无归属通用经验", null);
+  addExperience("方法论", "错误分类旧经验", ip.id);
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "经验库" }));
+  assert.ok(await view.findByText("当前IP真实经验"));
+  assert.equal(Boolean(view.queryByText("其他IP私有经验")), false);
+  assert.equal(Boolean(view.queryByText("无归属通用经验")), false);
+  assert.equal(Boolean(view.queryByText("错误分类旧经验")), false);
 });
 
 test("内部脚本缺少选题关联时在调用AI前明确拒绝", async () => {
@@ -240,6 +590,62 @@ test("页面成功分析内部脚本后保存完整的选题和脚本关联", as
   }
 });
 
+test("复盘分析只向AI发送通用和当前IP的爆款案例", async () => {
+  const ip = createTopicBoardIPProfile();
+  const otherIP = { ...ip, id: "ip-other-review-analysis", name: "其他IP" };
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip, otherIP]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "跨IP案例隔离脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  const addViralCase = (title: string, ipId: string | null) => addKnowledgeEntry({
+    category: "爆款案例",
+    title,
+    rawContent: `${title}正文`,
+    tags: [], keywords: [], ipId,
+    sourceTier: "高", sourceTierReason: "测试", contentDirection: [],
+    sourcePlatform: "", sourceUrl: "", note: "", extractedAt: "2026-08-20T00:00:00.000Z",
+    metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+  });
+  const globalCase = addViralCase("通用爆款案例", null);
+  const currentIPCase = addViralCase("当前IP爆款案例", ip.id);
+  const otherIPCase = addViralCase("其他IP爆款案例", otherIP.id);
+  const originalFetch = globalThis.fetch;
+  let capturedKnowledgeIds: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { knowledgeContext?: Array<{ id: string }> };
+    capturedKnowledgeIds = (body.knowledgeContext ?? []).map(item => item.id);
+    return new Response(JSON.stringify(createReviewResponse()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ReviewPage = (await import("../app/review/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+    await user.selectOptions(await view.findByLabelText("选择已发布脚本"), script.id);
+    await user.type(view.getByPlaceholderText("填写发布的标题"), "验证爆款案例隔离");
+    await user.type(view.getAllByPlaceholderText("0")[0]!, "1000");
+    await user.click(view.getByRole("button", { name: "开始六层复盘分析" }));
+    await view.findByText("第一层 · 数据结果");
+
+    assert.deepEqual(capturedKnowledgeIds.sort(), [globalCase.id, currentIPCase.id].sort());
+    assert.equal(capturedKnowledgeIds.includes(otherIPCase.id), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("知识库标记写入失败时页面显示失败且不误报保存成功", async () => {
   const ip = createTopicBoardIPProfile();
   const boardResult = createValidTopicBoardResult();
@@ -294,6 +700,7 @@ test("知识库标记写入失败时页面显示失败且不误报保存成功",
       note: "标题角度带来了明显的播放增长。",
     });
     await user.type(view.getByPlaceholderText("仅作引用记录，不自动抓取"), "https://example.com/video");
+    await user.click(view.getByRole("button", { name: "检查人工复盘状态" }));
 
     const stored = localStorage;
     const originalGlobalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -327,7 +734,7 @@ test("知识库标记写入失败时页面显示失败且不误报保存成功",
 
       restoreStorage();
       await user.click(view.getByRole("button", { name: "存入复盘经验库" }));
-      assert.deepEqual(alertMessages, ["经验已存入知识库「方法论」分类"]);
+      assert.deepEqual(alertMessages, ["经验已存入知识库「复盘经验库」分类"]);
       const storedKnowledge = getKnowledgeEntries("复盘经验库");
       assert.equal(storedKnowledge.length, 1);
       assert.equal(

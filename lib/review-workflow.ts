@@ -102,6 +102,13 @@ export function completeManualReview(
   if (typeof input.note !== "string") throw new Error("人工复盘文字说明不能为空");
   const note = input.note.trim();
   if (!note) throw new Error("人工复盘文字说明不能为空");
+  const meaningfulCharacters = note.match(/[\p{L}\p{N}]/gu) ?? [];
+  if (
+    meaningfulCharacters.length === 0 ||
+    meaningfulCharacters.every(character => character === meaningfulCharacters[0])
+  ) {
+    throw new Error("请填写有实际内容的复盘说明");
+  }
   if (input.tags.length === 0) throw new Error("至少选择一个复盘标签");
   return {
     ...review,

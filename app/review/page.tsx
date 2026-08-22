@@ -2,10 +2,11 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
-import { VideoReview, ReviewMetrics } from "@/lib/types";
+import { ManualReviewTag, VideoReview, ReviewMetrics } from "@/lib/types";
 import {
-  getActiveIPId, getVideoReviews, getScriptAssets, updateVideoReview, deleteVideoReview,
-  saveReviewExperienceToKnowledge, getKnowledgeEntries,
+  getActiveIPId, getVideoReviewsReadOnly, getScriptAssets, updateVideoReview, deleteVideoReview,
+  saveReviewExperienceToKnowledge, getKnowledgeEntries, completeVideoReview,
+  deferVideoReview, restoreVideoReview,
 } from "@/lib/ip-store";
 import {
   addVideoReviewForSource,
@@ -16,13 +17,16 @@ import {
   VideoReviewSourceInvalidError,
   VIDEO_REVIEW_TRACEABILITY_LABELS,
 } from "@/lib/review-traceability";
+import { MANUAL_REVIEW_TAGS } from "@/lib/review-workflow";
+import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 import { Icon } from "@/components/ui/icon";
 import { XlsxUploadPanel } from "@/components/ui/xlsx-upload-panel";
 import type { ImportedData } from "@/components/ui/xlsx-upload-panel";
 
-type TabId = "new" | "history" | "experience";
+type TabId = "new" | "pending" | "history" | "experience";
 const TABS: { id: TabId; label: string }[] = [
   { id: "new", label: "新建复盘" },
+  { id: "pending", label: "待复盘" },
   { id: "history", label: "复盘记录" },
   { id: "experience", label: "经验库" },
 ];
@@ -63,6 +67,59 @@ function MetricInput({ label, value, onChange }: { label: string; value: string;
   );
 }
 
+function ManualReviewForm({
+  review,
+  onSaved,
+  onCancel,
+  submitLabel = "完成复盘",
+}: {
+  review: VideoReview;
+  onSaved: () => void;
+  onCancel: () => void;
+  submitLabel?: string;
+}) {
+  const [tags, setTags] = useState<ManualReviewTag[]>(review.manualReviewTags);
+  const [note, setNote] = useState(review.manualReviewNote);
+  const [error, setError] = useState<string | null>(null);
+
+  function toggleTag(tag: ManualReviewTag) {
+    setTags(current => current.includes(tag)
+      ? current.filter(item => item !== tag)
+      : [...current, tag]);
+  }
+
+  function handleSubmit() {
+    try {
+      completeVideoReview(review.id, { tags, note });
+      setError(null);
+      onSaved();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "人工复盘保存失败");
+    }
+  }
+
+  return (
+    <div className="mt-4 border-t border-[#F0EFE9] pt-4">
+      <div className="mb-2 text-[12px] font-semibold text-[#444]">这次内容为什么有效或值得关注？（可多选）</div>
+      <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {MANUAL_REVIEW_TAGS.map(tag => (
+          <label key={tag} className="flex items-center gap-2 rounded-[8px] border border-[#E5E4DE] px-3 py-2 text-[12px] text-[#555]">
+            <input type="checkbox" checked={tags.includes(tag)} onChange={() => toggleTag(tag)} />
+            {tag}
+          </label>
+        ))}
+      </div>
+      <label htmlFor={`manual-review-note-${review.id}`} className="mb-1 block text-[12px] font-semibold text-[#444]">复盘说明</label>
+      <textarea id={`manual-review-note-${review.id}`} value={note} onChange={event => setNote(event.target.value)} rows={4} placeholder="请写清楚具体理由；选择“其他”时也必须在这里说明。" className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px] leading-6" />
+      {error && <p className="mt-2 text-[12px] text-[#A32D2D]">{error}</p>}
+      <div className="mt-3 flex justify-end gap-2">
+        <button onClick={onCancel} className="rounded-[9px] bg-[#F2F1ED] px-3 py-2 text-[12px] text-[#666]">取消</button>
+        <button onClick={handleSubmit} className="rounded-[9px] bg-[#1C1C1B] px-4 py-2 text-[12px] font-semibold text-white">{submitLabel}</button>
+      </div>
+    </div>
+  );
+}
+
 // ════════════════════ Tab1 新建复盘 ════════════════════
 function NewReviewTab({ onSaved }: { onSaved: () => void }) {
   const { activeIP } = useIP();
@@ -82,6 +139,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VideoReview["analysis"] | null>(null);
   const [savedId, setSavedId] = useState<string | null>(null);
+  const [canSaveToKnowledge, setCanSaveToKnowledge] = useState(false);
   const [showXlsx, setShowXlsx] = useState(false);
   const analysisRequestSequence = useRef(0);
   const availableScripts = activeIP ? getScriptAssets(activeIP.id) : [];
@@ -92,6 +150,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
     setSelectedScriptId("");
     setResult(null);
     setSavedId(null);
+    setCanSaveToKnowledge(false);
     setError("");
   }, [activeIP?.id]);
 
@@ -136,7 +195,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
 
     const requestSequence = analysisRequestSequence.current + 1;
     analysisRequestSequence.current = requestSequence;
-    setLoading(true); setError(null); setResult(null); setSavedId(null);
+    setLoading(true); setError(null); setResult(null); setSavedId(null); setCanSaveToKnowledge(false);
 
     // Layer4：历史均值由代码算，不传给AI让它乱猜
     const history = getLearningEligibleVideoReviews(activeIP.id).filter(r => r.analysis?.layer1);
@@ -149,7 +208,10 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
       views: avg("views"), likes: avg("likes"), comments: avg("comments"), favorites: avg("favorites"),
     };
 
-    const knowledgeContext = getKnowledgeEntries("爆款案例").slice(0, 10).map(e => ({ id: e.id, title: e.title, category: e.category }));
+    const knowledgeContext = filterKnowledgeVisibleToIP(
+      getKnowledgeEntries("爆款案例"),
+      activeIP.id,
+    ).slice(0, 10).map(e => ({ id: e.id, title: e.title, category: e.category }));
 
     try {
       const res = await apiFetch("/api/review/analyze", {
@@ -186,6 +248,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
         },
       });
       setSavedId(saved.id);
+      setCanSaveToKnowledge(false);
       setResult(analysis);
       onSaved();
     } catch (err) {
@@ -229,12 +292,21 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
         metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
       });
       setSavedId(null);
+      setCanSaveToKnowledge(false);
       setError(null);
-      alert("经验已存入知识库「方法论」分类");
+      alert("经验已存入知识库「复盘经验库」分类");
       onSaved();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "经验保存失败，请稍后重试");
     }
+  }
+
+  function handleRefreshLearningEligibility() {
+    if (!savedId || !activeIP) return;
+    const eligible = getLearningEligibleVideoReviews(activeIP.id)
+      .some(review => review.id === savedId);
+    setCanSaveToKnowledge(eligible);
+    setError(eligible ? null : "请先在待复盘中完成人工复盘，再保存进知识库");
   }
 
   return (
@@ -279,7 +351,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
             )}
           </div>
         ) : (
-          <p className="rounded-[10px] bg-[#FBF3D6] px-3 py-2 text-[11.5px] text-[#7A5C00]">这条复盘会保留，但由于内容来源不可追溯，暂不计入知识使用统计。</p>
+          <p className="rounded-[10px] bg-[#FBF3D6] px-3 py-2 text-[11.5px] text-[#7A5C00]">这条外部内容仅存档，不参与学习；由于来源不可追溯，也不计入知识使用统计。</p>
         )}
       </Card>
       <Card>
@@ -461,9 +533,14 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
                 </div>
               )}
             </div>
-            {savedId && activeIP && getLearningEligibleVideoReviews(activeIP.id).some(review => review.id === savedId) && (
+            {savedId && activeIP && canSaveToKnowledge && (
               <div className="mt-3 flex justify-end">
                 <button onClick={handleSaveToKB} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white">存入复盘经验库</button>
+              </div>
+            )}
+            {savedId && activeIP && !canSaveToKnowledge && (
+              <div className="mt-3 flex justify-end">
+                <button onClick={handleRefreshLearningEligibility} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#666]">检查人工复盘状态</button>
               </div>
             )}
           </Card>
@@ -497,23 +574,177 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
   );
 }
 
-// ════════════════════ Tab2 复盘记录 ════════════════════
+function PendingReviewTab({ onChanged }: { onChanged: () => void }) {
+  const { activeIP } = useIP();
+  const [selectedScriptId, setSelectedScriptId] = useState("");
+  const [platform, setPlatform] = useState("抖音");
+  const [publishedAt, setPublishedAt] = useState(new Date().toISOString().slice(0, 10));
+  const [reviews, setReviews] = useState<VideoReview[]>([]);
+  const [editingReviewId, setEditingReviewId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const scripts = activeIP ? getScriptAssets(activeIP.id) : [];
+
+  function refresh() {
+    setReviews(activeIP
+      ? getVideoReviewsReadOnly(activeIP.id).reviews.filter(review =>
+          assessVideoReviewTraceability(review) === "traceable" &&
+          (review.manualReviewStatus === "pending" || review.manualReviewStatus === "deferred")
+        )
+      : []);
+  }
+
+  useEffect(() => {
+    setSelectedScriptId("");
+    setError(null);
+    refresh();
+  }, [activeIP?.id]);
+
+  function handleRegisterPublished() {
+    if (!activeIP) {
+      setError("请先选择当前操盘IP");
+      return;
+    }
+    const script = scripts.find(item => item.id === selectedScriptId);
+    if (!script) {
+      setError("请选择已发布的内部脚本");
+      return;
+    }
+    try {
+      addVideoReviewForSource({
+        activeIPId: activeIP.id,
+        source: { type: "flowpilot", scriptId: script.id },
+        review: {
+          title: script.title,
+          platform,
+          publishedAt,
+          videoUrl: "",
+          contentDirection: "未分类",
+          scriptText: script.content,
+          metrics: { views: 0, likes: 0, comments: 0, favorites: 0, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+          analysis: null,
+        },
+      });
+      setSelectedScriptId("");
+      setError(null);
+      refresh();
+      onChanged();
+    } catch (registerError) {
+      setError(registerError instanceof Error ? registerError.message : "发布登记失败");
+    }
+  }
+
+  function handleDefer(reviewId: string) {
+    try {
+      deferVideoReview(reviewId);
+      setEditingReviewId(null);
+      setError(null);
+      refresh();
+      onChanged();
+    } catch (deferError) {
+      setError(deferError instanceof Error ? deferError.message : "暂不复盘标记失败");
+    }
+  }
+
+  function handleRestore(reviewId: string) {
+    try {
+      restoreVideoReview(reviewId);
+      setError(null);
+      refresh();
+      onChanged();
+    } catch (restoreError) {
+      setError(restoreError instanceof Error ? restoreError.message : "恢复复盘失败");
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <div className="mb-1 text-[13px] font-bold text-[#1C1C1B]">登记内部脚本已发布</div>
+        <p className="mb-3 text-[11.5px] text-[#888]">先登记发布，等效果数据沉淀后再回来复盘。</p>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div>
+            <label htmlFor="pending-review-script" className="mb-1 block text-[11.5px] text-[#888]">选择已发布脚本</label>
+            <select id="pending-review-script" value={selectedScriptId} onChange={event => setSelectedScriptId(event.target.value)} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]">
+              <option value="">请选择当前IP的脚本</option>
+              {scripts.map(script => <option key={script.id} value={script.id}>{script.title}</option>)}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="pending-review-platform" className="mb-1 block text-[11.5px] text-[#888]">发布平台</label>
+            <select id="pending-review-platform" value={platform} onChange={event => setPlatform(event.target.value)} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]">
+              {PLATFORMS.map(item => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="pending-review-date" className="mb-1 block text-[11.5px] text-[#888]">发布日期</label>
+            <input id="pending-review-date" type="date" value={publishedAt} onChange={event => setPublishedAt(event.target.value)} className="w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
+          </div>
+        </div>
+        {error && <p className="mt-2 text-[12px] text-[#A32D2D]">{error}</p>}
+        <div className="mt-3 flex justify-end"><button onClick={handleRegisterPublished} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[13px] font-semibold text-white">登记为已发布</button></div>
+      </Card>
+      {reviews.length === 0 ? (
+        <Card><p className="py-6 text-center text-[13px] text-[#999]">当前没有待复盘内容。</p></Card>
+      ) : reviews.map(review => (
+        <Card key={review.id}>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[13px] font-semibold text-[#1C1C1B]">{review.title}</span>
+            <span className="rounded-full bg-[#FBF3D6] px-2.5 py-1 text-[11px] text-[#7A5C00]">
+              {review.manualReviewStatus === "deferred" ? "已标记为暂不复盘" : "待复盘"}
+            </span>
+          </div>
+          <p className="mt-1 text-[11.5px] text-[#888]">{review.platform} · {review.publishedAt}</p>
+          <div className="mt-3 flex justify-end gap-2">
+            {review.manualReviewStatus === "deferred" ? (
+              <button onClick={() => handleRestore(review.id)} className="rounded-[9px] bg-[#F2F1ED] px-3 py-2 text-[12px] text-[#666]">恢复复盘</button>
+            ) : (
+              <>
+                <button onClick={() => handleDefer(review.id)} className="rounded-[9px] bg-[#F2F1ED] px-3 py-2 text-[12px] text-[#666]">暂不复盘</button>
+                <button onClick={() => setEditingReviewId(review.id)} className="rounded-[9px] bg-[#1C1C1B] px-3 py-2 text-[12px] font-semibold text-white">开始人工复盘</button>
+              </>
+            )}
+          </div>
+          {review.manualReviewStatus === "pending" && editingReviewId === review.id && (
+            <ManualReviewForm
+              review={review}
+              onCancel={() => setEditingReviewId(null)}
+              onSaved={() => {
+                setEditingReviewId(null);
+                refresh();
+                onChanged();
+              }}
+            />
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// ════════════════════ Tab3 复盘记录 ════════════════════
 function HistoryTab() {
   const { activeIP } = useIP();
   const [reviews, setReviews] = useState<VideoReview[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [editingReviewId, setEditingReviewId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  function refresh() {
+    setReviews(activeIP ? getVideoReviewsReadOnly(activeIP.id).reviews : []);
+  }
+
   useEffect(() => {
-    setReviews(getVideoReviews(activeIP?.id));
+    refresh();
+    setEditingReviewId(null);
     setDeleteError(null);
-  }, [activeIP]);
+  }, [activeIP?.id]);
 
   function handleDeleteReview(id: string) {
     try {
       deleteVideoReview(id);
       setDeleteError(null);
-      setReviews(getVideoReviews(activeIP?.id));
+      setEditingReviewId(null);
+      refresh();
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : "复盘删除失败");
     }
@@ -551,9 +782,17 @@ function HistoryTab() {
               <span className="rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[10.5px] text-[#666]">
                 {knowledgeEffectLabel}
               </span>
+              {r.manualReviewStatus === "completed" && (
+                <span className="rounded-full bg-[#EAF3DE] px-2 py-0.5 text-[10.5px] text-[#3B6D11]">已完成人工复盘</span>
+              )}
               {r.savedToKnowledge && <span className="text-[10.5px] text-[#3B6D11]">已入库</span>}
             </div>
             <div className="flex items-center gap-1.5">
+              {r.manualReviewStatus === "completed" && (
+                <button onClick={() => setEditingReviewId(editingReviewId === r.id ? null : r.id)} className="text-[12px] text-[#639922]">
+                  {editingReviewId === r.id ? "取消修改" : "修改人工复盘"}
+                </button>
+              )}
               <button onClick={() => setExpanded(expanded === r.id ? null : r.id)} className="text-[12px] text-[#639922]">{expanded === r.id ? "收起" : "展开"}</button>
               <button aria-label="删除复盘" onClick={() => handleDeleteReview(r.id)} className="text-[#999] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
             </div>
@@ -562,6 +801,18 @@ function HistoryTab() {
             <span>{r.platform}</span><span>·</span><span>{r.contentDirection}</span><span>·</span><span>{r.publishedAt}</span>
             <span>·</span><span>播放{r.metrics.views.toLocaleString()}</span><span>·</span><span>点赞{r.metrics.likes.toLocaleString()}</span>
           </div>
+
+          {editingReviewId === r.id && r.manualReviewStatus === "completed" && (
+            <ManualReviewForm
+              review={r}
+              submitLabel="保存修改"
+              onCancel={() => setEditingReviewId(null)}
+              onSaved={() => {
+                setEditingReviewId(null);
+                refresh();
+              }}
+            />
+          )}
 
           {expanded === r.id && r.analysis && (
             <div className="mt-4 flex flex-col gap-2.5 border-t border-[#F0EFE9] pt-4">
@@ -592,7 +843,12 @@ function HistoryTab() {
 
 // ════════════════════ Tab3 经验库 ════════════════════
 function ExperienceTab() {
-  const entries = getKnowledgeEntries("方法论").filter(e => e.title.startsWith("复盘经验："));
+  const { activeIP } = useIP();
+  const entries = activeIP
+    ? getKnowledgeEntries("复盘经验库").filter(e =>
+        e.ipId === activeIP.id && e.title.startsWith("复盘经验：")
+      )
+    : [];
 
   if (entries.length === 0) {
     return <Card><p className="py-8 text-center text-[13px] text-[#999]">还没有从复盘中沉淀出经验。完成分析后，在第五层点「存入知识库」即可。</p></Card>;
@@ -641,6 +897,7 @@ export default function ReviewPage() {
       </div>
 
       {tab === "new" && <NewReviewTab onSaved={() => setHistoryKey(k => k + 1)} />}
+      {tab === "pending" && <PendingReviewTab onChanged={() => setHistoryKey(k => k + 1)} />}
       {tab === "history" && <HistoryTab key={historyKey} />}
       {tab === "experience" && <ExperienceTab key={historyKey} />}
     </div>

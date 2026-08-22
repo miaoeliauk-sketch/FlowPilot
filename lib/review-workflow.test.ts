@@ -189,6 +189,25 @@ test("完成人工复盘时拒绝空白文字说明且不改变待复盘记录",
   assert.equal(stored?.manualReviewNote, "");
 });
 
+test("完成人工复盘时拒绝纯符号和单字重复的无意义说明", () => {
+  const { review } = seedTraceableReview();
+
+  assert.throws(
+    () => completeVideoReview(review.id, {
+      tags: ["其他"],
+      note: "！！！……",
+    }),
+    /请填写有实际内容的复盘说明/,
+  );
+  assert.throws(
+    () => completeVideoReview(review.id, {
+      tags: ["其他"],
+      note: "哈哈哈哈",
+    }),
+    /请填写有实际内容的复盘说明/,
+  );
+});
+
 test("完成人工复盘时至少选择一个真实原因标签", () => {
   const { topic, review } = seedTraceableReview();
 
