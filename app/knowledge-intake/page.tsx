@@ -1,7 +1,10 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { useIP } from "@/lib/ip-context";
-import { addKnowledgeEntry } from "@/lib/ip-store";
+import {
+  addKnowledgeEntry,
+  getKnowledgeEntriesForFullLibraryComparison,
+} from "@/lib/ip-store";
 import type { KnowledgeCategory } from "@/lib/types";
 import { apiFetch } from "@/lib/api-fetch";
 import { parseXlsxFile } from "@/lib/xlsx-parser";
@@ -23,6 +26,12 @@ import {
   type KnowledgeMethodCardSource,
   type SimilarKnowledgeMethodCardGroup,
 } from "@/lib/knowledge-intake-deduplication";
+import {
+  runKnowledgeIntakePrecheck,
+  type KnowledgeIntakePrecheckAssessment,
+  type KnowledgeIntakePrecheckCandidate,
+  type SimilarExistingKnowledgeEvidence,
+} from "@/lib/knowledge-intake-precheck";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -55,6 +64,7 @@ interface IntakeItem {
   selected: boolean;
   categoryOverride?: string;
   sourceSegments: KnowledgeMethodCardSource[];
+  precheck: KnowledgeIntakePrecheckAssessment;
 }
 
 interface SegmentRun {
@@ -72,6 +82,11 @@ const REC_STYLE: Record<string,{bg:string;color:string}> = {
   "建议入库":   { bg:"#EAF3DE", color:"#3B6D11" },
   "待确认":     { bg:"#FEF3C7", color:"#92400E" },
   "不建议入库": { bg:"#FCEBEB", color:"#A32D2D" },
+};
+const SIMILARITY_LABEL: Record<SimilarExistingKnowledgeEvidence["tier"], string> = {
+  exact: "完全相同",
+  high: "高度相似",
+  partial: "部分相似",
 };
 
 function listText(items?: string[]) {
@@ -110,6 +125,25 @@ function buildIPUnderstandingContent(item: IntakeItem, originalContent: string) 
     item.relationToIP ? `【与当前IP的关系】\n${item.relationToIP}` : "",
     `【原始内容】\n${originalContent.trim()}`,
   ].filter(Boolean).join("\n\n");
+}
+
+function buildPrecheckCandidate(
+  item: Omit<IntakeItem, "precheck">,
+  isIPMode: boolean,
+  originalContent: string,
+): KnowledgeIntakePrecheckCandidate {
+  return {
+    id: item.id,
+    kind: isIPMode ? "raw_text" : "method_card",
+    title: item.title,
+    summary: item.summary,
+    coreMethod: item.coreMethod,
+    applicableScenarios: item.applicableScenarios,
+    aiUsage: item.aiUsage,
+    rawContent: isIPMode
+      ? buildIPUnderstandingContent(item as IntakeItem, originalContent)
+      : buildMethodCardContent(item as IntakeItem),
+  };
 }
 
 interface KnowledgeIntakePageProps {
@@ -182,9 +216,10 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
   function mapResponseItems(
     responseItems: IntakeItem[],
+    originalContent: string,
     sourceSegment?: { id: string; title: string; index: number },
   ): IntakeItem[] {
-    return responseItems.map((it, index) => ({
+    const mappedItems = responseItems.map((it, index) => ({
       ...it,
       tags: isIPMode ? it.keywords ?? [] : it.tags ?? [],
       id: `item-${sourceSegment?.id ?? "single"}-${index}-${Date.now()}`,
@@ -192,12 +227,29 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         (!isIPKnowledgeCategory(it.category) || Boolean(it.ipId)),
       sourceSegments: sourceSegment ? [sourceSegment] : [],
     }));
+    const result = runKnowledgeIntakePrecheck({
+      candidates: mappedItems.map(item => buildPrecheckCandidate(item, isIPMode, originalContent)),
+      existingEntries: getKnowledgeEntriesForFullLibraryComparison(),
+      ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
+    });
+    const assessmentsById = new Map(result.assessments.map(assessment => [assessment.candidateId, assessment]));
+    return mappedItems.map(item => ({
+      ...item,
+      precheck: assessmentsById.get(item.id) ?? {
+        candidateId: item.id,
+        quality: { status: "needs_manual_review", issues: [{
+          code: "PRECHECK_UNAVAILABLE",
+          message: "入库前检查结果暂不可用，请人工检查",
+        }] },
+        similarEntries: [],
+      },
+    }));
   }
 
-  function applyDuplicateClassification(cards: IntakeItem[], previousExactDuplicateCount = 0) {
+  function applyDuplicateClassification(cards: IntakeItem[]) {
     const result = groupKnowledgeMethodCards(cards);
-    setItems(result.cards);
-    setExactDuplicateCount(previousExactDuplicateCount + result.exactDuplicateCount);
+    setItems(cards);
+    setExactDuplicateCount(result.exactDuplicateCount);
     setResolvedSimilarGroupIds([]);
   }
 
@@ -228,7 +280,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     const responseItems = data.mode === "ip"
       ? data.item ? [data.item] : []
       : Array.isArray(data.items) ? data.items : [];
-    return mapResponseItems(responseItems, sourceSegment);
+    return mapResponseItems(responseItems, content, sourceSegment);
   }
 
   async function handleInputFile(file: File) {
@@ -335,7 +387,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         title: run.segment.title,
         index: segmentIndex,
       });
-      applyDuplicateClassification([...items, ...segmentItems], exactDuplicateCount);
+      applyDuplicateClassification([...items, ...segmentItems]);
       setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
         ? { ...candidate, status: "completed", error: undefined }
         : candidate));
@@ -629,7 +681,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
       {exactDuplicateCount > 0 && items.length > 0 && !saved && (
         <div className="mb-4 rounded-[10px] border border-[#DDE8C5] bg-[#F7FBEF] px-4 py-3 text-[12.5px] text-[#4E6C25]">
-          {`已自动合并${exactDuplicateCount}张完全重复方法卡，来源章节已保留。`}
+          {`发现${exactDuplicateCount}张批次内完全相同的方法卡，系统未自动合并，请逐条确认是否继续入库。`}
         </div>
       )}
 
@@ -710,12 +762,6 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
               <div key={item.id} className="rounded-[14px] border-2 bg-white p-4 transition-all"
                 style={{ borderColor: item.selected ? "#639922" : "#E5E4DE" }}>
                 <div className="mb-3 flex items-start gap-3">
-                  <button onClick={() => setItems(prev => prev.map((it,j) => j===i ? {...it,selected:!it.selected} : it))}
-                    disabled={retryInProgress}
-                    className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border-2 transition-all disabled:opacity-40"
-                    style={{ borderColor: item.selected ? "#639922" : "#CCC", background: item.selected ? "#639922" : "white" }}>
-                    {item.selected && <span className="text-[10px] font-bold text-white">✓</span>}
-                  </button>
                   <div className="min-w-0 flex-1">
                     <div className="mb-1.5 flex flex-wrap items-center gap-2">
                       <span className="text-[14px] font-bold text-[#1C1C1B]">{item.title}</span>
@@ -778,6 +824,65 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                 {!isIPMode && listText(item.triggerKeywords) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">触发关键词：</span>{listText(item.triggerKeywords)}</p>}
                 {!isIPMode && item.aiUsage && <p className="mb-1.5 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">AI调用方式：</span>{item.aiUsage}</p>}
                 <p className="text-[11.5px] text-[#AAA]"><span className="font-semibold text-[#888]">入库依据：</span>{item.ingestReason} · {item.confidenceReason}</p>
+                <section className="mt-3 rounded-[10px] border border-[#E5E4DE] bg-[#FCFCFA] p-3">
+                  <h3 className="text-[12.5px] font-bold text-[#333]">入库前检查</h3>
+                  <p className="mt-1 text-[11.5px] text-[#666]">
+                    {item.precheck.quality.status === "pass"
+                      ? "基础质量：未发现明显问题"
+                      : "基础质量：需要人工检查"}
+                  </p>
+                  {item.precheck.quality.issues.length > 0 && (
+                    <ul className="mt-1 list-disc space-y-1 pl-4 text-[11.5px] text-[#8A6418]">
+                      {item.precheck.quality.issues.map(issue => <li key={issue.code}>{issue.message}</li>)}
+                    </ul>
+                  )}
+                  {item.precheck.similarEntries.length === 0 ? (
+                    <p className="mt-2 text-[11.5px] text-[#888]">全库暂未发现相似内容</p>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {item.precheck.similarEntries.map(similar => (
+                        <div key={similar.knowledgeId} className="rounded-[8px] bg-white px-3 py-2 text-[11.5px] text-[#666]">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-full bg-[#F2EEDF] px-2 py-0.5 font-bold text-[#735F21]">
+                              {SIMILARITY_LABEL[similar.tier]}
+                            </span>
+                            <span>{similar.title || "未命名内容"}｜{similar.category || "分类未标注"}</span>
+                          </div>
+                          <p className="mt-1">相似原因：{similar.reasons.join("；")}</p>
+                          <p className="mt-1 text-[#888]">{similar.ownershipLabel}｜{similar.sourceDescription}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={item.selected}
+                    onClick={() => setItems(previous => previous.map((candidate, index) =>
+                      index === i ? { ...candidate, selected: true } : candidate))}
+                    disabled={retryInProgress}
+                    className="rounded-[8px] border px-3 py-1.5 text-[11.5px] font-bold disabled:opacity-40"
+                    style={item.selected
+                      ? { borderColor: "#639922", background: "#639922", color: "white" }
+                      : { borderColor: "#BFD59F", background: "white", color: "#4E6C25" }}
+                  >
+                    继续入库「{item.title}」
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={!item.selected}
+                    onClick={() => setItems(previous => previous.map((candidate, index) =>
+                      index === i ? { ...candidate, selected: false } : candidate))}
+                    disabled={retryInProgress}
+                    className="rounded-[8px] border px-3 py-1.5 text-[11.5px] font-semibold disabled:opacity-40"
+                    style={!item.selected
+                      ? { borderColor: "#C8C5BB", background: "#F2F1ED", color: "#555" }
+                      : { borderColor: "#D8D5C9", background: "white", color: "#777" }}
+                  >
+                    暂不入库「{item.title}」
+                  </button>
+                </div>
               </div>
               );
             })}

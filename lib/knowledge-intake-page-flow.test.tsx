@@ -89,6 +89,47 @@ function buildIntakeResponseItem(title: string, overrides: Record<string, unknow
   };
 }
 
+function buildExistingKnowledgeEntry(
+  id: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    category: "选题方法库",
+    title: "反常识选题法",
+    rawContent: [
+      "【一句话总结】\n用反常识冲突解决普通选题缺少吸引力的问题",
+      "【核心方法】\n先指出大众默认判断，再用真实反例推翻它",
+      "【适用场景】\n知识口播、观点短视频",
+      "【AI调用方式】\n当选题缺少冲突时，用反例重构切入角度",
+    ].join("\n\n"),
+    sourceKind: null,
+    sourceName: "历史课程",
+    sourceAnalysis: null,
+    tags: [],
+    keywords: [],
+    ipId: null,
+    sourceTier: "中",
+    sourceTierReason: "来源明确",
+    contentDirection: ["知识口播", "观点短视频"],
+    sourcePlatform: "课程逐字稿",
+    sourceUrl: "",
+    note: JSON.stringify({
+      coreMethod: "先指出大众默认判断，再用真实反例推翻它",
+      applicableScenarios: ["知识口播", "观点短视频"],
+      aiUsage: "当选题缺少冲突时，用反例重构切入角度",
+    }),
+    createdAt: "2026-08-01T00:00:00.000Z",
+    extractedAt: null,
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    dna: null,
+    ...overrides,
+  };
+}
+
 function deferredResponse() {
   let resolve!: (response: Response) => void;
   const promise = new Promise<Response>(done => {
@@ -285,8 +326,8 @@ test("确认分段后依次提炼并显示当前进度与来源段落", async ()
 
     await waitFor(() => assert.ok(view.getAllByText("选题方法").length > 0));
     assert.ok(view.getAllByText("开头方法").length > 0);
-    assert.ok(view.getByText("来源：第1段·第一章 选题"));
-    assert.ok(view.getByText("来源：第2段·第二章 开头 等2个章节"));
+    assert.ok(view.getAllByText("来源：第1段·第一章 选题").length >= 1);
+    assert.ok(view.getAllByText("来源：第2段·第二章 开头 等2个章节").length >= 1);
     assert.equal(requestBodies.length, 2);
     assert.ok(requestBodies.every(body => body.rawContent.length <= 4_000));
   } finally {
@@ -443,6 +484,159 @@ test("IP内容理解不会启用长文分段去重", async () => {
   }
 });
 
+test("单篇内容保存前展示全库三档相似依据并由人工决定是否入库", async () => {
+  const { render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([{ id: "ip-a", name: "案例老师" }]));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    buildExistingKnowledgeEntry("exact", {
+      ipId: null,
+      sourcePlatform: "课程逐字稿",
+      sourceName: "第一讲",
+    }),
+    buildExistingKnowledgeEntry("high", {
+      title: "用反常识制造选题冲突",
+      rawContent: [
+        "【一句话总结】\n通过反常识冲突解决知识类选题吸引力不足的问题",
+        "【核心方法】\n先写出大众默认判断，再用一个真实反例完成推翻",
+        "【适用场景】\n知识口播、观点短视频",
+        "【AI调用方式】\n选题没有冲突时，调用真实反例重新设计切入角度",
+      ].join("\n\n"),
+      note: JSON.stringify({
+        coreMethod: "先写出大众默认判断，再用一个真实反例完成推翻",
+        applicableScenarios: ["知识口播", "观点短视频"],
+        aiUsage: "选题没有冲突时，调用真实反例重新设计切入角度",
+      }),
+      ipId: "ip-a",
+      sourcePlatform: "直播逐字稿",
+      sourceName: "七月直播",
+    }),
+    buildExistingKnowledgeEntry("partial", {
+      title: "普通观点怎样改成反常识选题",
+      rawContent: [
+        "【一句话总结】\n把大家熟悉的观点换一个方向表达",
+        "【核心方法】\n先列出大众默认判断，再寻找能够推翻判断的反例",
+        "【适用场景】\n知识口播",
+        "【AI调用方式】\n寻找观点中可以被真实反例挑战的部分",
+      ].join("\n\n"),
+      note: JSON.stringify({
+        coreMethod: "先列出大众默认判断，再寻找能够推翻判断的反例",
+        applicableScenarios: ["知识口播"],
+        aiUsage: "寻找观点中可以被真实反例挑战的部分",
+      }),
+      contentDirection: ["知识口播"],
+      sourcePlatform: "文章",
+      sourceName: "选题笔记",
+    }),
+  ]));
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    mode: "global",
+    items: [buildIntakeResponseItem("反常识选题法", {
+      summary: "用反常识冲突解决普通选题缺少吸引力的问题",
+      coreMethod: "先指出大众默认判断，再用真实反例推翻它",
+      applicableScenarios: ["知识口播", "观点短视频"],
+      aiUsage: "当选题缺少冲突时，用反例重构切入角度",
+    })],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    await user.type(view.getByPlaceholderText(/粘贴逐字稿/), "一份用于验证全库查重的完整文字资料");
+    await user.click(view.getByRole("button", { name: "AI提炼方法" }));
+
+    await waitFor(() => assert.ok(view.getByText("入库前检查")));
+    assert.ok(view.getByText("完全相同"));
+    assert.ok(view.getByText("高度相似"));
+    assert.ok(view.getByText("部分相似"));
+    assert.ok(view.getByText(/标题、内容摘要、核心方法、适用场景和使用方式完全一致/));
+    assert.ok(view.getByText(/反常识选题法.*选题方法库/));
+    assert.ok(view.getByText(/全局知识.*课程逐字稿.*第一讲/));
+    assert.ok(view.getByText(/案例老师IP.*直播逐字稿.*七月直播/));
+    assert.ok(view.getByText("基础质量：未发现明显问题"));
+
+    const knowledgeBeforeDecision = localStorage.getItem("ipwr:knowledgeEntries");
+    await user.click(view.getByRole("button", { name: "暂不入库「反常识选题法」" }));
+    assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), knowledgeBeforeDecision);
+    assert.ok(view.getAllByRole("button", { name: /写入通用知识库/ }).every(button =>
+      (button as HTMLButtonElement).disabled));
+
+    await user.click(view.getByRole("button", { name: "继续入库「反常识选题法」" }));
+    await user.click(view.getAllByRole("button", { name: /写入通用知识库/ })[0]!);
+    await waitFor(() => assert.ok(view.getByText("成功写入 1 条知识")));
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 4);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("IP理解模式先保存再导入相同内容时按真实保存结构识别为完全相同", async () => {
+  const { render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([{ id: "ip-a", name: "测试IP" }]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify("ip-a"));
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    mode: "ip",
+    item: buildIntakeResponseItem("IP内容理解", {
+      category: "IP表达语料",
+      ipId: "ip-a",
+      keywords: ["表达"],
+      understanding: "老师习惯先说结论",
+      keyPoints: ["结论先行"],
+      relationToIP: "属于当前IP表达习惯",
+    }),
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage searchParams={{ scope: "ip" }} />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    await user.type(view.getByPlaceholderText(/粘贴当前IP的逐字稿/), "老师原始内容");
+    await user.click(view.getByRole("button", { name: "AI理解内容" }));
+
+    await waitFor(() => assert.ok(view.getByText("入库前检查")));
+    assert.ok(view.getByText("全库暂未发现相似内容"));
+    await user.click(view.getByRole("button", { name: "继续入库「IP内容理解」" }));
+    await user.click(view.getAllByRole("button", { name: /写入当前IP知识库/ })[0]!);
+    await waitFor(() => assert.ok(view.getByText("成功写入 1 条知识")));
+
+    const savedEntries = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{
+      rawContent?: string;
+    }>;
+    assert.equal(savedEntries.length, 1);
+    assert.equal(savedEntries[0]?.rawContent, [
+      "【内容概要】\nIP内容理解摘要",
+      "【AI对内容的理解】\n老师习惯先说结论",
+      "【原文关键信息】\n结论先行",
+      "【与当前IP的关系】\n属于当前IP表达习惯",
+      "【原始内容】\n老师原始内容",
+    ].join("\n\n"));
+
+    await user.click(view.getByRole("button", { name: "继续入库" }));
+    await user.type(view.getByPlaceholderText(/粘贴当前IP的逐字稿/), "老师原始内容");
+    await user.click(view.getByRole("button", { name: "AI理解内容" }));
+
+    await waitFor(() => assert.ok(view.getByText("完全相同")));
+    assert.ok(view.getByText(/IP内容理解.*IP表达语料/));
+    assert.ok(view.getByText(/测试IP.*IP内容理解入库/));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("单段失败不清除成功结果并且可以只重试失败段", async () => {
   const { render, waitFor } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
@@ -508,7 +702,7 @@ test("单段失败不清除成功结果并且可以只重试失败段", async ()
   }
 });
 
-test("汇总后自动合并完全重复项并要求用户处理疑似重复组", async () => {
+test("长文档批次内完全重复只提示并保留全部内容供人工选择", async () => {
   const { render, waitFor } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
   const { IPProvider } = await import("./ip-context");
@@ -582,18 +776,14 @@ test("汇总后自动合并完全重复项并要求用户处理疑似重复组",
     await user.click(view.getByRole("button", { name: "预览自动分段" }));
     await user.click(view.getByRole("button", { name: "确认分段并开始提炼" }));
 
-    await waitFor(() => assert.ok(view.getByText("已自动合并1张完全重复方法卡，来源章节已保留。")));
+    await waitFor(() => assert.ok(view.getByText("发现1张批次内完全相同的方法卡，系统未自动合并，请逐条确认是否继续入库。")));
     assert.ok(view.getByText("疑似重复组1"));
-    assert.equal(view.getAllByText("数字标题法").length, 1);
-    assert.ok(view.getAllByText("来源：第1段·第一章 选题、第2段·第二章 开头 等2个章节").length >= 1);
-    const saveButton = view.getAllByRole("button", { name: /写入通用知识库/ })[0] as HTMLButtonElement;
-    assert.equal(saveButton.disabled, true, "疑似重复组确认前不应允许入库");
-
-    await user.click(view.getByRole("button", { name: "合并这组" }));
-
-    await waitFor(() => assert.equal(view.queryByText("疑似重复组1"), null));
-    assert.equal((view.getAllByRole("button", { name: /写入通用知识库/ })[0] as HTMLButtonElement).disabled, false);
-    assert.ok(view.getAllByText("来源：第1段·第一章 选题、第2段·第二章 开头 等2个章节").length >= 2);
+    assert.equal(view.getAllByText("数字标题法").length, 2);
+    assert.ok(view.getAllByText("来源：第1段·第一章 选题").length >= 1);
+    assert.ok(view.getAllByText("来源：第2段·第二章 开头 等2个章节").length >= 1);
+    assert.equal(view.queryByText(/已自动合并/), null);
+    assert.equal(view.getAllByRole("button", { name: /继续入库「数字标题法」/ }).length, 2);
+    assert.equal(view.getAllByRole("button", { name: /暂不入库「数字标题法」/ }).length, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
