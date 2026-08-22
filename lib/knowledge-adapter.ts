@@ -184,6 +184,13 @@ export function recordKnowledgeItemUsage(
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     module, usedAt: new Date().toISOString(), reason: context,
     relevanceTier: "高度相关", relevanceReason: "unified search match", context,
+    trackingStatus: "module_recorded",
+    topicId: null,
+    scriptId: null,
+    reviewId: null,
+    usageType: null,
+    sectionLabel: null,
+    evidenceExcerpt: null,
   };
   updateKnowledgeEntry(id, {
     usageRecords: [...(entry.usageRecords ?? []), record],

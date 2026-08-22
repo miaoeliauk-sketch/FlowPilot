@@ -117,8 +117,46 @@ export interface ScriptAsset {
   content: string;
   status: "草稿" | "定稿" | "已拍摄";
   scriptResult?: unknown;
+  knowledgeTracking: ScriptKnowledgeTracking;
   createdAt: string;
 }
+
+export type ScriptKnowledgeUsageType = "structure" | "argument" | "case" | "expression";
+
+export interface ScriptKnowledgeUsage {
+  knowledgeEntryId: string;
+  usageType: ScriptKnowledgeUsageType;
+  sectionLabel: string;
+  evidenceExcerpt: string;
+  reason: string;
+}
+
+export type ScriptKnowledgeTracking =
+  | {
+      status: "not_tracked";
+      candidateKnowledgeEntryIds: [];
+      verifiedAt: null;
+      usages: [];
+    }
+  | {
+      status: "unavailable";
+      candidateKnowledgeEntryIds: string[];
+      verifiedAt: string;
+      usages: [];
+    }
+  | {
+      status: "verified";
+      candidateKnowledgeEntryIds: string[];
+      verifiedAt: string;
+      usages: ScriptKnowledgeUsage[];
+    };
+
+export type NewScriptAssetInput = Omit<
+  ScriptAsset,
+  "id" | "createdAt" | "knowledgeTracking"
+> & {
+  knowledgeTracking?: ScriptKnowledgeTracking;
+};
 
 // ══════════════════════════════════════════════════════════════
 // 统一知识模型 KnowledgeItem（V2重构）
@@ -266,6 +304,11 @@ export const KNOWN_CONSUMER_MODULES = ["选题董事会", "评论区雷达"] as 
 
 export type RelevanceTier = "高度相关" | "中度相关" | "低度相关";
 
+export type KnowledgeUsageTrackingStatus =
+  | "legacy_unverified"
+  | "module_recorded"
+  | "script_adopted";
+
 export interface KnowledgeUsageRecord {
   id: string;
   module: ConsumerModule;
@@ -274,6 +317,13 @@ export interface KnowledgeUsageRecord {
   relevanceTier: RelevanceTier; // 定性档位，不是编造的精确相似度数字
   relevanceReason: string; // 为什么是这个相关度档位的具体依据
   context: string; // 当时检索的输入是什么（例如具体选题文本/评论内容摘要）
+  trackingStatus: KnowledgeUsageTrackingStatus;
+  topicId: string | null;
+  scriptId: string | null;
+  reviewId: string | null;
+  usageType: ScriptKnowledgeUsageType | null;
+  sectionLabel: string | null;
+  evidenceExcerpt: string | null;
 }
 
 export type KnowledgeStatus = "未使用" | "已用于选题" | "已用于脚本" | "已用于分析";

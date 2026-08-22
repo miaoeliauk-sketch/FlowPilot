@@ -1,5 +1,5 @@
 "use client";
-import { IPProfile, VoiceSample, IPStyleProfile, TopicAsset, CommentAsset, ScriptAsset, KnowledgeEntry, KnowledgeCategory, HookEntry, LikesSnapshot, KnowledgeUsageRecord, KnowledgeStatus, ConsumerModule, HotMaterialAnalysis, UserProfile, VideoReview } from "./types";
+import { IPProfile, VoiceSample, IPStyleProfile, TopicAsset, CommentAsset, ScriptAsset, KnowledgeEntry, KnowledgeCategory, HookEntry, LikesSnapshot, KnowledgeUsageRecord, KnowledgeStatus, ConsumerModule, HotMaterialAnalysis, UserProfile, VideoReview, NewScriptAssetInput, ScriptKnowledgeTracking } from "./types";
 import type { TopicAssetStatus } from "./types";
 import {
   createTopicEvaluationSummary,
@@ -7,6 +7,7 @@ import {
   TopicBoardContractError,
 } from "./topic-board-contract";
 import { buildVoiceStyleProfileForSave } from "./voice-style-profile";
+import { parseVerifiedScriptKnowledgeTracking } from "./knowledge-effect-contract";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -643,14 +644,46 @@ export function deleteCommentAsset(id: string): void {
 }
 
 // ── IP 资产库：脚本 ──
-export function getScriptAssets(ipId: string): ScriptAsset[] {
-  const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
-  return all.filter(a => a.ipId === ipId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+function createNotTrackedKnowledgeState(): ScriptKnowledgeTracking {
+  return {
+    status: "not_tracked",
+    candidateKnowledgeEntryIds: [],
+    verifiedAt: null,
+    usages: [],
+  };
 }
 
-export function addScriptAsset(input: Omit<ScriptAsset, "id" | "createdAt">): ScriptAsset {
+function migrateScriptAsset(asset: ScriptAsset): ScriptAsset {
+  return {
+    ...asset,
+    knowledgeTracking: asset.knowledgeTracking ?? createNotTrackedKnowledgeState(),
+  };
+}
+
+export function getScriptAssets(ipId: string): ScriptAsset[] {
   const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
-  const asset: ScriptAsset = { ...input, id: genId(), createdAt: new Date().toISOString() };
+  return all
+    .map(migrateScriptAsset)
+    .filter(a => a.ipId === ipId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function addScriptAsset(input: NewScriptAssetInput): ScriptAsset {
+  const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
+  const knowledgeTracking = input.knowledgeTracking?.status === "verified"
+    ? parseVerifiedScriptKnowledgeTracking({
+        candidateKnowledgeEntryIds: input.knowledgeTracking.candidateKnowledgeEntryIds,
+        finalScriptText: input.content,
+        verifiedAt: input.knowledgeTracking.verifiedAt,
+        usages: input.knowledgeTracking.usages,
+      })
+    : input.knowledgeTracking ?? createNotTrackedKnowledgeState();
+  const asset: ScriptAsset = {
+    ...input,
+    knowledgeTracking,
+    id: genId(),
+    createdAt: new Date().toISOString(),
+  };
   writeJSON(KEY_SCRIPT_ASSETS, [...all, asset]);
   return asset;
 }
@@ -678,7 +711,16 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
   return {
     ...e,
     category: e.category === "评论" ? "评论需求" : (e.category as KnowledgeCategory),
-    usageRecords: e.usageRecords ?? [],
+    usageRecords: (e.usageRecords ?? []).map(record => ({
+      ...record,
+      trackingStatus: record.trackingStatus ?? "legacy_unverified",
+      topicId: record.topicId ?? null,
+      scriptId: record.scriptId ?? null,
+      reviewId: record.reviewId ?? null,
+      usageType: record.usageType ?? null,
+      sectionLabel: record.sectionLabel ?? null,
+      evidenceExcerpt: record.evidenceExcerpt ?? null,
+    })),
     status: e.status ?? "未使用",
     dna: e.dna ?? null,
     sourceKind: e.sourceKind ?? null,
@@ -726,11 +768,33 @@ export function deleteKnowledgeEntry(id: string): void {
 // 记录一次知识被某个模块引用——"被哪些模块调用"和"调用次数"都从usageRecords派生，
 // 不单独维护计数字段，避免两边数字对不上。newStatus可选：只有真正进入下一阶段时才推进状态，
 // 单纯被检索到、还没被实际采用，不强制变更status。
-export function recordKnowledgeUsage(entryId: string, usage: Omit<KnowledgeUsageRecord, "id">, newStatus?: KnowledgeStatus): void {
+type ModuleKnowledgeUsageInput = Omit<
+  KnowledgeUsageRecord,
+  | "id"
+  | "trackingStatus"
+  | "topicId"
+  | "scriptId"
+  | "reviewId"
+  | "usageType"
+  | "sectionLabel"
+  | "evidenceExcerpt"
+>;
+
+export function recordKnowledgeUsage(entryId: string, usage: ModuleKnowledgeUsageInput, newStatus?: KnowledgeStatus): void {
   const all = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => {
     if (e.id !== entryId) return e;
-    const record: KnowledgeUsageRecord = { ...usage, id: genId() };
+    const record: KnowledgeUsageRecord = {
+      ...usage,
+      id: genId(),
+      trackingStatus: "module_recorded",
+      topicId: null,
+      scriptId: null,
+      reviewId: null,
+      usageType: null,
+      sectionLabel: null,
+      evidenceExcerpt: null,
+    };
     return { ...e, usageRecords: [...e.usageRecords, record], status: newStatus ?? e.status };
   }));
 }

@@ -1,5 +1,5 @@
 import { addScriptAsset, getTopicAsset } from "./ip-store";
-import type { ScriptAsset, TopicAsset } from "./types";
+import type { NewScriptAssetInput, ScriptAsset, TopicAsset } from "./types";
 
 export class TopicScriptLinkError extends Error {
   readonly code:
@@ -17,8 +17,8 @@ export class TopicScriptLinkError extends Error {
 }
 
 export type TopicLinkedScriptInput = Omit<
-  ScriptAsset,
-  "id" | "createdAt" | "topicId"
+  NewScriptAssetInput,
+  "topicId"
 > & {
   topicId: string;
 };
