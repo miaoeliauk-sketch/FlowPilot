@@ -1,3 +1,9 @@
+import {
+  compareKnowledgeSimilarity,
+  groupPairwiseMatches,
+  normalizeKnowledgeText,
+} from "./knowledge-similarity";
+
 export interface KnowledgeMethodCardSource {
   id: string;
   title: string;
@@ -31,103 +37,8 @@ export interface SimilarKnowledgeMethodCardGroup {
   cardIds: string[];
 }
 
-interface ComparisonScores {
-  title: number;
-  summary: number;
-  coreMethod: number;
-  scenarios: number;
-  aiUsage: number;
-}
-
-const FULL_WIDTH_CURRENCY_EQUIVALENTS = new Map<string, string>([
-  ["￥", "¥"],
-  ["￡", "£"],
-  ["￦", "₩"],
-]);
-
 function normalizeText(value: string | undefined): string {
-  return (value ?? "")
-    .replace(/\u3000/gu, " ")
-    .replace(/[\uFF01-\uFF5E]/gu, character =>
-      String.fromCharCode(character.charCodeAt(0) - 0xFEE0))
-    .replace(/[￥￡￦]/gu, character =>
-      FULL_WIDTH_CURRENCY_EQUIVALENTS.get(character) ?? character)
-    .normalize("NFC")
-    .replace(/\s+/gu, "");
-}
-
-function bigrams(value: string): Set<string> {
-  if (value.length < 2) return new Set(value ? [value] : []);
-  const result = new Set<string>();
-  for (let index = 0; index < value.length - 1; index += 1) {
-    result.add(value.slice(index, index + 2));
-  }
-  return result;
-}
-
-function textSimilarity(left: string | undefined, right: string | undefined): number {
-  const normalizedLeft = normalizeText(left);
-  const normalizedRight = normalizeText(right);
-  if (!normalizedLeft && !normalizedRight) return 0;
-  if (!normalizedLeft || !normalizedRight) return 0;
-  if (normalizedLeft === normalizedRight) return 1;
-
-  const leftBigrams = bigrams(normalizedLeft);
-  const rightBigrams = bigrams(normalizedRight);
-  let shared = 0;
-  for (const part of leftBigrams) {
-    if (rightBigrams.has(part)) shared += 1;
-  }
-  const dice = (2 * shared) / (leftBigrams.size + rightBigrams.size);
-  const shorter = normalizedLeft.length <= normalizedRight.length ? normalizedLeft : normalizedRight;
-  const longer = normalizedLeft.length > normalizedRight.length ? normalizedLeft : normalizedRight;
-  const containment = longer.includes(shorter) ? (shorter.length / longer.length) * 0.95 : 0;
-  return Math.max(dice, containment);
-}
-
-function normalizedSet(values: string[] | undefined): Set<string> {
-  return new Set((values ?? []).map(normalizeText).filter(Boolean));
-}
-
-function setSimilarity(left: string[] | undefined, right: string[] | undefined): number {
-  const leftSet = normalizedSet(left);
-  const rightSet = normalizedSet(right);
-  if (leftSet.size === 0 && rightSet.size === 0) return 0;
-  if (leftSet.size === 0 || rightSet.size === 0) return 0;
-  let intersection = 0;
-  for (const value of leftSet) {
-    if (rightSet.has(value)) intersection += 1;
-  }
-  return intersection / new Set([...leftSet, ...rightSet]).size;
-}
-
-function setsEqual(left: string[] | undefined, right: string[] | undefined): boolean {
-  const leftSet = normalizedSet(left);
-  const rightSet = normalizedSet(right);
-  return leftSet.size === rightSet.size && [...leftSet].every(value => rightSet.has(value));
-}
-
-function hasComparableCriticalFields(card: KnowledgeMethodCardForDeduplication): boolean {
-  return Boolean(
-    normalizeText(card.title) &&
-    normalizeText(card.summary) &&
-    normalizeText(card.coreMethod) &&
-    normalizedSet(card.applicableScenarios).size > 0 &&
-    normalizeText(card.aiUsage),
-  );
-}
-
-function compareCards(
-  left: KnowledgeMethodCardForDeduplication,
-  right: KnowledgeMethodCardForDeduplication,
-): ComparisonScores {
-  return {
-    title: textSimilarity(left.title, right.title),
-    summary: textSimilarity(left.summary, right.summary),
-    coreMethod: textSimilarity(left.coreMethod, right.coreMethod),
-    scenarios: setSimilarity(left.applicableScenarios, right.applicableScenarios),
-    aiUsage: textSimilarity(left.aiUsage, right.aiUsage),
-  };
+  return normalizeKnowledgeText(value);
 }
 
 function isExactDuplicate(
@@ -135,12 +46,7 @@ function isExactDuplicate(
   right: KnowledgeMethodCardForDeduplication,
 ): boolean {
   if (left.category !== right.category) return false;
-  if (!hasComparableCriticalFields(left) || !hasComparableCriticalFields(right)) return false;
-  return normalizeText(left.title) === normalizeText(right.title) &&
-    normalizeText(left.summary) === normalizeText(right.summary) &&
-    normalizeText(left.coreMethod) === normalizeText(right.coreMethod) &&
-    setsEqual(left.applicableScenarios, right.applicableScenarios) &&
-    normalizeText(left.aiUsage) === normalizeText(right.aiUsage);
+  return compareKnowledgeSimilarity(left, right).tier === "exact";
 }
 
 function isHighlySimilar(
@@ -148,16 +54,7 @@ function isHighlySimilar(
   right: KnowledgeMethodCardForDeduplication,
 ): boolean {
   if (left.category !== right.category) return false;
-  if (!hasComparableCriticalFields(left) || !hasComparableCriticalFields(right)) return false;
-  const scores = compareCards(left, right);
-  const contentScores = [scores.summary, scores.coreMethod, scores.scenarios, scores.aiUsage];
-  const relatedDimensions = contentScores.filter(score => score >= 0.45).length;
-  const weighted = scores.title * 0.1 +
-    scores.summary * 0.22 +
-    scores.coreMethod * 0.3 +
-    scores.scenarios * 0.16 +
-    scores.aiUsage * 0.22;
-  return scores.title >= 0.4 && scores.coreMethod >= 0.58 && relatedDimensions >= 3 && weighted >= 0.55;
+  return compareKnowledgeSimilarity(left, right).tier === "high";
 }
 
 function completenessScore(card: KnowledgeMethodCardForDeduplication): number {
@@ -289,19 +186,6 @@ export function mergeKnowledgeMethodCards<T extends KnowledgeMethodCardForDedupl
   };
 }
 
-function buildPairwiseGroups<T extends KnowledgeMethodCardForDeduplication>(
-  cards: T[],
-  matches: (left: T, right: T) => boolean,
-): T[][] {
-  const groups: T[][] = [];
-  for (const card of cards) {
-    const group = groups.find(candidate => candidate.every(member => matches(member, card)));
-    if (group) group.push(card);
-    else groups.push([card]);
-  }
-  return groups;
-}
-
 function buildGroups<T extends KnowledgeMethodCardForDeduplication>(
   cards: T[],
   matches: (left: T, right: T) => boolean,
@@ -341,7 +225,7 @@ export function groupKnowledgeMethodCards<T extends KnowledgeMethodCardForDedupl
     if (group.length === 1) return group[0]!;
     return mergeKnowledgeMethodCards(group);
   });
-  const similarGroups = buildPairwiseGroups(consolidated, (left, right) =>
+  const similarGroups = groupPairwiseMatches(consolidated, (left, right) =>
     !isExactDuplicate(left, right) && isHighlySimilar(left, right))
     .filter(group => group.length > 1)
     .map(group => ({
