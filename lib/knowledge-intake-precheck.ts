@@ -51,6 +51,22 @@ export interface KnowledgeIntakePrecheckResult {
   assessments: KnowledgeIntakePrecheckAssessment[];
 }
 
+export interface IPOriginalSourcePrecheckInput {
+  candidateId: string;
+  title: string;
+  originalContent: string;
+  keywords: string[];
+  viewpointSummaries: string[];
+  existingEntries: KnowledgeEntry[];
+  ipNamesById?: Record<string, string>;
+}
+
+export interface IPOriginalSourcePrecheckResult {
+  quality: KnowledgeIntakeQualityResult;
+  originalContentMatches: SimilarExistingKnowledgeEvidence[];
+  extractedKnowledgeMatches: SimilarExistingKnowledgeEvidence[];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -89,6 +105,57 @@ function stringArray(value: unknown): string[] {
 
 function sectionList(value: string): string[] {
   return value.split(/[\n、，；;]/u).map(item => item.trim()).filter(Boolean);
+}
+
+interface SourceKnowledgeDigest {
+  title: string;
+  keywords: string[];
+  viewpointSummaries: string[];
+}
+
+function serializeSourceKnowledgeDigest(digest: SourceKnowledgeDigest): string {
+  return [
+    digest.title.trim() ? `【标题】\n${digest.title.trim()}` : "",
+    digest.keywords.some(keyword => keyword.trim())
+      ? `【关键词】\n${digest.keywords.map(keyword => keyword.trim()).filter(Boolean).join("、")}`
+      : "",
+    digest.viewpointSummaries.some(summary => summary.trim())
+      ? `【观点摘要】\n${digest.viewpointSummaries.map(summary => summary.trim()).filter(Boolean).join("；")}`
+      : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildExistingKnowledgeDigest(entry: KnowledgeEntry): SourceKnowledgeDigest {
+  const structuredSummary = [
+    readSection(entry.rawContent, "一句话总结") || readSection(entry.rawContent, "内容概要"),
+    readSection(entry.rawContent, "核心方法"),
+  ].filter(Boolean);
+  return {
+    title: stringValue(entry.title),
+    keywords: stringArray(entry.keywords),
+    viewpointSummaries: structuredSummary.length > 0
+      ? structuredSummary
+      : [stringValue(entry.rawContent)],
+  };
+}
+
+function buildDigestSimilarityReasons(
+  candidate: SourceKnowledgeDigest,
+  existing: SourceKnowledgeDigest,
+): string[] {
+  const dimensions: Array<[string, string, string]> = [
+    ["标题表达", candidate.title, existing.title],
+    ["关键词", candidate.keywords.join("、"), existing.keywords.join("、")],
+    ["观点摘要", candidate.viewpointSummaries.join("；"), existing.viewpointSummaries.join("；")],
+  ];
+  const reasons = dimensions.flatMap(([label, left, right]) => {
+    const comparison = compareKnowledgeSimilarity(convertRawText(left), convertRawText(right));
+    if (comparison.tier === "none") return [];
+    return [`${label}${comparison.tier === "exact" ? "完全一致" : "存在相似或重合"}`];
+  });
+  return reasons.length > 0
+    ? reasons
+    : ["标题、关键词和观点摘要的综合内容存在相似或重合"];
 }
 
 function convertExistingEntry(entry: KnowledgeEntry): KnowledgeSimilarityContent {
@@ -275,6 +342,64 @@ export function runKnowledgeIntakePrecheck(
       candidateId: candidate.id,
       quality: checkQuality(candidate),
       similarEntries: findSimilarEntries(candidate, input.existingEntries, ipNamesById),
+    })),
+  };
+}
+
+export function runIPOriginalSourcePrecheck(
+  input: IPOriginalSourcePrecheckInput,
+): IPOriginalSourcePrecheckResult {
+  const candidateDigest: SourceKnowledgeDigest = {
+    title: input.title,
+    keywords: input.keywords,
+    viewpointSummaries: input.viewpointSummaries,
+  };
+  const originalAssessment = runKnowledgeIntakePrecheck({
+    candidates: [{
+      id: `${input.candidateId}-original`,
+      kind: "raw_text",
+      title: input.title,
+      summary: input.viewpointSummaries.join("；"),
+      rawContent: input.originalContent,
+    }],
+    existingEntries: input.existingEntries.filter(entry => entry.category === "IP原始内容"),
+    ipNamesById: input.ipNamesById,
+  }).assessments[0];
+
+  const knowledgeEntries = input.existingEntries
+    .filter(entry => entry.category !== "IP原始内容")
+    .map(entry => ({ entry, digest: buildExistingKnowledgeDigest(entry) }));
+  const knowledgeAssessment = runKnowledgeIntakePrecheck({
+    candidates: [{
+      id: `${input.candidateId}-knowledge`,
+      kind: "raw_text",
+      title: input.title,
+      summary: input.viewpointSummaries.join("；"),
+      rawContent: serializeSourceKnowledgeDigest(candidateDigest),
+    }],
+    existingEntries: knowledgeEntries.map(({ entry, digest }) => ({
+      ...entry,
+      rawContent: serializeSourceKnowledgeDigest(digest),
+    })),
+    ipNamesById: input.ipNamesById,
+  }).assessments[0];
+
+  return {
+    quality: originalAssessment?.quality ?? {
+      status: "needs_manual_review",
+      issues: [{ code: "PRECHECK_UNAVAILABLE", message: "入库前检查结果暂不可用，请人工检查" }],
+    },
+    originalContentMatches: originalAssessment?.similarEntries ?? [],
+    extractedKnowledgeMatches: (knowledgeAssessment?.similarEntries ?? []).map(match => ({
+      ...match,
+      reasons: buildDigestSimilarityReasons(
+        candidateDigest,
+        knowledgeEntries.find(({ entry }) => entry.id === match.knowledgeId)?.digest ?? {
+          title: "",
+          keywords: [],
+          viewpointSummaries: [],
+        },
+      ),
     })),
   };
 }

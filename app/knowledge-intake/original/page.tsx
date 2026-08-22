@@ -4,6 +4,12 @@ import { useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { useIP } from "@/lib/ip-context";
 import { addIPOriginalSource, deriveIPOriginalSourceTitle } from "@/lib/ip-original-source";
+import { getKnowledgeEntriesForFullLibraryComparison } from "@/lib/ip-store";
+import {
+  runIPOriginalSourcePrecheck,
+  type IPOriginalSourcePrecheckResult,
+  type SimilarExistingKnowledgeEvidence,
+} from "@/lib/knowledge-intake-precheck";
 import type {
   IPOriginalSourceKind,
   IPSourceAnalysis,
@@ -23,12 +29,52 @@ const KIND_LABEL: Record<IPSourceAnalysisKind, string> = {
   expression: "表达特征",
 };
 
+const SIMILARITY_LABEL: Record<SimilarExistingKnowledgeEvidence["tier"], string> = {
+  exact: "完全相同",
+  high: "高度相似",
+  partial: "部分相似",
+};
+
+function SimilarityResults({
+  title,
+  emptyText,
+  matches,
+}: {
+  title: string;
+  emptyText: string;
+  matches: SimilarExistingKnowledgeEvidence[];
+}) {
+  return (
+    <div className="rounded-[10px] border border-[#E5E4DE] bg-[#FCFCFA] p-3">
+      <h3 className="text-[12.5px] font-bold text-[#333]">{title}</h3>
+      {matches.length === 0 ? (
+        <p className="mt-2 text-[11.5px] text-[#888]">{emptyText}</p>
+      ) : (
+        <div className="mt-2 space-y-2">
+          {matches.map(match => (
+            <div key={match.knowledgeId} className="rounded-[8px] bg-white px-3 py-2 text-[11.5px] text-[#666]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-[#F2EEDF] px-2 py-0.5 font-bold text-[#735F21]">
+                  {SIMILARITY_LABEL[match.tier]}
+                </span>
+                <span>{match.title || "未命名内容"}｜{match.category || "分类未标注"}</span>
+              </div>
+              <p className="mt-1">相似原因：{match.reasons.join("；")}</p>
+              <p className="mt-1 text-[#888]">{match.ownershipLabel}｜{match.sourceDescription}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function draftSourceId() {
   return `source-draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export default function IPOriginalContentIntakePage() {
-  const { activeIP } = useIP();
+  const { activeIP, ips } = useIP();
   const [title, setTitle] = useState("");
   const [sourceKind, setSourceKind] = useState<IPOriginalSourceKind>("直播逐字稿");
   const [sourceName, setSourceName] = useState("");
@@ -36,6 +82,8 @@ export default function IPOriginalContentIntakePage() {
   const [rawContent, setRawContent] = useState("");
   const [analysis, setAnalysis] = useState<IPSourceAnalysis | null>(null);
   const [analysisIPId, setAnalysisIPId] = useState<string | null>(null);
+  const [precheck, setPrecheck] = useState<IPOriginalSourcePrecheckResult | null>(null);
+  const [saveDecision, setSaveDecision] = useState<"continue" | "skip" | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedId, setSavedId] = useState("");
@@ -55,6 +103,8 @@ export default function IPOriginalContentIntakePage() {
     if (!title.trim()) setTitle(file.name.replace(/\.[^.]+$/, ""));
     setAnalysis(null);
     setAnalysisIPId(null);
+    setPrecheck(null);
+    setSaveDecision(null);
   }
 
   async function handleAnalyze() {
@@ -87,11 +137,29 @@ export default function IPOriginalContentIntakePage() {
         return;
       }
       const nextAnalysis = data.analysis as IPSourceAnalysis;
+      const nextTitle = title.trim()
+        ? title.trim()
+        : deriveIPOriginalSourceTitle(rawContent, nextAnalysis);
+      const keywords = nextAnalysis.items
+        .filter(item => item.kind === "claim" || item.kind === "concept" || item.kind === "topic")
+        .map(item => item.content.slice(0, 60));
+      const viewpointSummaries = nextAnalysis.items
+        .filter(item => item.kind === "claim" || item.kind === "reasoning" || item.kind === "concept" || item.kind === "topic")
+        .map(item => item.content);
+      const nextPrecheck = runIPOriginalSourcePrecheck({
+        candidateId: draftId,
+        title: nextTitle,
+        originalContent: rawContent,
+        keywords,
+        viewpointSummaries,
+        existingEntries: getKnowledgeEntriesForFullLibraryComparison(),
+        ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
+      });
       setAnalysis(nextAnalysis);
       setAnalysisIPId(requestedIPId);
-      setTitle(current => current.trim()
-        ? current
-        : deriveIPOriginalSourceTitle(rawContent, nextAnalysis));
+      setTitle(nextTitle);
+      setPrecheck(nextPrecheck);
+      setSaveDecision(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "网络错误");
     } finally {
@@ -107,6 +175,10 @@ export default function IPOriginalContentIntakePage() {
     }
     if (!title.trim()) {
       setError("请填写原始内容标题");
+      return;
+    }
+    if (!precheck || saveDecision !== "continue") {
+      setError("请先查看入库前检查结果，并确认是否继续保存");
       return;
     }
     setSaving(true);
@@ -179,7 +251,7 @@ export default function IPOriginalContentIntakePage() {
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-[12.5px] font-semibold text-[#555]">标题（保存必填）
-              <input value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
+              <input value={title} onChange={event => { setTitle(event.target.value); setPrecheck(null); setSaveDecision(null); }} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
             </label>
             <label className="text-[12.5px] font-semibold text-[#555]">资料类型
               <select value={sourceKind} onChange={event => setSourceKind(event.target.value as IPOriginalSourceKind)} className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none">
@@ -198,7 +270,7 @@ export default function IPOriginalContentIntakePage() {
               event.target.value = "";
             }} />
           </label>
-          <textarea value={rawContent} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisIPId(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
+          <textarea value={rawContent} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisIPId(null); setPrecheck(null); setSaveDecision(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
           <div className="mt-3 flex items-center justify-between gap-3">
             <span className="text-[11.5px] text-[#AAA]">{rawContent.length}字。原文将在确认保存时完整写入，不会被AI改写。</span>
             <button onClick={handleAnalyze} disabled={loading || !rawContent.trim() || !activeIP} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">{loading ? "正在理解原始内容……" : "开始理解内容"}</button>
@@ -219,6 +291,57 @@ export default function IPOriginalContentIntakePage() {
               </span>
               <button onClick={confirmAll} className="rounded-[9px] bg-[#EAF3DE] px-3 py-2 text-[11.5px] font-semibold text-[#3B6D11]">全部确认原意</button>
             </div>
+            {precheck ? (
+              <div className="mb-4 space-y-3 rounded-[12px] border border-[#D8E9C0] bg-[#F9FCF5] p-4">
+                <div>
+                  <h2 className="text-[14px] font-bold text-[#1C1C1B]">入库前检查</h2>
+                  <p className="mt-1 text-[11.5px] text-[#777]">系统只提供判断依据，不会自动合并、删除或替你决定。</p>
+                </div>
+                {precheck.quality.issues.length > 0 && (
+                  <div className="rounded-[8px] bg-[#FFF8E8] px-3 py-2 text-[11.5px] text-[#8A6418]">
+                    {precheck.quality.issues.map(issue => <p key={issue.code}>{issue.message}</p>)}
+                  </div>
+                )}
+                <SimilarityResults
+                  title="原文重复检查"
+                  emptyText="全库已有原始内容中暂未发现相似原文"
+                  matches={precheck.originalContentMatches}
+                />
+                <SimilarityResults
+                  title="知识内容检查"
+                  emptyText="全库其他知识中暂未发现相似的标题、关键词或观点摘要"
+                  matches={precheck.extractedKnowledgeMatches}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={saveDecision === "continue"}
+                    onClick={() => { setSaveDecision("continue"); setError(""); }}
+                    className="rounded-[8px] border px-3 py-2 text-[12px] font-bold"
+                    style={saveDecision === "continue"
+                      ? { borderColor: "#639922", background: "#639922", color: "white" }
+                      : { borderColor: "#BFD59F", background: "white", color: "#4E6C25" }}
+                  >
+                    继续保存这份原始内容
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={saveDecision === "skip"}
+                    onClick={() => { setSaveDecision("skip"); setError(""); }}
+                    className="rounded-[8px] border px-3 py-2 text-[12px] font-semibold"
+                    style={saveDecision === "skip"
+                      ? { borderColor: "#C8C5BB", background: "#F2F1ED", color: "#555" }
+                      : { borderColor: "#D8D5C9", background: "white", color: "#777" }}
+                  >
+                    暂不保存
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mb-4 rounded-[10px] bg-[#FFF8E8] px-3 py-2 text-[11.5px] text-[#8A6418]">
+                标题或内容已变化，请重新点击“开始理解内容”后再保存。
+              </div>
+            )}
             <div className="flex flex-col gap-3">
               {analysis.items.map(item => (
                 <article key={item.id} className="rounded-[12px] border border-[#E5E4DE] p-4">
@@ -237,7 +360,7 @@ export default function IPOriginalContentIntakePage() {
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => setAnalysis(null)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555]">返回修改原文</button>
               {!title.trim() && <span className="self-center text-[11.5px] text-[#A32D2D]">请先填写标题</span>}
-              <button onClick={handleSave} disabled={saving} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
+              <button onClick={handleSave} disabled={saving || !precheck || saveDecision === "skip"} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
             </div>
           </section>
         )}
