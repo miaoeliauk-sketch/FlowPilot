@@ -723,13 +723,6 @@ export default function ScriptFactoryPage() {
         .map((r: { id: string; reason: string; relevanceTier: string; relevanceReason: string }) => { const entry = entryMap.get(r.id); return entry ? { ...r, entry } : null; })
         .filter((r: KnowledgeRef | null): r is KnowledgeRef => r !== null);
       setKnowledgeRefs(refs);
-      refs.forEach(r => {
-        recordKnowledgeUsage(r.id, {
-          module: "脚本工厂", usedAt: new Date().toISOString(),
-          reason: r.reason, relevanceTier: r.relevanceTier as "高度相关" | "中度相关" | "低度相关",
-          relevanceReason: r.relevanceReason, context: query,
-        }, "已用于脚本");
-      });
     } catch { setKnowledgeRefs([]); } finally { setKnowledgeLoading(false); }
   }
   const [platform, setPlatform] = useState("抖音");
@@ -1086,7 +1079,7 @@ export default function ScriptFactoryPage() {
     sources: ReturnType<typeof getIPSourceContext>;
     caseEvidence: GenerationCaseEvidence | null;
     generatedData: ScriptResult;
-    savedAssetId: string | null;
+    savedAssetId: string | undefined;
   }) {
     let auditedData: ScriptResult;
     try {
@@ -1157,6 +1150,7 @@ export default function ScriptFactoryPage() {
     const requestedTopic = topic.trim();
     const requestedAngle = angle.trim();
     const requestMode = generationMode;
+    const knowledgeRefsAtRequest = knowledgeRefs;
     const requestSequence = generationSequenceRef.current + 1;
     generationSequenceRef.current = requestSequence;
     const sourceContext = requestMode === "ip" ? getIPSourceContext(requestIP.id) : [];
@@ -1194,7 +1188,7 @@ export default function ScriptFactoryPage() {
         linkedTopicAtRequest = resolveTopicForScript(linkedTopicAtRequest.id, requestIP.id);
       }
       setResult(data);
-      let savedAssetId: string | null = null;
+      let savedAssetId: string | undefined;
       if (data.generationStatus === "partial") {
         if (!data.partialFailure) {
           throw new Error("部分成功响应缺少失败阶段信息，无法安全保存临时草稿");
@@ -1225,6 +1219,14 @@ export default function ScriptFactoryPage() {
           setDraftStorageError("核心脚本可以继续查看，但浏览器未能自动保存临时草稿。刷新或离开前请先复制内容。");
         }
       } else {
+        const knowledgeTracking = knowledgeRefsAtRequest.length > 0
+          ? {
+              status: "unavailable" as const,
+              candidateKnowledgeEntryIds: knowledgeRefsAtRequest.map(ref => ref.id),
+              verifiedAt: new Date().toISOString(),
+              usages: [] as [],
+            }
+          : undefined;
         const scriptInput = {
           ipId: requestIP.id,
           title: data.titles?.find(item => item.recommended)?.title || data.titles?.[0]?.title || topic,
@@ -1232,6 +1234,7 @@ export default function ScriptFactoryPage() {
           content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
           status: "草稿" as const,
           scriptResult: data,
+          knowledgeTracking,
         };
         if (activeIPIdRef.current !== requestIP.id) {
           throw new Error("保存前检测到当前操盘IP已切换，结果未保存。");
@@ -1244,6 +1247,16 @@ export default function ScriptFactoryPage() {
         if (!clearPartialScriptDraft(requestIP.id)) {
           setDraftStorageError("完整脚本已保存，但浏览器未能清除旧的本地临时草稿。");
         }
+        knowledgeRefsAtRequest.forEach(ref => {
+          recordKnowledgeUsage(ref.id, {
+            module: "脚本工厂",
+            usedAt: new Date().toISOString(),
+            reason: ref.reason,
+            relevanceTier: ref.relevanceTier as "高度相关" | "中度相关" | "低度相关",
+            relevanceReason: ref.relevanceReason,
+            context: requestedTopic,
+          }, "已用于脚本", savedAssetId);
+        });
       }
       setLoading(false);
       if (requestMode === "ip") {

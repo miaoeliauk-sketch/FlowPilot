@@ -303,6 +303,247 @@ test("IP专属生成一次点击先展示并保存正文，再在后台补充团
   }
 });
 
+test("知识检索完成但脚本最终生成失败时不留下已用于脚本记录", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: "knowledge-delayed-record",
+    category: "方法论",
+    title: "延迟记账方法",
+    rawContent: "先给结论，再用案例解释。",
+    tags: [],
+    keywords: ["结论", "案例"],
+    ipId: null,
+    sourceTier: "高",
+    sourceTierReason: "人工确认",
+    contentDirection: [],
+    sourcePlatform: "",
+    sourceUrl: "",
+    note: "",
+    createdAt: "2026-08-22T00:00:00.000Z",
+    extractedAt: "2026-08-22T00:00:00.000Z",
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    dna: null,
+  }]));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/knowledge-search") {
+      return new Response(JSON.stringify({
+        results: [{
+          id: "knowledge-delayed-record",
+          reason: "适合当前选题",
+          relevanceTier: "高度相关",
+          relevanceReason: "结构方法一致",
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/script-factory") {
+      return new Response(JSON.stringify({ error: "生成失败" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const { getKnowledgeEntries } = await import("./ip-store");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "失败后不能提前记账",
+    );
+    assert.ok(await view.findByText(/延迟记账方法/, {}, { timeout: 2500 }));
+    assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 0);
+
+    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    assert.ok(await view.findByText(/API返回错误/));
+    assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("完整脚本生成并保存成功后才新增已用于脚本记录", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: "knowledge-after-success",
+    category: "方法论",
+    title: "成功后记账方法",
+    rawContent: "先给结论，再用案例解释。",
+    tags: [],
+    keywords: ["结论", "案例"],
+    ipId: null,
+    sourceTier: "高",
+    sourceTierReason: "人工确认",
+    contentDirection: [],
+    sourcePlatform: "",
+    sourceUrl: "",
+    note: "",
+    createdAt: "2026-08-22T00:00:00.000Z",
+    extractedAt: "2026-08-22T00:00:00.000Z",
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    dna: null,
+  }]));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/knowledge-search") {
+      return new Response(JSON.stringify({
+        results: [{
+          id: "knowledge-after-success",
+          reason: "适合当前选题",
+          relevanceTier: "高度相关",
+          relevanceReason: "结构方法一致",
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/script-factory") {
+      return new Response(JSON.stringify(generatedScript("成功后记录知识")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const { getKnowledgeEntries, getScriptAssets } = await import("./ip-store");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "成功后才能记录知识",
+    );
+    assert.ok(await view.findByText(/成功后记账方法/, {}, { timeout: 2500 }));
+    assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 0);
+
+    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
+    const entry = getKnowledgeEntries()[0];
+    const script = getScriptAssets(SHUIMURAN.id)[0];
+    assert.equal(entry?.status, "已用于脚本");
+    assert.equal(entry?.usageRecords.length, 1);
+    assert.equal(entry?.usageRecords[0]?.module, "脚本工厂");
+    assert.equal(entry?.usageRecords[0]?.trackingStatus, "module_recorded");
+    assert.equal(entry?.usageRecords[0]?.scriptId, script?.id);
+    assert.equal(entry?.usageRecords[0]?.topicId, null);
+    assert.equal(script?.knowledgeTracking.status, "unavailable");
+    assert.deepEqual(script?.knowledgeTracking.candidateKnowledgeEntryIds, ["knowledge-after-success"]);
+    assert.equal(typeof script?.knowledgeTracking.verifiedAt, "string");
+    assert.deepEqual(script?.knowledgeTracking.usages, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("分镜或执行建议阶段失败时不提前留下已用于脚本记录", async () => {
+  const originalFetch = globalThis.fetch;
+  const { cleanup, render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const { getKnowledgeEntries } = await import("./ip-store");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+
+  try {
+    for (const failedStage of ["storyboard", "execution"] as const) {
+      cleanup();
+      document.body.innerHTML = "";
+      localStorage.clear();
+      localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+      localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+      localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+      localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+        id: `knowledge-${failedStage}`,
+        category: "方法论",
+        title: `${failedStage}阶段方法`,
+        rawContent: "先给结论，再用案例解释。",
+        tags: [],
+        keywords: ["结论", "案例"],
+        ipId: null,
+        sourceTier: "高",
+        sourceTierReason: "人工确认",
+        contentDirection: [],
+        sourcePlatform: "",
+        sourceUrl: "",
+        note: "",
+        createdAt: "2026-08-22T00:00:00.000Z",
+        extractedAt: "2026-08-22T00:00:00.000Z",
+        metrics: null,
+        viralEvaluation: null,
+        usageRecords: [],
+        status: "未使用",
+        dna: null,
+      }]));
+      globalThis.fetch = async input => {
+        if (String(input) === "/api/knowledge-search") {
+          return new Response(JSON.stringify({
+            results: [{
+              id: `knowledge-${failedStage}`,
+              reason: "适合当前选题",
+              relevanceTier: "高度相关",
+              relevanceReason: "结构方法一致",
+            }],
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        if (String(input) === "/api/script-factory") {
+          return new Response(JSON.stringify({
+            ...generatedScript(`${failedStage}阶段失败`),
+            generationStatus: "partial",
+            partialFailure: {
+              stage: failedStage,
+              errorCode: `${failedStage}_failed`,
+              message: `${failedStage}阶段生成失败`,
+            },
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        return new Response(JSON.stringify({ results: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      const user = userEvent.setup({ document });
+      const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+      await user.type(
+        view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+        `${failedStage}失败不记账`,
+      );
+      assert.ok(await view.findByText(new RegExp(`${failedStage}阶段方法`), {}, { timeout: 2500 }));
+      await user.click(view.getByRole("button", { name: "生成完整内容" }));
+      assert.ok(await view.findByText(`${failedStage}阶段生成失败`));
+      assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 0);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("水木然压缩兜底状态显示在团队审核信息且复制正文不包含审核标记", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));

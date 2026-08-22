@@ -780,16 +780,45 @@ type ModuleKnowledgeUsageInput = Omit<
   | "evidenceExcerpt"
 >;
 
-export function recordKnowledgeUsage(entryId: string, usage: ModuleKnowledgeUsageInput, newStatus?: KnowledgeStatus): void {
+export function recordKnowledgeUsage(
+  entryId: string,
+  usage: ModuleKnowledgeUsageInput,
+  newStatus?: KnowledgeStatus,
+  scriptId?: string,
+): void {
   const all = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
+  const targetEntry = all.find(entry => entry.id === entryId);
+  if (!targetEntry) return;
+  if (newStatus === "已用于脚本" && !scriptId) {
+    throw new Error("已用于脚本记录缺少脚本编号，已拒绝写入");
+  }
+  const linkedScript = scriptId
+    ? readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []).map(migrateScriptAsset)
+      .find(script => script.id === scriptId)
+    : null;
+  if (scriptId && !linkedScript) {
+    throw new Error("没有找到知识记录对应的脚本，已拒绝写入");
+  }
+  if (linkedScript && targetEntry.ipId && targetEntry.ipId !== linkedScript.ipId) {
+    throw new Error("知识与脚本不属于同一IP，已拒绝写入");
+  }
+  const candidateKnowledgeEntryIds: readonly string[] = linkedScript
+    ? linkedScript.knowledgeTracking.candidateKnowledgeEntryIds
+    : [];
+  if (
+    linkedScript
+    && !candidateKnowledgeEntryIds.includes(entryId)
+  ) {
+    throw new Error("知识不在该脚本当时的候选知识清单中，已拒绝写入");
+  }
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => {
     if (e.id !== entryId) return e;
     const record: KnowledgeUsageRecord = {
       ...usage,
       id: genId(),
       trackingStatus: "module_recorded",
-      topicId: null,
-      scriptId: null,
+      topicId: linkedScript?.topicId ?? null,
+      scriptId: linkedScript?.id ?? null,
       reviewId: null,
       usageType: null,
       sectionLabel: null,

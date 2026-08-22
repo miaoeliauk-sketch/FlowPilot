@@ -231,3 +231,91 @@ test("脚本保存入口拒绝绕过契约写入伪造的已验证采用记录",
 
   assert.deepEqual(getScriptAssets("ip-a"), []);
 });
+
+test("知识记录入口拒绝把非候选知识关联到脚本", async () => {
+  storage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    {
+      id: "knowledge-candidate",
+      category: "方法论",
+      title: "候选知识",
+      rawContent: "候选知识正文",
+      tags: [], keywords: [], ipId: "ip-a",
+      sourceTier: "高", sourceTierReason: "人工确认",
+      contentDirection: [], sourcePlatform: "", sourceUrl: "", note: "",
+      createdAt: "2026-08-22T00:00:00.000Z",
+      extractedAt: "2026-08-22T00:00:00.000Z",
+      metrics: null, viralEvaluation: null,
+      usageRecords: [], status: "未使用", dna: null,
+    },
+    {
+      id: "knowledge-not-candidate",
+      category: "方法论",
+      title: "同IP但不是候选的知识",
+      rawContent: "不应关联到本次脚本",
+      tags: [], keywords: [], ipId: "ip-a",
+      sourceTier: "高", sourceTierReason: "人工确认",
+      contentDirection: [], sourcePlatform: "", sourceUrl: "", note: "",
+      createdAt: "2026-08-22T00:00:00.000Z",
+      extractedAt: "2026-08-22T00:00:00.000Z",
+      metrics: null, viralEvaluation: null,
+      usageRecords: [], status: "未使用", dna: null,
+    },
+  ]));
+  const { addScriptAsset, getKnowledgeEntries, recordKnowledgeUsage } = await import("./ip-store");
+  const script = addScriptAsset({
+    ipId: "ip-a",
+    title: "候选清单固定的脚本",
+    cover: "",
+    content: "脚本正文",
+    status: "草稿",
+    knowledgeTracking: {
+      status: "unavailable",
+      candidateKnowledgeEntryIds: ["knowledge-candidate"],
+      verifiedAt: "2026-08-22T04:00:00.000Z",
+      usages: [],
+    },
+  });
+
+  assert.throws(() => recordKnowledgeUsage("knowledge-not-candidate", {
+    module: "脚本工厂",
+    usedAt: "2026-08-22T04:01:00.000Z",
+    reason: "伪造关联",
+    relevanceTier: "高度相关",
+    relevanceReason: "只满足同IP",
+    context: "测试选题",
+  }, "已用于脚本", script.id), /候选知识/);
+
+  const target = getKnowledgeEntries().find(entry => entry.id === "knowledge-not-candidate");
+  assert.equal(target?.status, "未使用");
+  assert.deepEqual(target?.usageRecords, []);
+});
+
+test("已用于脚本记录缺少脚本编号时拒绝写入", async () => {
+  storage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: "knowledge-without-script",
+    category: "方法论",
+    title: "缺少脚本关联的知识",
+    rawContent: "知识正文",
+    tags: [], keywords: [], ipId: null,
+    sourceTier: "高", sourceTierReason: "人工确认",
+    contentDirection: [], sourcePlatform: "", sourceUrl: "", note: "",
+    createdAt: "2026-08-22T00:00:00.000Z",
+    extractedAt: "2026-08-22T00:00:00.000Z",
+    metrics: null, viralEvaluation: null,
+    usageRecords: [], status: "未使用", dna: null,
+  }]));
+  const { getKnowledgeEntries, recordKnowledgeUsage } = await import("./ip-store");
+
+  assert.throws(() => recordKnowledgeUsage("knowledge-without-script", {
+    module: "脚本工厂",
+    usedAt: "2026-08-22T04:02:00.000Z",
+    reason: "缺少脚本却尝试记账",
+    relevanceTier: "高度相关",
+    relevanceReason: "没有可核对的候选清单",
+    context: "测试选题",
+  }, "已用于脚本"), /脚本编号/);
+
+  const target = getKnowledgeEntries()[0];
+  assert.equal(target?.status, "未使用");
+  assert.deepEqual(target?.usageRecords, []);
+});
