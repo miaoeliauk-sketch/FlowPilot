@@ -334,6 +334,13 @@ export type KnowledgeTrustStatus =
   | "effect_evidence_awaiting_judgment"
   | "human_confirmed_effective";
 
+export interface HotAnalysisKnowledgeSourceReference {
+  sourceType: "hot_analysis";
+  analysisId: string;
+  role: "viral_case" | "method_card";
+  groupItemId: string;
+}
+
 export interface KnowledgeEntry {
   id: string;
   category: KnowledgeCategory;
@@ -363,6 +370,8 @@ export interface KnowledgeEntry {
   status: KnowledgeStatus;
   // AI拆解出的知识必须从“尚未验证”开始；后续状态只能依据真实采用、发布效果和人工确认推进。
   trustStatus?: KnowledgeTrustStatus | null;
+  // 爆款分析来源组直接保存在知识条目上，不依赖分析历史继续存在；旧数据不推断、不补造。
+  sourceReference?: HotAnalysisKnowledgeSourceReference | null;
   // 仅通过"爆款分析中心"录入的条目会有值，其余录入方式（知识库中心手动添加）始终为null。
   // 基因库统计直接读这个字段做计数，不需要额外调用AI。
   dna: ViralDNA | null;

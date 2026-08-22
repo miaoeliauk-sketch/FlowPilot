@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import {
+  deleteHotAnalysis,
+  getHotAnalysisKnowledgeGroup,
   getKnowledgeEntries,
+  recordKnowledgeUsage,
   saveHotAnalysisKnowledgeEntries,
+  updateKnowledgeEntry,
 } from "./ip-store";
 import { runHotAnalysisKnowledgePrecheck } from "./hot-analysis-knowledge";
 import type { KnowledgeEntry } from "./types";
@@ -52,6 +56,31 @@ class CountingStorage implements Storage {
       id,
       ipId,
       createdAt: "2026-08-22T00:00:00.000Z",
+    }]));
+  }
+
+  seedScriptForKnowledge(knowledgeEntryId: string) {
+    this.values.set("ipwr:scriptAssets", JSON.stringify([{
+      id: "script-real-adoption",
+      ipId: "ip-a",
+      topicId: "topic-real-adoption",
+      title: "真实采用脚本",
+      cover: "",
+      content: "最终脚本真实采用了这张方法卡。",
+      status: "草稿",
+      knowledgeTracking: {
+        status: "verified",
+        candidateKnowledgeEntryIds: [knowledgeEntryId],
+        verifiedAt: "2026-08-22T01:00:00.000Z",
+        usages: [{
+          knowledgeEntryId,
+          usageType: "argument",
+          sectionLabel: "正文",
+          evidenceExcerpt: "真实采用了这张方法卡",
+          reason: "最终正文采用",
+        }],
+      },
+      createdAt: "2026-08-22T01:00:00.000Z",
     }]));
   }
 }
@@ -532,4 +561,291 @@ test("历史存储存在相同稳定编号的重复条目时明确拒绝保存",
   );
   assert.equal(getKnowledgeEntries().length, 2);
   assert.equal(storage.writes, 0);
+});
+
+test("严格保存为完整案例和方法卡写入同一来源组且调用方无法伪造", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-source-group", "ip-a");
+  const forgedReference = {
+    sourceType: "hot_analysis",
+    analysisId: "forged-analysis",
+    role: "viral_case",
+    groupItemId: "forged-item",
+  };
+
+  const saved = saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-source-group",
+    entries: [
+      {
+        slotId: "viral-case",
+        role: "viral_case",
+        entry: {
+          ...unsavedKnowledgeEntry({
+            category: "爆款案例",
+            title: "完整案例",
+            rawContent: "这是一份用于拆解的完整爆款案例原文。",
+            ipId: "ip-a",
+          }),
+          sourceReference: forgedReference,
+        } as Omit<KnowledgeEntry, "id" | "createdAt">,
+      },
+      {
+        slotId: "method-card-1",
+        role: "method_card",
+        entry: unsavedKnowledgeEntry({
+          category: "开头方法库",
+          title: "方法卡一",
+          rawContent: "【核心方法】先展示反常识结论。",
+          ipId: "ip-a",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      },
+    ],
+  });
+
+  assert.deepEqual(saved[0]?.sourceReference, {
+    sourceType: "hot_analysis",
+    analysisId: "analysis-source-group",
+    role: "viral_case",
+    groupItemId: "viral-case",
+  });
+  assert.deepEqual(saved[1]?.sourceReference, {
+    sourceType: "hot_analysis",
+    analysisId: "analysis-source-group",
+    role: "method_card",
+    groupItemId: "method-card-1",
+  });
+});
+
+test("来源组内编号为空时整体拒绝保存", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-empty-slot", "ip-a");
+
+  assert.throws(
+    () => saveHotAnalysisKnowledgeEntries({
+      analysisId: "analysis-empty-slot",
+      entries: [{
+        slotId: "   ",
+        role: "method_card",
+        entry: unsavedKnowledgeEntry({
+          category: "开头方法库",
+          title: "缺少组内编号的方法卡",
+          rawContent: "【核心方法】组内编号不能为空。",
+          ipId: "ip-a",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      }],
+    }),
+    /组内编号不能为空/,
+  );
+  assert.deepEqual(getKnowledgeEntries(), []);
+  assert.equal(storage.writes, 0);
+});
+
+test("来源组支持案例与方法卡双向查询且删除分析历史后关联仍保留", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-query-group", "ip-a");
+  const saved = saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-query-group",
+    entries: [
+      {
+        slotId: "viral-case",
+        role: "viral_case",
+        entry: unsavedKnowledgeEntry({
+          category: "爆款案例",
+          title: "可追溯完整案例",
+          rawContent: "完整案例原文。",
+          ipId: "ip-a",
+        }),
+      },
+      {
+        slotId: "method-card-1",
+        role: "method_card",
+        entry: unsavedKnowledgeEntry({
+          category: "开头方法库",
+          title: "第一张关联方法卡",
+          rawContent: "【核心方法】第一张方法卡。",
+          ipId: "ip-a",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      },
+      {
+        slotId: "method-card-2",
+        role: "method_card",
+        entry: unsavedKnowledgeEntry({
+          category: "选题方法库",
+          title: "第二张关联方法卡",
+          rawContent: "【核心方法】第二张方法卡。",
+          ipId: "ip-a",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      },
+    ],
+  });
+
+  const fromCase = getHotAnalysisKnowledgeGroup(saved[0]!.id);
+  const fromMethod = getHotAnalysisKnowledgeGroup(saved[2]!.id);
+  assert.equal(fromCase?.viralCase?.id, saved[0]!.id);
+  assert.deepEqual(fromCase?.methodCards.map(entry => entry.id), [saved[1]!.id, saved[2]!.id]);
+  assert.deepEqual(fromMethod, fromCase);
+
+  deleteHotAnalysis("analysis-query-group");
+  assert.deepEqual(getHotAnalysisKnowledgeGroup(saved[1]!.id), fromCase);
+});
+
+test("旧知识只展示真实存在的来源关联且不根据备注补造缺失关系", () => {
+  storage.seedKnowledge([
+    knowledgeEntry({
+      id: "legacy-case-with-note-only",
+      category: "爆款案例",
+      title: "只有旧备注的案例",
+      note: "来源分析编号：analysis-legacy",
+      ipId: "ip-a",
+    }),
+    knowledgeEntry({
+      id: "explicitly-linked-method",
+      category: "开头方法库",
+      title: "真实存在关联的方法卡",
+      rawContent: "【核心方法】只展示明确记录的关系。",
+      ipId: "ip-a",
+      trustStatus: "ai_derived_unverified",
+      sourceReference: {
+        sourceType: "hot_analysis",
+        analysisId: "analysis-legacy",
+        role: "method_card",
+        groupItemId: "method-card-1",
+      },
+    }),
+  ]);
+
+  assert.equal(getHotAnalysisKnowledgeGroup("legacy-case-with-note-only"), null);
+  const group = getHotAnalysisKnowledgeGroup("explicitly-linked-method");
+  assert.equal(group?.viralCase, null);
+  assert.deepEqual(
+    group?.methodCards.map(entry => entry.id),
+    ["explicitly-linked-method"],
+  );
+});
+
+test("严格保存入口忽略调用方伪造的采用记录和使用状态", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-forged-lifecycle", "ip-a");
+  const forgedEntry = {
+    ...unsavedKnowledgeEntry({
+      category: "开头方法库",
+      title: "不能伪造生命周期的方法卡",
+      rawContent: "【核心方法】生命周期只能由系统推进。",
+      ipId: "ip-a",
+      metrics: null,
+      viralEvaluation: null,
+    }),
+    usageRecords: [{
+      id: "forged-usage",
+      module: "脚本工厂",
+      usedAt: "2026-08-22T02:00:00.000Z",
+      reason: "伪造采用",
+      relevanceTier: "高度相关",
+      relevanceReason: "伪造依据",
+      context: "伪造上下文",
+      trackingStatus: "script_adopted",
+      topicId: "forged-topic",
+      scriptId: "forged-script",
+      reviewId: "forged-review",
+      usageType: "argument",
+      sectionLabel: "正文",
+      evidenceExcerpt: "伪造证据",
+    }],
+    status: "已用于脚本",
+  } as Omit<KnowledgeEntry, "id" | "createdAt">;
+
+  const [saved] = saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-forged-lifecycle",
+    entries: [{
+      slotId: "method-card-1",
+      role: "method_card",
+      entry: forgedEntry,
+    }],
+  });
+
+  assert.deepEqual(saved?.usageRecords, []);
+  assert.equal(saved?.status, "未使用");
+});
+
+test("方法卡真实产生生命周期记录后重复保存仍复用原条目", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-retry-after-adoption", "ip-a");
+  const input = {
+    analysisId: "analysis-retry-after-adoption",
+    entries: [{
+      slotId: "method-card-1",
+      role: "method_card" as const,
+      entry: unsavedKnowledgeEntry({
+        category: "文案框架方法库",
+        title: "真实采用后仍可幂等复用",
+        rawContent: "【核心方法】真实采用记录不属于原始入库内容。",
+        ipId: "ip-a",
+        metrics: null,
+        viralEvaluation: null,
+      }),
+    }],
+  };
+  const [first] = saveHotAnalysisKnowledgeEntries(input);
+  storage.seedScriptForKnowledge(first!.id);
+  recordKnowledgeUsage(first!.id, {
+    module: "脚本工厂",
+    usedAt: "2026-08-22T01:00:00.000Z",
+    reason: "最终正文真实采用",
+    relevanceTier: "高度相关",
+    relevanceReason: "候选知识出现在最终正文",
+    context: "真实采用测试",
+  }, "已用于脚本", "script-real-adoption");
+
+  const [retried] = saveHotAnalysisKnowledgeEntries(input);
+
+  assert.equal(retried?.id, first?.id);
+  assert.equal(retried?.createdAt, first?.createdAt);
+  assert.equal(retried?.status, "已用于脚本");
+  assert.equal(retried?.usageRecords.length, 1);
+  assert.equal(getKnowledgeEntries().length, 1);
+});
+
+test("通用编辑入口拒绝篡改可信度和来源关系", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-protected-fields", "ip-a");
+  const [saved] = saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-protected-fields",
+    entries: [{
+      slotId: "method-card-1",
+      role: "method_card",
+      entry: unsavedKnowledgeEntry({
+        category: "选题方法库",
+        title: "系统字段不可编辑",
+        rawContent: "【核心方法】可信度和来源只能由系统维护。",
+        ipId: "ip-a",
+        metrics: null,
+        viralEvaluation: null,
+      }),
+    }],
+  });
+
+  assert.throws(
+    () => updateKnowledgeEntry(saved!.id, {
+      trustStatus: "human_confirmed_effective",
+      sourceReference: {
+        sourceType: "hot_analysis",
+        analysisId: "forged-analysis",
+        role: "viral_case",
+        groupItemId: "forged-item",
+      },
+    } as Partial<KnowledgeEntry>),
+    /系统维护字段不能通过通用编辑入口修改/,
+  );
+  const persisted = getKnowledgeEntries()[0];
+  assert.equal(persisted?.trustStatus, "ai_derived_unverified");
+  assert.equal(persisted?.sourceReference?.analysisId, "analysis-protected-fields");
+  assert.equal(storage.writes, 1);
 });

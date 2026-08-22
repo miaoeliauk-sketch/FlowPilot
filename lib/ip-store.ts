@@ -1,6 +1,6 @@
 "use client";
 import { IPProfile, VoiceSample, IPStyleProfile, TopicAsset, CommentAsset, ScriptAsset, KnowledgeEntry, KnowledgeCategory, HookEntry, LikesSnapshot, KnowledgeUsageRecord, KnowledgeStatus, ConsumerModule, HotMaterialAnalysis, UserProfile, VideoReview, NewScriptAssetInput, ScriptKnowledgeTracking } from "./types";
-import type { TopicAssetStatus } from "./types";
+import type { HotAnalysisKnowledgeSourceReference, TopicAssetStatus } from "./types";
 import {
   createTopicEvaluationSummary,
   parseTopicBoardResult,
@@ -760,6 +760,7 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
     })),
     status: e.status ?? "未使用",
     trustStatus: e.trustStatus ?? null,
+    sourceReference: e.sourceReference ?? null,
     dna: e.dna ?? null,
     sourceKind: e.sourceKind ?? null,
     sourceName: e.sourceName ?? "",
@@ -800,7 +801,15 @@ export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">
 export interface HotAnalysisKnowledgeSaveEntry {
   slotId: string;
   role: "viral_case" | "method_card";
-  entry: Omit<KnowledgeEntry, "id" | "createdAt" | "trustStatus">;
+  entry: Omit<
+    KnowledgeEntry,
+    | "id"
+    | "createdAt"
+    | "usageRecords"
+    | "status"
+    | "trustStatus"
+    | "sourceReference"
+  >;
 }
 
 export interface HotAnalysisKnowledgeSaveInput {
@@ -809,7 +818,13 @@ export interface HotAnalysisKnowledgeSaveInput {
 }
 
 function serializeKnowledgeSaveContent(entry: KnowledgeEntry): string {
-  const { createdAt: _createdAt, ...content } = entry;
+  const {
+    createdAt: _createdAt,
+    usageRecords: _usageRecords,
+    status: _status,
+    trustStatus: _trustStatus,
+    ...content
+  } = entry;
   const normalize = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(normalize);
     if (typeof value !== "object" || value === null) return value;
@@ -836,16 +851,30 @@ export function saveHotAnalysisKnowledgeEntries(
   if (input.entries.some(item => item.entry.ipId !== analysis.ipId)) {
     throw new Error("待保存知识不属于本次分析记录的IP，已拒绝保存");
   }
+  if (input.entries.some(item => !item.slotId.trim())) {
+    throw new Error("爆款分析知识的组内编号不能为空，已拒绝保存");
+  }
   const all = readKnowledgeEntriesStrict();
   const createdAt = new Date().toISOString();
-  const candidates = input.entries.map(item => migrateKnowledgeEntry({
-    ...item.entry,
-    id: `hot-analysis:${input.analysisId}:${item.slotId}`,
-    createdAt,
-    trustStatus: item.role === "method_card"
-      ? "ai_derived_unverified" as const
-      : null,
-  }));
+  const candidates = input.entries.map(item => {
+    const groupItemId = item.slotId.trim();
+    return migrateKnowledgeEntry({
+      ...item.entry,
+      id: `hot-analysis:${input.analysisId}:${groupItemId}`,
+      createdAt,
+      usageRecords: [],
+      status: "未使用" as const,
+      trustStatus: item.role === "method_card"
+        ? "ai_derived_unverified" as const
+        : null,
+      sourceReference: {
+        sourceType: "hot_analysis" as const,
+        analysisId: input.analysisId,
+        role: item.role,
+        groupItemId,
+      },
+    });
+  });
   if (new Set(candidates.map(entry => entry.id)).size !== candidates.length) {
     throw new Error("同一批次存在知识编号重复，已拒绝保存");
   }
@@ -886,7 +915,71 @@ export function saveHotAnalysisKnowledgeEntries(
   });
 }
 
-export function updateKnowledgeEntry(id: string, patch: Partial<KnowledgeEntry>): void {
+export interface HotAnalysisKnowledgeGroup {
+  analysisId: string;
+  viralCase: KnowledgeEntry | null;
+  methodCards: KnowledgeEntry[];
+}
+
+function getValidHotAnalysisSourceReference(
+  entry: KnowledgeEntry,
+): HotAnalysisKnowledgeSourceReference | null {
+  const reference = entry.sourceReference;
+  if (
+    !reference ||
+    reference.sourceType !== "hot_analysis" ||
+    typeof reference.analysisId !== "string" ||
+    !reference.analysisId ||
+    (reference.role !== "viral_case" && reference.role !== "method_card") ||
+    typeof reference.groupItemId !== "string" ||
+    !reference.groupItemId ||
+    (reference.role === "viral_case") !== (entry.category === "爆款案例")
+  ) {
+    return null;
+  }
+  return reference;
+}
+
+export function getHotAnalysisKnowledgeGroup(
+  knowledgeEntryId: string,
+): HotAnalysisKnowledgeGroup | null {
+  const all = getKnowledgeEntries();
+  const anchors = all.filter(entry => entry.id === knowledgeEntryId);
+  if (anchors.length !== 1) return null;
+  const anchor = anchors[0]!;
+  const anchorReference = getValidHotAnalysisSourceReference(anchor);
+  if (!anchorReference) return null;
+  const members = all
+    .map(entry => ({ entry, reference: getValidHotAnalysisSourceReference(entry) }))
+    .filter(item =>
+      item.reference?.analysisId === anchorReference.analysisId &&
+      item.entry.ipId === anchor.ipId
+    )
+    .sort((left, right) =>
+      left.reference!.groupItemId.localeCompare(right.reference!.groupItemId)
+    );
+  const viralCases = members.filter(item => item.reference!.role === "viral_case");
+  return {
+    analysisId: anchorReference.analysisId,
+    viralCase: viralCases.length === 1 ? viralCases[0]!.entry : null,
+    methodCards: members
+      .filter(item => item.reference!.role === "method_card")
+      .map(item => item.entry),
+  };
+}
+
+export type KnowledgeEntryEditablePatch = Omit<
+  Partial<KnowledgeEntry>,
+  "trustStatus" | "sourceReference"
+>;
+
+export function updateKnowledgeEntry(id: string, patch: KnowledgeEntryEditablePatch): void {
+  if (
+    Object.prototype.hasOwnProperty.call(patch, "trustStatus") ||
+    Object.prototype.hasOwnProperty.call(patch, "sourceReference")
+  ) {
+    throw new Error("系统维护字段不能通过通用编辑入口修改");
+  }
   const all = readKnowledgeEntriesStrict();
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 }

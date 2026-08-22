@@ -1,6 +1,7 @@
 import { isTrustedKnowledgeUsageForScript } from "./knowledge-effect-contract";
 import type {
   KnowledgeEntry,
+  KnowledgeTrustStatus,
   KnowledgeUsageRecord,
   ScriptAsset,
   VideoReview,
@@ -99,4 +100,28 @@ export function buildKnowledgeEffectReference(
     ).length,
     scripts: scriptReferences,
   };
+}
+
+export function deriveKnowledgeTrustStatus(
+  entry: KnowledgeEntry,
+  index: KnowledgeEffectReferenceIndex,
+): KnowledgeTrustStatus | null {
+  if (entry.trustStatus === "human_confirmed_effective") {
+    return "human_confirmed_effective";
+  }
+  if (
+    entry.sourceReference?.sourceType !== "hot_analysis" ||
+    entry.sourceReference.role !== "method_card" ||
+    !entry.trustStatus
+  ) {
+    return entry.trustStatus ?? null;
+  }
+  const effect = buildKnowledgeEffectReference(entry, index);
+  if (effect.reviewedScriptCount > 0) {
+    return "effect_evidence_awaiting_judgment";
+  }
+  if (effect.adoptedScriptCount > 0) {
+    return "adopted_awaiting_effect";
+  }
+  return "ai_derived_unverified";
 }
