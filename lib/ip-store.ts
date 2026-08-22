@@ -7,7 +7,10 @@ import {
   TopicBoardContractError,
 } from "./topic-board-contract";
 import { buildVoiceStyleProfileForSave } from "./voice-style-profile";
-import { parseVerifiedScriptKnowledgeTracking } from "./knowledge-effect-contract";
+import {
+  isTrustedKnowledgeUsageForScript,
+  parseVerifiedScriptKnowledgeTracking,
+} from "./knowledge-effect-contract";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -87,6 +90,30 @@ function readJSON<T>(key: string, fallback: T): T {
 function writeJSON<T>(key: string, value: T) {
   if (typeof window === "undefined") return;
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore quota errors */ }
+}
+
+function writeJSONStrict<T>(key: string, value: T, failureMessage: string): void {
+  if (typeof window === "undefined") throw new Error(failureMessage);
+  const serialized = JSON.stringify(value);
+  try {
+    localStorage.setItem(key, serialized);
+    if (localStorage.getItem(key) !== serialized) {
+      throw new Error("写入后校验失败");
+    }
+  } catch {
+    throw new Error(failureMessage);
+  }
+}
+
+function writeVideoReviewsStrict(value: VideoReview[]): void {
+  writeJSONStrict(KEY_VIDEO_REVIEWS, value, "复盘保存失败，请稍后重试");
+}
+
+function writeKnowledgeEntriesStrict(
+  value: KnowledgeEntry[],
+  failureMessage: string,
+): void {
+  writeJSONStrict(KEY_KNOWLEDGE_ENTRIES, value, failureMessage);
 }
 
 function readKnowledgeEntriesStrict(): KnowledgeEntry[] {
@@ -913,9 +940,211 @@ export function getOperatorDisplayName(profile?: UserProfile): string {
 }
 
 // ── 发布复盘：每次复盘独立存储，独立于知识库条目——复盘是过程记录，经验沉淀后才入库 ──
+interface VideoReviewCollapseResult {
+  reviews: VideoReview[];
+  retainedReviewIdByRemovedId: Map<string, string>;
+}
+
+function collapseDuplicateVideoReviews(reviews: VideoReview[]): VideoReviewCollapseResult {
+  const retainedIndexByScript = new Map<string, number>();
+  reviews.forEach((review, index) => {
+    if (review.sourceType !== "flowpilot" || !review.ipId || !review.scriptId) return;
+    const key = JSON.stringify([review.ipId, review.scriptId]);
+    const retainedIndex = retainedIndexByScript.get(key);
+    if (
+      retainedIndex === undefined ||
+      review.createdAt.localeCompare(reviews[retainedIndex]!.createdAt) > 0
+    ) {
+      retainedIndexByScript.set(key, index);
+    }
+  });
+  const retainedReviewIdByRemovedId = new Map<string, string>();
+  const collapsed = reviews.filter((review, index) => {
+    if (review.sourceType !== "flowpilot" || !review.ipId || !review.scriptId) return true;
+    const retainedIndex = retainedIndexByScript.get(JSON.stringify([review.ipId, review.scriptId]));
+    if (retainedIndex === index) return true;
+    retainedReviewIdByRemovedId.set(review.id, reviews[retainedIndex!]!.id);
+    return false;
+  });
+  return { reviews: collapsed, retainedReviewIdByRemovedId };
+}
+
+function reportVideoReviewMaintenanceFailure(stage: string): void {
+  console.warn("[video-review-maintenance]", { stage });
+}
+
+function maintainCollapsedVideoReviews(
+  collapseResult: VideoReviewCollapseResult,
+): void {
+  if (collapseResult.retainedReviewIdByRemovedId.size === 0) return;
+  let knowledgeEntries: KnowledgeEntry[];
+  try {
+    knowledgeEntries = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
+  } catch {
+    reportVideoReviewMaintenanceFailure("knowledge_read_failed");
+    return;
+  }
+  const retainedReviewIds = new Set(
+    collapseResult.retainedReviewIdByRemovedId.values(),
+  );
+  const scriptByRetainedReviewId = new Map<string, ScriptAsset>();
+  for (const review of collapseResult.reviews) {
+    if (
+      !retainedReviewIds.has(review.id) ||
+      review.sourceType !== "flowpilot" ||
+      review.traceabilityStatus !== "traceable" ||
+      !review.ipId ||
+      !review.scriptId ||
+      !review.topicId
+    ) continue;
+    const script = getScriptAssets(review.ipId)
+      .find(item => item.id === review.scriptId);
+    const topic = getTopicAsset(review.topicId);
+    if (
+      script &&
+      topic &&
+      script.ipId === review.ipId &&
+      topic.ipId === review.ipId &&
+      script.topicId === topic.id
+    ) {
+      scriptByRetainedReviewId.set(review.id, script);
+    }
+  }
+  let knowledgeChanged = false;
+  const relocatedKnowledgeEntries = knowledgeEntries.map(entry => ({
+    ...entry,
+    usageRecords: entry.usageRecords.map(record => {
+      if (!record.reviewId) return record;
+      const retainedReviewId = collapseResult.retainedReviewIdByRemovedId.get(record.reviewId);
+      if (!retainedReviewId) return record;
+      knowledgeChanged = true;
+      const script = scriptByRetainedReviewId.get(retainedReviewId);
+      return script && isTrustedKnowledgeUsageForScript(entry, record, script)
+        ? { ...record, reviewId: retainedReviewId }
+        : { ...record, reviewId: null };
+    }),
+  }));
+  if (knowledgeChanged) {
+    try {
+      writeKnowledgeEntriesStrict(
+        relocatedKnowledgeEntries,
+        "复盘知识关联迁移失败",
+      );
+    } catch {
+      reportVideoReviewMaintenanceFailure("knowledge_relocation_failed");
+      return;
+    }
+    const reviewsWithTrustedKnowledge = new Set<string>();
+    for (const review of collapseResult.reviews) {
+      const script = scriptByRetainedReviewId.get(review.id);
+      if (
+        script &&
+        relocatedKnowledgeEntries.some(entry =>
+          entry.usageRecords.some(record =>
+            record.reviewId === review.id &&
+            isTrustedKnowledgeUsageForScript(entry, record, script)
+          )
+        )
+      ) {
+        reviewsWithTrustedKnowledge.add(review.id);
+      }
+    }
+    collapseResult.reviews = collapseResult.reviews.map(review =>
+      retainedReviewIds.has(review.id)
+        ? {
+            ...review,
+            knowledgeEffectStatus: reviewsWithTrustedKnowledge.has(review.id)
+              ? "tracked"
+              : "no_linked_knowledge",
+          }
+        : review
+    );
+  }
+  try {
+    writeVideoReviewsStrict(collapseResult.reviews);
+  } catch {
+    if (knowledgeChanged) {
+      try {
+        writeKnowledgeEntriesStrict(
+          knowledgeEntries,
+          "复盘知识关联恢复失败",
+        );
+      } catch {
+        reportVideoReviewMaintenanceFailure("knowledge_rollback_failed");
+      }
+    }
+    reportVideoReviewMaintenanceFailure("review_cleanup_failed");
+  }
+}
+
+function retryPendingVideoReviewKnowledgeStatuses(
+  reviews: VideoReview[],
+): VideoReview[] {
+  const pendingReviews = reviews.filter(review =>
+    review.sourceType === "flowpilot" &&
+    review.traceabilityStatus === "traceable" &&
+    (review.knowledgeEffectStatus === "tracked_status_pending" ||
+      review.knowledgeEffectStatus === "knowledge_unavailable") &&
+    review.ipId &&
+    review.scriptId &&
+    review.topicId
+  );
+  if (pendingReviews.length === 0) return reviews;
+  let knowledgeEntries: KnowledgeEntry[];
+  try {
+    knowledgeEntries = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
+  } catch {
+    return reviews;
+  }
+  const repairedReviewIds = new Set<string>();
+  for (const review of pendingReviews) {
+    const script = getScriptAssets(review.ipId!).find(item => item.id === review.scriptId);
+    const topic = getTopicAsset(review.topicId!);
+    if (
+      !script ||
+      !topic ||
+      script.ipId !== review.ipId ||
+      topic.ipId !== review.ipId ||
+      script.topicId !== topic.id
+    ) continue;
+    if (knowledgeEntries.some(entry =>
+      entry.usageRecords.some(record =>
+        record.reviewId === review.id &&
+        isTrustedKnowledgeUsageForScript(entry, record, script)
+      )
+    )) {
+      repairedReviewIds.add(review.id);
+    }
+  }
+  if (repairedReviewIds.size === 0) return reviews;
+  const repairedReviews = reviews.map(review =>
+    repairedReviewIds.has(review.id)
+      ? { ...review, knowledgeEffectStatus: "tracked" as const }
+      : review
+  );
+  try {
+    writeVideoReviewsStrict(repairedReviews);
+    return repairedReviews;
+  } catch {
+    reportVideoReviewMaintenanceFailure("knowledge_status_retry_failed");
+    return reviews.map(review =>
+      repairedReviewIds.has(review.id)
+        ? { ...review, knowledgeEffectStatus: "tracked_status_pending" as const }
+        : review
+    );
+  }
+}
+
 export function getVideoReviews(ipId?: string): VideoReview[] {
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
-  const filtered = ipId ? all.filter(r => r.ipId === ipId) : all;
+  const collapseResult = collapseDuplicateVideoReviews(all);
+  maintainCollapsedVideoReviews(collapseResult);
+  collapseResult.reviews = retryPendingVideoReviewKnowledgeStatuses(
+    collapseResult.reviews,
+  );
+  const filtered = ipId
+    ? collapseResult.reviews.filter(r => r.ipId === ipId)
+    : collapseResult.reviews;
   return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -927,6 +1156,7 @@ type AddVideoReviewInput = Omit<
   | "scriptId"
   | "sourceType"
   | "traceabilityStatus"
+  | "knowledgeEffectStatus"
   | "createdAt"
   | "savedToKnowledge"
   | "knowledgeEntryId"
@@ -972,8 +1202,82 @@ export function addVideoReview(input: AddVideoReviewInput): VideoReview {
     throw new Error("复盘来源契约不完整：来源类型无效");
   }
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
-  const review: VideoReview = { ...input, ipId, id: genId(), createdAt: new Date().toISOString(), savedToKnowledge: false, knowledgeEntryId: null };
-  writeJSON(KEY_VIDEO_REVIEWS, [...all, review]);
+  const reviewsForScript = input.sourceType === "flowpilot"
+    ? all.filter(item =>
+        item.ipId === ipId &&
+        item.sourceType === "flowpilot" &&
+        item.scriptId === input.scriptId
+      )
+    : [];
+  const existingReview = reviewsForScript
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  let review: VideoReview = {
+    ...input,
+    ipId,
+    id: existingReview?.id ?? genId(),
+    createdAt: existingReview?.createdAt ?? new Date().toISOString(),
+    savedToKnowledge: existingReview?.savedToKnowledge ?? false,
+    knowledgeEntryId: existingReview?.knowledgeEntryId ?? null,
+    knowledgeEffectStatus: input.sourceType === "flowpilot"
+      ? "knowledge_unavailable"
+      : undefined,
+  };
+  const reviewsAfterDeduplication = existingReview
+    ? [
+        ...all.filter(item => !reviewsForScript.some(existing => existing.id === item.id)),
+        review,
+      ]
+    : [...all, review];
+  writeVideoReviewsStrict(reviewsAfterDeduplication);
+  if (input.sourceType === "flowpilot") {
+    let knowledgeAssociationWritten = false;
+    try {
+      const script = getScriptAssets(ipId).find(item => item.id === input.scriptId);
+      if (script) {
+        const knowledgeEntries = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
+        const hasTrustedKnowledge = knowledgeEntries.some(entry =>
+          entry.usageRecords.some(record =>
+            isTrustedKnowledgeUsageForScript(entry, record, script)
+          )
+        );
+        if (!hasTrustedKnowledge) {
+          review = { ...review, knowledgeEffectStatus: "no_linked_knowledge" };
+          writeVideoReviewsStrict(reviewsAfterDeduplication.map(item =>
+            item.id === review.id ? review : item
+          ));
+          return review;
+        }
+        const linkedEntries = knowledgeEntries.map(entry => {
+          return {
+            ...entry,
+            usageRecords: entry.usageRecords.map(record =>
+              isTrustedKnowledgeUsageForScript(entry, record, script) &&
+              record.reviewId !== review.id
+                ? { ...record, reviewId: review.id }
+                : record
+            ),
+          };
+        });
+        writeKnowledgeEntriesStrict(linkedEntries, "知识关联写入失败");
+        knowledgeAssociationWritten = true;
+        review = { ...review, knowledgeEffectStatus: "tracked" };
+        writeVideoReviewsStrict(reviewsAfterDeduplication.map(item =>
+          item.id === review.id ? review : item
+        ));
+      }
+    } catch {
+      if (knowledgeAssociationWritten) {
+        review = { ...review, knowledgeEffectStatus: "tracked_status_pending" };
+        try {
+          writeVideoReviewsStrict(reviewsAfterDeduplication.map(item =>
+            item.id === review.id ? review : item
+          ));
+        } catch {
+          reportVideoReviewMaintenanceFailure("knowledge_status_pending_save_failed");
+        }
+      }
+    }
+  }
   return review;
 }
 
@@ -985,6 +1289,7 @@ type UpdateVideoReviewPatch = Partial<Omit<
   | "scriptId"
   | "sourceType"
   | "traceabilityStatus"
+  | "knowledgeEffectStatus"
   | "createdAt"
   | "savedToKnowledge"
   | "knowledgeEntryId"
@@ -997,6 +1302,7 @@ const VIDEO_REVIEW_PROTECTED_FIELDS = [
   "scriptId",
   "sourceType",
   "traceabilityStatus",
+  "knowledgeEffectStatus",
   "createdAt",
   "savedToKnowledge",
   "knowledgeEntryId",
@@ -1012,7 +1318,45 @@ export function updateVideoReview(id: string, patch: UpdateVideoReviewPatch): vo
 
 export function deleteVideoReview(id: string): void {
   const all = readJSON<VideoReview[]>(KEY_VIDEO_REVIEWS, []);
-  writeJSON(KEY_VIDEO_REVIEWS, all.filter(r => r.id !== id));
+  const review = all.find(item => item.id === id);
+  if (!review || review.sourceType !== "flowpilot") {
+    writeVideoReviewsStrict(all.filter(r => r.id !== id));
+    return;
+  }
+  let knowledgeEntries: KnowledgeEntry[];
+  try {
+    knowledgeEntries = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
+  } catch {
+    throw new Error("知识关联清理失败，复盘未删除");
+  }
+  const hasLinkedKnowledge = knowledgeEntries.some(entry =>
+    entry.usageRecords.some(record => record.reviewId === review.id)
+  );
+  if (!hasLinkedKnowledge) {
+    writeVideoReviewsStrict(all.filter(r => r.id !== id));
+    return;
+  }
+  const unlinkedEntries = knowledgeEntries.map(entry => ({
+      ...entry,
+      usageRecords: entry.usageRecords.map(record =>
+        record.reviewId === review.id
+          ? { ...record, reviewId: null }
+          : record
+      ),
+    }));
+  writeKnowledgeEntriesStrict(
+    unlinkedEntries,
+    "知识关联清理失败，复盘未删除",
+  );
+  try {
+    writeVideoReviewsStrict(all.filter(r => r.id !== id));
+  } catch (error) {
+    writeKnowledgeEntriesStrict(
+      knowledgeEntries,
+      "复盘删除失败，知识关联恢复失败",
+    );
+    throw error;
+  }
 }
 
 // 标记某条复盘的经验已保存进知识库（方法论分类）

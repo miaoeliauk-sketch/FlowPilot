@@ -3,12 +3,14 @@ import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 import {
+  addKnowledgeEntry,
   addEvaluatedTopicAsset,
   addScriptAsset,
   deleteScriptAsset,
   deleteTopicAsset,
   getKnowledgeEntries,
   getVideoReviews,
+  recordKnowledgeUsage,
 } from "./ip-store";
 import { addScriptAssetForTopic } from "./topic-script-link";
 import { addVideoReviewForSource } from "./review-traceability";
@@ -115,14 +117,18 @@ test("新建复盘明确区分内部内容和外部内容并只列出当前IP脚
   });
 
   const { render, within } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
   const { IPProvider } = await import("./ip-context");
   const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
   const view = render(<IPProvider><ReviewPage /></IPProvider>);
 
   assert.ok(await view.findByRole("button", { name: "FlowPilot内部内容" }));
   assert.ok(view.getByRole("button", { name: "外部或临时内容" }));
   const selector = view.getByLabelText("选择已发布脚本");
   assert.ok(within(selector).getByRole("option", { name: script.title }));
+  await user.click(view.getByRole("button", { name: "外部或临时内容" }));
+  assert.ok(view.getByText(/暂不计入知识使用统计/));
 });
 
 test("内部脚本缺少选题关联时在调用AI前明确拒绝", async () => {
@@ -231,6 +237,321 @@ test("页面成功分析内部脚本后保存完整的选题和脚本关联", as
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("复盘记录能展开查看本次发布脚本关联的知识条目", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const knowledge = addKnowledgeEntry({
+    category: "方法论",
+    title: "先给结论再解释原因",
+    rawContent: "开头先给明确结论，再解释背后的原因。",
+    tags: [],
+    keywords: [],
+    ipId: ip.id,
+    sourceTier: "高",
+    sourceTierReason: "测试",
+    contentDirection: [],
+    sourcePlatform: "",
+    sourceUrl: "",
+    note: "",
+    extractedAt: "2026-08-20T00:00:00.000Z",
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    dna: null,
+  });
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId: ip.id,
+    title: "已发布的知识关联脚本",
+    cover: "",
+    content: "脚本正文",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "unavailable",
+      candidateKnowledgeEntryIds: [knowledge.id],
+      verifiedAt: "2026-08-20T08:00:00.000Z",
+      usages: [],
+    },
+  });
+  recordKnowledgeUsage(knowledge.id, {
+    module: "脚本工厂",
+    usedAt: "2026-08-20T08:00:00.000Z",
+    reason: "脚本生成成功",
+    relevanceTier: "高度相关",
+    relevanceReason: "与选题直接相关",
+    context: topic.title,
+  }, "已用于脚本", script.id);
+  addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: "带知识关联的发布复盘",
+      platform: "视频号",
+      publishedAt: "2026-08-20",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: "脚本正文",
+      metrics: { views: 1200, likes: 80, comments: 12, favorites: 20, shares: 5, newFollowers: 6, dms: 0, leads: 0, conversions: 0 },
+      analysis: createReviewResponse(),
+    },
+  });
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "复盘记录" }));
+  assert.ok(await view.findByText("带知识关联的发布复盘"));
+  await user.click(view.getByRole("button", { name: "展开" }));
+  assert.ok(view.getByText("本次脚本使用的知识（1条）"));
+  assert.ok(view.getByText(new RegExp(knowledge.title)));
+});
+
+test("复盘记录把知识关联暂不可用与无关联明确区分", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId: ip.id,
+    title: "知识关联暂不可用的脚本",
+    cover: "",
+    content: "脚本正文",
+    status: "定稿",
+  });
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: "知识关联暂不可用的复盘",
+      platform: "视频号",
+      publishedAt: "2026-08-20",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: "脚本正文",
+      metrics: { views: 1200, likes: 80, comments: 12, favorites: 20, shares: 5, newFollowers: 6, dms: 0, leads: 0, conversions: 0 },
+      analysis: createReviewResponse(),
+    },
+  });
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+    { ...review, knowledgeEffectStatus: "knowledge_unavailable" },
+  ]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "复盘记录" }));
+  assert.ok(await view.findByText("知识关联暂不可用"));
+});
+
+test("知识关联真实存在但状态同步持续失败时页面展示部分完成", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const knowledge = addKnowledgeEntry({
+    category: "方法论",
+    title: "状态待同步时仍应展示的知识",
+    rawContent: "真实关联不能被后续状态写入失败掩盖。",
+    tags: [], keywords: [], ipId: ip.id,
+    sourceTier: "高", sourceTierReason: "测试", contentDirection: [],
+    sourcePlatform: "", sourceUrl: "", note: "",
+    extractedAt: "2026-08-20T00:00:00.000Z",
+    metrics: null, viralEvaluation: null, usageRecords: [],
+    status: "未使用", dna: null,
+  });
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId: ip.id,
+    title: "状态同步持续失败的脚本",
+    cover: "",
+    content: "脚本正文",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "unavailable",
+      candidateKnowledgeEntryIds: [knowledge.id],
+      verifiedAt: "2026-08-20T08:00:00.000Z",
+      usages: [],
+    },
+  });
+  recordKnowledgeUsage(knowledge.id, {
+    module: "脚本工厂",
+    usedAt: "2026-08-20T08:00:00.000Z",
+    reason: "脚本生成成功",
+    relevanceTier: "高度相关",
+    relevanceReason: "与选题直接相关",
+    context: topic.title,
+  }, "已用于脚本", script.id);
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: "状态待同步的发布复盘",
+      platform: "视频号",
+      publishedAt: "2026-08-20",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: "脚本正文",
+      metrics: { views: 1200, likes: 80, comments: 12, favorites: 20, shares: 5, newFollowers: 6, dms: 0, leads: 0, conversions: 0 },
+      analysis: createReviewResponse(),
+    },
+  });
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+    { ...review, knowledgeEffectStatus: "tracked_status_pending" },
+  ]));
+  const stored = localStorage;
+  const originalGlobalStorage = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "localStorage",
+  );
+  const originalWindowStorage = Object.getOwnPropertyDescriptor(
+    window,
+    "localStorage",
+  );
+  const failingReviewStatusStorage = {
+    getItem: stored.getItem.bind(stored),
+    setItem(key: string, value: string) {
+      if (key === "ipwr:videoReviews") throw new Error("review status write failed");
+      stored.setItem(key, value);
+    },
+    removeItem: stored.removeItem.bind(stored),
+    clear: stored.clear.bind(stored),
+    key: stored.key.bind(stored),
+    get length() { return stored.length; },
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: failingReviewStatusStorage,
+  });
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: failingReviewStatusStorage,
+  });
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ReviewPage = (await import("../app/review/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+    await user.click(await view.findByRole("button", { name: "复盘记录" }));
+    assert.ok(await view.findByText("关联知识1条（状态同步待重试）"));
+  } finally {
+    if (originalGlobalStorage) {
+      Object.defineProperty(globalThis, "localStorage", originalGlobalStorage);
+    }
+    if (originalWindowStorage) {
+      Object.defineProperty(window, "localStorage", originalWindowStorage);
+    }
+  }
+});
+
+test("删除复盘的知识关联清理失败时页面显示错误且保留记录", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const knowledge = addKnowledgeEntry({
+    category: "方法论",
+    title: "删除失败时仍需保留的知识",
+    rawContent: "删除失败时不能留下悬空关联。",
+    tags: [], keywords: [], ipId: ip.id,
+    sourceTier: "高", sourceTierReason: "测试", contentDirection: [],
+    sourcePlatform: "", sourceUrl: "", note: "",
+    extractedAt: "2026-08-20T00:00:00.000Z",
+    metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+  });
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId: ip.id,
+    title: "删除失败测试脚本",
+    cover: "",
+    content: "脚本正文",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "unavailable",
+      candidateKnowledgeEntryIds: [knowledge.id],
+      verifiedAt: "2026-08-20T08:00:00.000Z",
+      usages: [],
+    },
+  });
+  recordKnowledgeUsage(knowledge.id, {
+    module: "脚本工厂",
+    usedAt: "2026-08-20T08:00:00.000Z",
+    reason: "脚本生成成功",
+    relevanceTier: "高度相关",
+    relevanceReason: "与选题直接相关",
+    context: topic.title,
+  }, "已用于脚本", script.id);
+  const review = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: "删除清理失败的复盘",
+      platform: "视频号",
+      publishedAt: "2026-08-20",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: "脚本正文",
+      metrics: { views: 1200, likes: 80, comments: 12, favorites: 20, shares: 5, newFollowers: 6, dms: 0, leads: 0, conversions: 0 },
+      analysis: createReviewResponse(),
+    },
+  });
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "复盘记录" }));
+  assert.ok(await view.findByText(review.title));
+  localStorage.setItem("ipwr:knowledgeEntries", "{broken");
+  await user.click(view.getByRole("button", { name: "删除复盘" }));
+
+  assert.ok(await view.findByText("知识关联清理失败，复盘未删除"));
+  assert.ok(view.getByText(review.title));
+  assert.deepEqual(getVideoReviews(ip.id).map(item => item.id), [review.id]);
 });
 
 test("分析期间切换IP时旧请求不能把复盘写入原IP或新IP", async () => {

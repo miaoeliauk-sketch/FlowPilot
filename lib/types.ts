@@ -576,6 +576,11 @@ export interface VideoReview {
     | "external_untraceable"
     | "legacy_missing_link"
     | "broken_link";
+  knowledgeEffectStatus?:
+    | "tracked"
+    | "tracked_status_pending"
+    | "no_linked_knowledge"
+    | "knowledge_unavailable";
   scriptText: string; // 用户粘贴的口播稿/逐字稿，Layer3分析的直接依据
   metrics: ReviewMetrics;
   analysis: {

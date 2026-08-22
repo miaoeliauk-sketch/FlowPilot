@@ -1,10 +1,12 @@
 import {
   addVideoReview,
+  getKnowledgeEntries,
   getScriptAssets,
   getTopicAsset,
   getVideoReviews,
 } from "./ip-store";
-import type { VideoReview } from "./types";
+import type { KnowledgeEntry, VideoReview } from "./types";
+import { isTrustedKnowledgeUsageForScript } from "./knowledge-effect-contract";
 
 type ReviewPayload = Omit<
   VideoReview,
@@ -14,6 +16,7 @@ type ReviewPayload = Omit<
   | "scriptId"
   | "sourceType"
   | "traceabilityStatus"
+  | "knowledgeEffectStatus"
   | "createdAt"
   | "savedToKnowledge"
   | "knowledgeEntryId"
@@ -94,6 +97,88 @@ export function getLearningEligibleVideoReviews(ipId: string): VideoReview[] {
   return getVideoReviews(ipId).filter(
     review => assessVideoReviewTraceability(review) === "traceable",
   );
+}
+
+type ReviewKnowledgeSummary = Pick<KnowledgeEntry, "id" | "title" | "category">;
+
+export type VideoReviewKnowledgeEffect =
+  | {
+      status: "tracked";
+      knowledgeEntries: ReviewKnowledgeSummary[];
+    }
+  | {
+      status: "tracked_status_pending";
+      knowledgeEntries: ReviewKnowledgeSummary[];
+    }
+  | {
+      status: "not_counted";
+      knowledgeEntries: [];
+      reason:
+        | "source_untraceable"
+        | "no_linked_knowledge"
+        | "knowledge_unavailable";
+    };
+
+export function getVideoReviewKnowledgeEffect(
+  review: VideoReview,
+): VideoReviewKnowledgeEffect {
+  if (assessVideoReviewTraceability(review) !== "traceable") {
+    return {
+      status: "not_counted",
+      knowledgeEntries: [],
+      reason: "source_untraceable",
+    };
+  }
+  const script = getScriptAssets(review.ipId!)
+    .find(item => item.id === review.scriptId);
+  if (!script) {
+    return {
+      status: "not_counted",
+      knowledgeEntries: [],
+      reason: "source_untraceable",
+    };
+  }
+  let knowledgeEntries: ReviewKnowledgeSummary[];
+  try {
+    knowledgeEntries = getKnowledgeEntries()
+      .filter(entry =>
+        entry.usageRecords.some(record =>
+          record.reviewId === review.id &&
+          isTrustedKnowledgeUsageForScript(entry, record, script)
+        )
+      )
+      .map(entry => ({
+        id: entry.id,
+        title: entry.title,
+        category: entry.category,
+      }));
+  } catch {
+    return {
+      status: "not_counted",
+      knowledgeEntries: [],
+      reason: "knowledge_unavailable",
+    };
+  }
+  if (knowledgeEntries.length > 0) {
+    return {
+      status: review.knowledgeEffectStatus === "tracked"
+        ? "tracked"
+        : "tracked_status_pending",
+      knowledgeEntries,
+    };
+  }
+  return review.knowledgeEffectStatus === "knowledge_unavailable" ||
+    review.knowledgeEffectStatus === "tracked_status_pending"
+    ? {
+        status: "not_counted",
+        knowledgeEntries: [],
+        reason: "knowledge_unavailable",
+      }
+    : {
+        status: "not_counted",
+        knowledgeEntries: [],
+        reason: "no_linked_knowledge",
+      };
 }
 
 type ResolvedVideoReviewSource =

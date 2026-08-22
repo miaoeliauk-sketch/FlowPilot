@@ -1,8 +1,31 @@
 import type {
+  KnowledgeEntry,
+  KnowledgeUsageRecord,
+  KnowledgeUsageTrackingStatus,
+  ScriptAsset,
   ScriptKnowledgeTracking,
   ScriptKnowledgeUsage,
   ScriptKnowledgeUsageType,
 } from "./types";
+
+const TRUSTED_USAGE_STATUSES: ReadonlySet<KnowledgeUsageTrackingStatus> = new Set([
+  "module_recorded",
+  "script_adopted",
+]);
+
+export function isTrustedKnowledgeUsageForScript(
+  entry: Pick<KnowledgeEntry, "id" | "ipId">,
+  record: Pick<KnowledgeUsageRecord, "scriptId" | "topicId" | "trackingStatus">,
+  script: Pick<ScriptAsset, "id" | "ipId" | "topicId" | "knowledgeTracking">,
+): boolean {
+  const candidateKnowledgeEntryIds: readonly string[] =
+    script.knowledgeTracking.candidateKnowledgeEntryIds;
+  return candidateKnowledgeEntryIds.includes(entry.id) &&
+    (entry.ipId === null || entry.ipId === script.ipId) &&
+    record.scriptId === script.id &&
+    record.topicId === script.topicId &&
+    TRUSTED_USAGE_STATUSES.has(record.trackingStatus);
+}
 
 const USAGE_TYPES: ScriptKnowledgeUsageType[] = [
   "structure",
