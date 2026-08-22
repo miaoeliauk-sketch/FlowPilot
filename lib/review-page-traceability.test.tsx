@@ -86,6 +86,7 @@ before(() => {
 beforeEach(() => {
   document.body.innerHTML = "";
   localStorage.clear();
+  window.history.replaceState({}, "", "/review");
 });
 
 afterEach(async () => {
@@ -298,6 +299,38 @@ test("待复盘页签可以登记内部脚本已发布并立即进入待复盘�
   assert.equal(stored?.scriptId, script.id);
   assert.equal(stored?.manualReviewStatus, "pending");
   assert.equal(stored?.analysis, null);
+});
+
+test("工作台待复盘链接会直接打开待复盘清单", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", "true");
+  const topic = addEvaluatedTopicAsset({ ipId: ip.id, title: boardResult.topic, source: "manual" }, boardResult);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id, ipId: ip.id, title: "从工作台直接打开的待复盘脚本",
+    cover: "", content: "脚本正文", status: "定稿",
+  });
+  addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title, platform: "视频号", publishedAt: "2026-08-20", videoUrl: "",
+      contentDirection: "商业洞察", scriptText: script.content,
+      metrics: { views: 0, likes: 0, comments: 0, favorites: 0, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+  window.history.replaceState({}, "", "/review?tab=pending");
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ReviewPage = (await import("../app/review/page")).default;
+  const view = render(<IPProvider><ReviewPage /></IPProvider>);
+
+  assert.ok(await view.findByRole("button", { name: "开始人工复盘" }));
+  assert.equal(Boolean(view.queryByRole("button", { name: "开始六层复盘分析" })), false);
 });
 
 test("待复盘表单拒绝无意义说明并用多选标签完成原记录", async () => {

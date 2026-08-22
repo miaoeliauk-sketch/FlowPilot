@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Icon, IconName } from "@/components/ui/icon";
 import {
   getKnowledgeEntries, getTopicAssets, getScriptAssets,
-  getVideoReviews, getCoverRefs, getGlobalCoverRefs,
+  getVideoReviewsReadOnly, getCoverRefs, getGlobalCoverRefs,
   CoverRefStoreError,
 } from "@/lib/ip-store";
 import { useIP } from "@/lib/ip-context";
@@ -16,6 +16,7 @@ import {
   isIPKnowledgeCategory,
 } from "@/lib/knowledge-categories";
 import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
+import { assessVideoReviewTraceability } from "@/lib/review-traceability";
 
 type DashboardModule = {
   href: string;
@@ -142,7 +143,13 @@ export default function Home() {
     const calibrationSamples = getTopicCalibrationSamples(activeIP);
     const topics = getTopicAssets(ipId ?? "").filter(() => true);
     const scripts = getScriptAssets(ipId ?? "");
-    const reviews = ipId === null ? [] : getVideoReviews(ipId);
+    const reviews = ipId === null
+      ? []
+      : getVideoReviewsReadOnly(ipId).reviews;
+    const pendingReviews = reviews.filter(review =>
+      review.manualReviewStatus === "pending" &&
+      assessVideoReviewTraceability(review) === "traceable"
+    );
 
     setStats({
       globalMethods: globalMethods.length,
@@ -154,7 +161,7 @@ export default function Home() {
       reviews: reviews.length,
       pendingTopics: topics.filter(t => t.status === "草稿").length,
       pendingScripts: scripts.filter(s => s.status === "草稿").length,
-      pendingReviews: reviews.filter(r => !r.analysis).length,
+      pendingReviews: pendingReviews.length,
     });
     setPendingScriptItems(scripts.filter(script => script.status === "草稿"));
     setScriptHistoryItems(scripts);
@@ -199,7 +206,7 @@ export default function Home() {
                 onClick={() => setShowPendingScripts(visible => !visible)}
               />
             )}
-            {stats.pendingReviews > 0 && <PendingPill label="待复盘记录" count={stats.pendingReviews} href="/review" />}
+            {stats.pendingReviews > 0 && <PendingPill label="待复盘记录" count={stats.pendingReviews} href="/review?tab=pending" />}
           </div>
         )}
       </header>

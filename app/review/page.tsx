@@ -872,6 +872,12 @@ export default function ReviewPage() {
   const [tab, setTab] = useState<TabId>("new");
   const [historyKey, setHistoryKey] = useState(0);
 
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "pending") {
+      setTab("pending");
+    }
+  }, []);
+
   return (
     <div className="min-h-screen p-6 md:p-8">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">

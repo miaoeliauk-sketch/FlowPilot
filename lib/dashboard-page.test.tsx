@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
+import {
+  addEvaluatedTopicAsset,
+  completeVideoReview,
+  deferVideoReview,
+} from "./ip-store";
+import { addScriptAssetForTopic } from "./topic-script-link";
+import { addVideoReviewForSource } from "./review-traceability";
+import { createValidTopicBoardResult } from "./topic-board-contract.fixture";
 
 function installBrowserEnvironment() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -126,6 +134,42 @@ function seedActiveIP() {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([currentIP, otherIP]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(currentIP.id));
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+}
+
+function addInternalReview(ipId: string, suffix: string) {
+  const boardResult = createValidTopicBoardResult();
+  const evaluation = {
+    ...boardResult,
+    ipId,
+    ipName: ipId === currentIP.id ? currentIP.name : otherIP.name,
+  };
+  const topic = addEvaluatedTopicAsset({
+    ipId,
+    title: `${boardResult.topic}-${suffix}`,
+    source: "manual",
+  }, evaluation);
+  const script = addScriptAssetForTopic({
+    topicId: topic.id,
+    ipId,
+    title: `复盘脚本-${suffix}`,
+    cover: "",
+    content: `脚本正文-${suffix}`,
+    status: "定稿",
+  });
+  return addVideoReviewForSource({
+    activeIPId: ipId,
+    source: { type: "flowpilot", scriptId: script.id },
+    review: {
+      title: script.title,
+      platform: "视频号",
+      publishedAt: "2026-08-20",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: script.content,
+      metrics: { views: 0, likes: 0, comments: 0, favorites: 0, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
 }
 
 let restoreBrowser: (() => void) | undefined;
@@ -335,4 +379,60 @@ test("完全没有当前IP时不统计任何IP的复盘记录", async () => {
 
   assert.ok(await reviewCard.findByText("0", { exact: true }));
   assert.equal(Boolean(view.queryByText("待复盘记录")), false);
+});
+
+test("工作台待复盘数字只统计当前IP内部可追溯的pending记录", async () => {
+  const pending = addInternalReview(currentIP.id, "当前待复盘");
+  const deferred = addInternalReview(currentIP.id, "当前暂缓");
+  deferVideoReview(deferred.id);
+  const completed = addInternalReview(currentIP.id, "当前已完成");
+  completeVideoReview(completed.id, {
+    tags: ["标题结构有效"],
+    note: "标题结构带来了更清楚的真实点击反馈。",
+  });
+  addVideoReviewForSource({
+    activeIPId: currentIP.id,
+    source: { type: "external" },
+    review: {
+      title: "当前IP外部内容",
+      platform: "视频号",
+      publishedAt: "2026-08-20",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: "外部内容",
+      metrics: { views: 0, likes: 0, comments: 0, favorites: 0, shares: 0, newFollowers: 0, dms: 0, leads: 0, conversions: 0 },
+      analysis: null,
+    },
+  });
+  addInternalReview(otherIP.id, "其他IP待复盘");
+
+  const view = await renderDashboard();
+  const pendingLink = await view.findByRole("link", { name: /待复盘记录/ });
+  const { within } = await import("@testing-library/react");
+
+  assert.ok(within(pendingLink).getByText("1", { exact: true }));
+  assert.equal(pendingLink.getAttribute("href"), "/review?tab=pending");
+  assert.ok(pending.id);
+});
+
+test("工作台读取历史重复复盘时不会触发维护写入", async () => {
+  const pending = addInternalReview(currentIP.id, "历史重复");
+  const storedReviews = JSON.parse(localStorage.getItem("ipwr:videoReviews") ?? "[]") as Array<Record<string, unknown>>;
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([
+    ...storedReviews,
+    {
+      ...pending,
+      id: "historical-duplicate-review",
+      createdAt: "2026-08-21T00:00:00.000Z",
+      updatedAt: "2026-08-21T00:00:00.000Z",
+    },
+  ]));
+
+  const beforeRender = localStorage.getItem("ipwr:videoReviews");
+  const view = await renderDashboard();
+  const pendingLink = await view.findByRole("link", { name: /待复盘记录/ });
+  const { within } = await import("@testing-library/react");
+
+  assert.ok(within(pendingLink).getByText("1", { exact: true }));
+  assert.equal(localStorage.getItem("ipwr:videoReviews"), beforeRender);
 });
