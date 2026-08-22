@@ -328,6 +328,12 @@ export interface KnowledgeUsageRecord {
 
 export type KnowledgeStatus = "未使用" | "已用于选题" | "已用于脚本" | "已用于分析";
 
+export type KnowledgeTrustStatus =
+  | "ai_derived_unverified"
+  | "adopted_awaiting_effect"
+  | "effect_evidence_awaiting_judgment"
+  | "human_confirmed_effective";
+
 export interface KnowledgeEntry {
   id: string;
   category: KnowledgeCategory;
@@ -355,6 +361,8 @@ export interface KnowledgeEntry {
   // "被哪些模块调用"和"调用次数"不单独存字段，从usageRecords派生，避免和明细记录数字对不上。
   usageRecords: KnowledgeUsageRecord[];
   status: KnowledgeStatus;
+  // AI拆解出的知识必须从“尚未验证”开始；后续状态只能依据真实采用、发布效果和人工确认推进。
+  trustStatus?: KnowledgeTrustStatus | null;
   // 仅通过"爆款分析中心"录入的条目会有值，其余录入方式（知识库中心手动添加）始终为null。
   // 基因库统计直接读这个字段做计数，不需要额外调用AI。
   dna: ViralDNA | null;

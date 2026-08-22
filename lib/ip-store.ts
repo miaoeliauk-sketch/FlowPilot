@@ -759,6 +759,7 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
       evidenceExcerpt: record.evidenceExcerpt ?? null,
     })),
     status: e.status ?? "未使用",
+    trustStatus: e.trustStatus ?? null,
     dna: e.dna ?? null,
     sourceKind: e.sourceKind ?? null,
     sourceName: e.sourceName ?? "",
@@ -794,6 +795,95 @@ export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">
     .find(saved => saved.id === entry.id);
   if (!persisted) throw new Error("IP原始内容写入失败，未保存半成品");
   return migrateKnowledgeEntry(persisted);
+}
+
+export interface HotAnalysisKnowledgeSaveEntry {
+  slotId: string;
+  role: "viral_case" | "method_card";
+  entry: Omit<KnowledgeEntry, "id" | "createdAt" | "trustStatus">;
+}
+
+export interface HotAnalysisKnowledgeSaveInput {
+  analysisId: string;
+  entries: HotAnalysisKnowledgeSaveEntry[];
+}
+
+function serializeKnowledgeSaveContent(entry: KnowledgeEntry): string {
+  const { createdAt: _createdAt, ...content } = entry;
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, normalize(nested)]),
+    );
+  };
+  return JSON.stringify(normalize(content));
+}
+
+export function saveHotAnalysisKnowledgeEntries(
+  input: HotAnalysisKnowledgeSaveInput,
+): KnowledgeEntry[] {
+  const analysis = getHotAnalyses().find(item => item.id === input.analysisId);
+  if (!analysis) throw new Error("没有找到需要沉淀的爆款分析记录");
+  if (input.entries.some(item =>
+    (item.role === "viral_case") !== (item.entry.category === "爆款案例")
+  )) {
+    throw new Error("爆款分析知识角色与分类不一致，已拒绝保存");
+  }
+  if (input.entries.some(item => item.entry.ipId !== analysis.ipId)) {
+    throw new Error("待保存知识不属于本次分析记录的IP，已拒绝保存");
+  }
+  const all = readKnowledgeEntriesStrict();
+  const createdAt = new Date().toISOString();
+  const candidates = input.entries.map(item => migrateKnowledgeEntry({
+    ...item.entry,
+    id: `hot-analysis:${input.analysisId}:${item.slotId}`,
+    createdAt,
+    trustStatus: item.role === "method_card"
+      ? "ai_derived_unverified" as const
+      : null,
+  }));
+  if (new Set(candidates.map(entry => entry.id)).size !== candidates.length) {
+    throw new Error("同一批次存在知识编号重复，已拒绝保存");
+  }
+  const candidateIds = new Set(candidates.map(entry => entry.id));
+  const existingIdCounts = new Map<string, number>();
+  for (const entry of all) {
+    if (!candidateIds.has(entry.id)) continue;
+    existingIdCounts.set(entry.id, (existingIdCounts.get(entry.id) ?? 0) + 1);
+  }
+  if ([...existingIdCounts.values()].some(count => count > 1)) {
+    throw new Error("历史知识存在相同编号的重复条目，已拒绝保存，请先修复异常数据");
+  }
+  const existingById = new Map(all.map(entry => [entry.id, migrateKnowledgeEntry(entry)]));
+  const additions: KnowledgeEntry[] = [];
+  const resolved = candidates.map(candidate => {
+    const existing = existingById.get(candidate.id);
+    if (!existing) {
+      additions.push(candidate);
+      return candidate;
+    }
+    if (serializeKnowledgeSaveContent(existing) !== serializeKnowledgeSaveContent(candidate)) {
+      throw new Error("爆款分析存在同编号知识，但保存内容不一致；内容、归属或可信度不一致，已拒绝重复保存");
+    }
+    return existing;
+  });
+  if (additions.length === 0) return resolved;
+  writeKnowledgeEntriesStrict(
+    [...all, ...additions],
+    "爆款分析知识保存失败，请稍后重试",
+  );
+  const persistedById = new Map(
+    readKnowledgeEntriesStrict().map(entry => [entry.id, entry]),
+  );
+  return resolved.map(entry => {
+    const persisted = persistedById.get(entry.id);
+    if (!persisted) throw new Error("爆款分析知识保存失败，请稍后重试");
+    return migrateKnowledgeEntry(persisted);
+  });
 }
 
 export function updateKnowledgeEntry(id: string, patch: Partial<KnowledgeEntry>): void {

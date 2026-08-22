@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import {
+  getKnowledgeEntries,
+  saveHotAnalysisKnowledgeEntries,
+} from "./ip-store";
 import { runHotAnalysisKnowledgePrecheck } from "./hot-analysis-knowledge";
 import type { KnowledgeEntry } from "./types";
 
 class CountingStorage implements Storage {
   private readonly values = new Map<string, string>();
   writes = 0;
+  failKnowledgeWrites = false;
 
   get length() {
     return this.values.size;
@@ -28,13 +33,26 @@ class CountingStorage implements Storage {
   }
 
   setItem(key: string, value: string) {
+    if (this.failKnowledgeWrites && key === "ipwr:knowledgeEntries") {
+      throw new Error("quota exceeded");
+    }
     this.writes += 1;
     this.values.set(key, value);
   }
 
   seedKnowledge(entries: KnowledgeEntry[]) {
+    this.values.clear();
     this.values.set("ipwr:knowledgeEntries", JSON.stringify(entries));
     this.writes = 0;
+    this.failKnowledgeWrites = false;
+  }
+
+  seedHotAnalysis(id: string, ipId: string | null) {
+    this.values.set("ipwr:hotAnalyses", JSON.stringify([{
+      id,
+      ipId,
+      createdAt: "2026-08-22T00:00:00.000Z",
+    }]));
   }
 }
 
@@ -78,6 +96,13 @@ function knowledgeEntry(overrides: Partial<KnowledgeEntry> = {}): KnowledgeEntry
     dna: null,
     ...overrides,
   };
+}
+
+function unsavedKnowledgeEntry(
+  overrides: Partial<KnowledgeEntry> = {},
+): Omit<KnowledgeEntry, "id" | "createdAt"> {
+  const { id: _id, createdAt: _createdAt, ...entry } = knowledgeEntry(overrides);
+  return entry;
 }
 
 test("完整爆款案例使用最终完整原文跨全库比较且保持只读", () => {
@@ -202,5 +227,309 @@ test("重试检查排除本次分析已经成功保存的自身条目", () => {
     result.viralCase?.similarEntries.map(entry => entry.knowledgeId),
     ["same-content-from-another-analysis"],
   );
+  assert.equal(storage.writes, 0);
+});
+
+test("严格保存入口强制把AI拆解方法卡标记为尚未验证", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-save", "ip-a");
+  const entry = {
+    ...unsavedKnowledgeEntry({
+      category: "开头方法库",
+      title: "反常识开头法",
+      rawContent: "【一句话总结】\n先给出相反结论。\n\n【核心方法】\n用具体反例制造认知冲突。",
+      ipId: "ip-a",
+      metrics: null,
+      viralEvaluation: null,
+    }),
+    trustStatus: "human_confirmed_effective",
+  } as Omit<KnowledgeEntry, "id" | "createdAt">;
+
+  const saved = saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-save",
+    entries: [{
+      slotId: "method-card-1",
+      role: "method_card",
+      entry,
+    }],
+  });
+
+  assert.equal(saved[0]?.id, "hot-analysis:analysis-save:method-card-1");
+  assert.equal(saved[0]?.trustStatus, "ai_derived_unverified");
+  assert.equal(getKnowledgeEntries()[0]?.trustStatus, "ai_derived_unverified");
+  assert.equal(storage.writes, 1);
+});
+
+test("同一次分析成功保存后重复操作直接复用原方法卡", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-idempotent", "ip-a");
+  const input = {
+    analysisId: "analysis-idempotent",
+    entries: [{
+      slotId: "method-card-1",
+      role: "method_card" as const,
+      entry: unsavedKnowledgeEntry({
+        category: "选题方法库",
+        title: "痛点场景选题法",
+        rawContent: "【一句话总结】\n从具体痛点场景进入选题。",
+        ipId: "ip-a",
+        metrics: null,
+        viralEvaluation: null,
+      }),
+    }],
+  };
+
+  const first = saveHotAnalysisKnowledgeEntries(input);
+  const second = saveHotAnalysisKnowledgeEntries(input);
+
+  assert.equal(second[0]?.id, first[0]?.id);
+  assert.equal(second[0]?.createdAt, first[0]?.createdAt);
+  assert.equal(getKnowledgeEntries().length, 1);
+  assert.equal(storage.writes, 1);
+});
+
+test("调用方不能把方法卡伪装成爆款案例绕过未验证标记", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-forged-role", "ip-a");
+
+  assert.throws(
+    () => saveHotAnalysisKnowledgeEntries({
+      analysisId: "analysis-forged-role",
+      entries: [{
+        slotId: "method-card-1",
+        role: "viral_case",
+        entry: unsavedKnowledgeEntry({
+          category: "开头方法库",
+          title: "伪装角色的方法卡",
+          rawContent: "【一句话总结】\n这仍然是一张由AI拆解产生的方法卡。",
+          ipId: "ip-a",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      }],
+    }),
+    /知识角色与分类不一致/,
+  );
+  assert.deepEqual(getKnowledgeEntries(), []);
+  assert.equal(storage.writes, 0);
+});
+
+test("保存时使用分析发生时的IP归属且拒绝切换IP后的串写", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-ip-a", "ip-a");
+
+  assert.throws(
+    () => saveHotAnalysisKnowledgeEntries({
+      analysisId: "analysis-ip-a",
+      entries: [{
+        slotId: "method-card-1",
+        role: "method_card",
+        entry: unsavedKnowledgeEntry({
+          category: "选题方法库",
+          title: "错误归属的方法卡",
+          rawContent: "【一句话总结】\n分析完成后切换IP不能改变知识归属。",
+          ipId: "ip-b",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      }],
+    }),
+    /不属于本次分析记录的IP/,
+  );
+  assert.deepEqual(getKnowledgeEntries(), []);
+  assert.equal(storage.writes, 0);
+});
+
+test("同一批次存在重复方法卡编号时整体拒绝且不写入半成品", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-duplicate-slot", "ip-a");
+  const entry = unsavedKnowledgeEntry({
+    category: "文案框架方法库",
+    title: "问题解决结构法",
+    rawContent: "【一句话总结】\n按照问题、原因、方案组织正文。",
+    ipId: "ip-a",
+    metrics: null,
+    viralEvaluation: null,
+  });
+
+  assert.throws(
+    () => saveHotAnalysisKnowledgeEntries({
+      analysisId: "analysis-duplicate-slot",
+      entries: [
+        { slotId: "method-card-1", role: "method_card", entry },
+        { slotId: "method-card-1", role: "method_card", entry },
+      ],
+    }),
+    /知识编号重复/,
+  );
+  assert.deepEqual(getKnowledgeEntries(), []);
+  assert.equal(storage.writes, 0);
+});
+
+test("浏览器拒绝严格写入时整批方法卡都不留下残留", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-write-failure", "ip-a");
+  storage.failKnowledgeWrites = true;
+  const first = unsavedKnowledgeEntry({
+    category: "选题方法库",
+    title: "第一张方法卡",
+    rawContent: "【一句话总结】\n第一张需要和第二张一起成功。",
+    ipId: "ip-a",
+    metrics: null,
+    viralEvaluation: null,
+  });
+  const second = unsavedKnowledgeEntry({
+    category: "开头方法库",
+    title: "第二张方法卡",
+    rawContent: "【一句话总结】\n第二张不能在第一张失败后单独残留。",
+    ipId: "ip-a",
+    metrics: null,
+    viralEvaluation: null,
+  });
+
+  try {
+    assert.throws(
+      () => saveHotAnalysisKnowledgeEntries({
+        analysisId: "analysis-write-failure",
+        entries: [
+          { slotId: "method-card-1", role: "method_card", entry: first },
+          { slotId: "method-card-2", role: "method_card", entry: second },
+        ],
+      }),
+      /爆款分析知识保存失败/,
+    );
+  } finally {
+    storage.failKnowledgeWrites = false;
+  }
+  assert.deepEqual(getKnowledgeEntries(), []);
+  assert.equal(storage.writes, 0);
+});
+
+test("相同稳定编号对应不同内容时拒绝覆盖原方法卡", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-conflict", "ip-a");
+  const original = unsavedKnowledgeEntry({
+    category: "开头方法库",
+    title: "冲突开头法",
+    rawContent: "【一句话总结】\n先展示冲突。",
+    ipId: "ip-a",
+    metrics: null,
+    viralEvaluation: null,
+  });
+  saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-conflict",
+    entries: [{ slotId: "method-card-1", role: "method_card", entry: original }],
+  });
+
+  assert.throws(
+    () => saveHotAnalysisKnowledgeEntries({
+      analysisId: "analysis-conflict",
+      entries: [{
+        slotId: "method-card-1",
+        role: "method_card",
+        entry: { ...original, rawContent: "【一句话总结】\n已经变成另一种方法。" },
+      }],
+    }),
+    /内容、归属或可信度不一致/,
+  );
+  assert.equal(getKnowledgeEntries().length, 1);
+  assert.equal(getKnowledgeEntries()[0]?.rawContent, "【一句话总结】\n先展示冲突。");
+  assert.equal(storage.writes, 1);
+});
+
+test("相同稳定编号只有全部保存字段完全一致时才能复用", () => {
+  storage.seedKnowledge([]);
+  storage.seedHotAnalysis("analysis-full-content", "ip-a");
+  const original = unsavedKnowledgeEntry({
+    category: "选题方法库",
+    title: "完整字段幂等检查",
+    rawContent: "【一句话总结】\n完整保存内容必须逐项一致。",
+    tags: ["原标签"],
+    keywords: ["原关键词"],
+    ipId: "ip-a",
+    sourceName: "原始拆解",
+    sourcePlatform: "抖音",
+    sourceUrl: "https://example.com/original",
+    note: "原始说明",
+    contentDirection: ["知识"],
+    sourceTierReason: "来自原始爆款分析",
+    metrics: null,
+    viralEvaluation: null,
+  });
+  saveHotAnalysisKnowledgeEntries({
+    analysisId: "analysis-full-content",
+    entries: [{ slotId: "method-card-1", role: "method_card", entry: original }],
+  });
+
+  const changes: Array<[string, Partial<typeof original>]> = [
+    ["关键词", { keywords: ["新关键词"] }],
+    ["标签", { tags: ["新标签"] }],
+    ["来源名称", { sourceName: "另一份拆解" }],
+    ["来源平台", { sourcePlatform: "视频号" }],
+    ["来源链接", { sourceUrl: "https://example.com/changed" }],
+    ["拆解说明", { note: "拆解结果已经变化" }],
+    ["内容方向", { contentDirection: ["成长"] }],
+    ["来源依据", { sourceTierReason: "另一份来源依据" }],
+  ];
+
+  for (const [field, patch] of changes) {
+    assert.throws(
+      () => saveHotAnalysisKnowledgeEntries({
+        analysisId: "analysis-full-content",
+        entries: [{
+          slotId: "method-card-1",
+          role: "method_card",
+          entry: { ...original, ...patch },
+        }],
+      }),
+      /保存内容不一致/,
+      `${field}变化时不应复用旧记录`,
+    );
+  }
+  assert.equal(getKnowledgeEntries().length, 1);
+  assert.equal(storage.writes, 1);
+});
+
+test("历史存储存在相同稳定编号的重复条目时明确拒绝保存", () => {
+  const duplicateId = "hot-analysis:analysis-duplicate-history:method-card-1";
+  storage.seedKnowledge([
+    knowledgeEntry({
+      id: duplicateId,
+      category: "开头方法库",
+      title: "历史重复方法卡",
+      rawContent: "【一句话总结】\n历史异常不能被静默掩盖。",
+      ipId: "ip-a",
+      trustStatus: "ai_derived_unverified",
+    }),
+    knowledgeEntry({
+      id: duplicateId,
+      category: "开头方法库",
+      title: "历史重复方法卡",
+      rawContent: "【一句话总结】\n历史异常不能被静默掩盖。",
+      ipId: "ip-a",
+      trustStatus: "ai_derived_unverified",
+    }),
+  ]);
+  storage.seedHotAnalysis("analysis-duplicate-history", "ip-a");
+
+  assert.throws(
+    () => saveHotAnalysisKnowledgeEntries({
+      analysisId: "analysis-duplicate-history",
+      entries: [{
+        slotId: "method-card-1",
+        role: "method_card",
+        entry: unsavedKnowledgeEntry({
+          category: "开头方法库",
+          title: "历史重复方法卡",
+          rawContent: "【一句话总结】\n历史异常不能被静默掩盖。",
+          ipId: "ip-a",
+          metrics: null,
+          viralEvaluation: null,
+        }),
+      }],
+    }),
+    /历史知识存在相同编号的重复条目/,
+  );
+  assert.equal(getKnowledgeEntries().length, 2);
   assert.equal(storage.writes, 0);
 });
