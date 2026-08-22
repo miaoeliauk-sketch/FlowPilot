@@ -772,6 +772,10 @@ export function getKnowledgeEntries(category?: KnowledgeCategory): KnowledgeEntr
   return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+export function getKnowledgeEntriesForFullLibraryComparison(): KnowledgeEntry[] {
+  return getKnowledgeEntries();
+}
+
 export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt">): KnowledgeEntry {
   const all = readKnowledgeEntriesStrict();
   const entry: KnowledgeEntry = { ...input, id: genId(), createdAt: new Date().toISOString() };
