@@ -3,12 +3,13 @@ import { apiFetch } from "@/lib/api-fetch";
 import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
 import { getIPDisplayLabel } from "@/lib/ip-display";
-import { KnowledgeEntry, KnowledgeCategory, VoiceSample, HookEntry, KnowledgeItem, KnowledgeItemType, KnowledgeItemScene, KNOWLEDGE_ITEM_TYPE_LABEL, KNOWLEDGE_ITEM_SCENE_LABEL } from "@/lib/types";
+import { KnowledgeEntry, KnowledgeCategory, VoiceSample, HookEntry, KnowledgeItem, KnowledgeItemType, KnowledgeItemScene, KNOWLEDGE_ITEM_TYPE_LABEL, KNOWLEDGE_ITEM_SCENE_LABEL, ScriptAsset, VideoReview } from "@/lib/types";
 import {
   getKnowledgeEntries, addKnowledgeEntry, deleteKnowledgeEntry, updateKnowledgeEntry,
   getAllVoiceSamples, addVoiceSample, deleteVoiceSample,
   getHookEntries, getUnanalyzedHookEntries, addHookEntry, addHookEntriesBatch, deleteHookEntry, applyHookAnalysisResults,
   getCoverRefs, getGlobalCoverRefs, addCoverRef, deleteCoverRef,
+  getScriptAssets, getVideoReviewsReadOnly,
   type CoverRef,
 } from "@/lib/ip-store";
 import { Icon } from "@/components/ui/icon";
@@ -27,6 +28,8 @@ import {
   matchesKnowledgeHubSection,
   type KnowledgeHubSection,
 } from "@/lib/knowledge-hub-view";
+import { buildKnowledgeEffectReference, createKnowledgeEffectReferenceIndex } from "@/lib/knowledge-effect-reference";
+import { assessVideoReviewTraceability } from "@/lib/review-traceability";
 
 const SOURCE_ANALYSIS_KIND_LABEL: Record<string, string> = {
   question: "老师在回答什么",
@@ -57,6 +60,12 @@ function cleanRawContent(raw: string): string {
     if (t.startsWith("{") && t.includes('"category"')) return false;
     return true;
   }).join("\n").trim();
+}
+
+function formatHistoricalMetric(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toLocaleString()
+    : "—";
 }
 
 function parseMethodMeta(note: string): {
@@ -1189,6 +1198,9 @@ export default function KnowledgeHubPage() {
   const [coverDetail, setCoverDetail] = useState<CoverRef | null>(null);
   const [detailExpanded, setDetailExpanded] = useState(false);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
+  const [knowledgeEffectScripts, setKnowledgeEffectScripts] = useState<ScriptAsset[]>([]);
+  const [traceableVideoReviews, setTraceableVideoReviews] = useState<VideoReview[]>([]);
+  const [retainedReviewIdByRemovedId, setRetainedReviewIdByRemovedId] = useState<ReadonlyMap<string, string>>(new Map());
   const [voiceSamples, setVoiceSamples] = useState<VoiceSample[]>([]);
   const [hookEntries, setHookEntries] = useState<HookEntry[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -1425,6 +1437,16 @@ export default function KnowledgeHubPage() {
     setHookEntries(getHookEntries());
   }
   useEffect(refresh, []);
+  useEffect(() => {
+    setKnowledgeEffectScripts(ips.flatMap(ip => getScriptAssets(ip.id)));
+    const reviewSnapshot = getVideoReviewsReadOnly();
+    setTraceableVideoReviews(
+      reviewSnapshot.reviews.filter(
+        review => assessVideoReviewTraceability(review) === "traceable",
+      ),
+    );
+    setRetainedReviewIdByRemovedId(reviewSnapshot.retainedReviewIdByRemovedId);
+  }, [ips]);
   async function refreshCovers() {
     const requestId = ++coverRequestIdRef.current;
     const requestedIPId = activeIP?.id ?? null;
@@ -1533,6 +1555,15 @@ export default function KnowledgeHubPage() {
       .map(match => searchSourceEntries.find(e => e.id === match.id))
       .filter((e): e is KnowledgeEntry => Boolean(e))
     : scopedEntries;
+  const knowledgeEffectIndex = createKnowledgeEffectReferenceIndex(
+    knowledgeEffectScripts,
+    traceableVideoReviews,
+    retainedReviewIdByRemovedId,
+  );
+  const knowledgeEffectByEntryId = new Map(entries.map(entry => [
+    entry.id,
+    buildKnowledgeEffectReference(entry, knowledgeEffectIndex),
+  ]));
   const filteredSamples = voiceSamples.filter(s => !q || s.title.toLowerCase().includes(q));
   const filteredHooks = hookEntries.filter(h => !q || h.hookText.toLowerCase().includes(q) || h.title.toLowerCase().includes(q));
   const unanalyzedCount = hookEntries.filter(h => !h.analyzed).length;
@@ -1680,9 +1711,19 @@ export default function KnowledgeHubPage() {
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
-                      {item.usageCount > 0 && (
-                        <span className="text-[11px] text-[#639922]">被引用 {item.usageCount} 次</span>
-                      )}
+                      {(() => {
+                        const effect = knowledgeEffectByEntryId.get(item.legacyId);
+                        return effect ? (
+                          <div className="flex flex-wrap justify-end gap-1.5 text-[10.5px] text-[#555]">
+                            <span>已用于脚本：{effect.adoptedScriptCount}次</span>
+                            <span>已有发布复盘：{effect.reviewedScriptCount}次</span>
+                            <span>尚未发布或未复盘：{effect.awaitingReviewCount}次</span>
+                            {effect.legacyUnverifiedCount > 0 && (
+                              <span className="text-[#999]">历史未验证：{effect.legacyUnverifiedCount}次（不计入上述统计）</span>
+                            )}
+                          </div>
+                        ) : null;
+                      })()}
                       <button onClick={() => { deleteKnowledgeItem(item.id); refreshUnified(); }} className="text-[#BBB] hover:text-[#A32D2D]">
                         <Icon name="trash" size="sm" />
                       </button>
@@ -2036,6 +2077,7 @@ export default function KnowledgeHubPage() {
           {filteredEntries.map(e => {
             const ip = e.ipId ? ipMap.get(e.ipId) : null;
             const methodMeta = parseMethodMeta(e.note);
+            const effect = knowledgeEffectByEntryId.get(e.id)!;
             return (
               <Card key={e.id} className="relative flex cursor-pointer flex-col overflow-hidden hover:border-[#639922]">
                 <div className="min-w-0 flex-1" onClick={() => { setDetail(e); setDetailExpanded(false); }}>
@@ -2049,7 +2091,12 @@ export default function KnowledgeHubPage() {
                   {/* 状态 + 标签：每个 tag 有 max-w 和 truncate 防止 URL 撑破 */}
                   <div className="mb-2 flex flex-wrap items-center gap-1">
                     <StatusBadge status={e.status} />
-                    {e.usageRecords.length > 0 && <span className="text-[10.5px] text-[#999]">被引用{e.usageRecords.length}次</span>}
+                    <span className="text-[10.5px] text-[#555]">已用于脚本：{effect.adoptedScriptCount}次</span>
+                    <span className="text-[10.5px] text-[#555]">已有发布复盘：{effect.reviewedScriptCount}次</span>
+                    <span className="text-[10.5px] text-[#555]">尚未发布或未复盘：{effect.awaitingReviewCount}次</span>
+                    {effect.legacyUnverifiedCount > 0 && (
+                      <span className="text-[10.5px] text-[#999]">历史未验证：{effect.legacyUnverifiedCount}次（不计入上述统计）</span>
+                    )}
                     {e.tags.slice(0, 4).map((t, i) => (
                       <span key={i} className="max-w-[160px] truncate rounded-full bg-[#F2F1ED] px-2 py-0.5 text-[10.5px] text-[#666]">#{t}</span>
                     ))}
@@ -2258,37 +2305,57 @@ export default function KnowledgeHubPage() {
             </div>
 
             <div className="mt-4 border-t border-[#F0EFE9] pt-3.5">
-              <div className="mb-2 flex items-center gap-2">
-                <span className="text-[12px] font-bold text-[#666]">知识流转</span>
-                <StatusBadge status={detail.status} />
-              </div>
-              {detail.usageRecords.length === 0 ? (
-                <p className="text-[12px] text-[#999]">还没有被任何模块引用过。</p>
-              ) : (
-                <>
-                  <p className="mb-2 text-[12px] text-[#666]">
-                    共被引用 {detail.usageRecords.length} 次，涉及模块：{Array.from(new Set(detail.usageRecords.map(r => r.module))).join("、")}
-                  </p>
-                  <div className="flex flex-col gap-2">
-                    {detail.usageRecords.slice().reverse().map((r) => (
-                      <div key={r.id} className="rounded-[10px] bg-[#F7F6F2] p-2.5">
-                        <div className="mb-1 flex flex-wrap items-center justify-between gap-1">
-                          <span className="text-[11.5px] font-semibold text-[#1C1C1B]">{r.module}</span>
-                          <span className="text-[10.5px] text-[#999]">{new Date(r.usedAt).toLocaleString()}</span>
-                        </div>
-                        <div className="mb-1 flex items-center gap-1.5">
-                          <span className="rounded-full px-1.5 py-0.5 text-[10px] font-semibold" style={{ background: r.relevanceTier === "高度相关" ? "#EAF3DE" : r.relevanceTier === "中度相关" ? "#FBF3D6" : "#F2F1ED", color: r.relevanceTier === "高度相关" ? "#3B6D11" : r.relevanceTier === "中度相关" ? "#7A5C00" : "#888" }}>
-                            {r.relevanceTier}
-                          </span>
-                        </div>
-                        <p className="text-[11.5px] leading-5 text-[#444]">引用原因：{r.reason}</p>
-                        <p className="text-[11px] leading-5 text-[#999]">{r.relevanceReason}</p>
-                        {r.context && <p className="mt-1 text-[10.5px] text-[#BBB]">检索输入：{r.context.slice(0, 60)}{r.context.length > 60 ? "…" : ""}</p>}
+              {(() => {
+                const effect = knowledgeEffectByEntryId.get(detail.id)!;
+                return (
+                  <>
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-[12px] font-bold text-[#666]">知识效果参考</span>
+                      <StatusBadge status={detail.status} />
+                    </div>
+                    <p className="mb-2 text-[11.5px] leading-5 text-[#888]">
+                      这里只陈列真实采用记录和发布表现，不对知识是否有效作判断。
+                    </p>
+                    <div className="mb-3 flex flex-wrap gap-2 text-[11px] text-[#555]">
+                      <span>已用于脚本：{effect.adoptedScriptCount}次</span>
+                      <span>已有发布复盘：{effect.reviewedScriptCount}次</span>
+                      <span>尚未发布或未复盘：{effect.awaitingReviewCount}次</span>
+                    </div>
+                    {effect.scripts.length === 0 ? (
+                      <p className="text-[12px] text-[#999]">还没有真实确认采用这条知识的脚本。</p>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        {effect.scripts.map(({ script, usage, review }) => (
+                          <div key={script.id} className="rounded-[10px] bg-[#F7F6F2] p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-[12px] font-semibold text-[#1C1C1B]">{script.title}</span>
+                              <span className="text-[10.5px] text-[#999]">采用于{new Date(usage.usedAt).toLocaleString()}</span>
+                            </div>
+                            {review ? (
+                              <div className="mt-2 rounded-[8px] bg-white px-3 py-2 text-[11px] leading-5 text-[#555]">
+                                <p className="font-semibold text-[#333]">{review.title} · {review.platform} · {review.publishedAt}</p>
+                                <p>
+                                  播放{formatHistoricalMetric(review.metrics?.views)} · 点赞{formatHistoricalMetric(review.metrics?.likes)} · 评论{formatHistoricalMetric(review.metrics?.comments)} · 收藏{formatHistoricalMetric(review.metrics?.favorites)} · 分享{formatHistoricalMetric(review.metrics?.shares)}
+                                </p>
+                                <p>
+                                  涨粉{formatHistoricalMetric(review.metrics?.newFollowers)} · 私信{formatHistoricalMetric(review.metrics?.dms)} · 线索{formatHistoricalMetric(review.metrics?.leads)} · 转化{formatHistoricalMetric(review.metrics?.conversions)}
+                                </p>
+                              </div>
+                            ) : (
+                              <p className="mt-2 text-[11px] text-[#999]">尚未发布或未复盘</p>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                </>
-              )}
+                    )}
+                    {effect.legacyUnverifiedCount > 0 && (
+                      <div className="mt-3 rounded-[10px] bg-[#FBF3D6] px-3 py-2 text-[11px] text-[#7A5C00]">
+                        历史未验证记录{effect.legacyUnverifiedCount}次（不计入新口径）
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             <div className="mt-4 flex justify-end">

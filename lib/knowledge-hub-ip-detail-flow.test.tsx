@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
-import { createTopicBoardIPProfile } from "./topic-board-contract.fixture";
+import {
+  addEvaluatedTopicAsset,
+  addKnowledgeEntry,
+  getKnowledgeEntries,
+  recordKnowledgeUsage,
+} from "./ip-store";
+import { addVideoReviewForSource } from "./review-traceability";
+import { addScriptAssetForTopic } from "./topic-script-link";
+import {
+  createTopicBoardIPProfile,
+  createValidTopicBoardResult,
+} from "./topic-board-contract.fixture";
 
 const ipA = createTopicBoardIPProfile({ id: "ip-detail-a", name: "IP A" });
 const ipB = createTopicBoardIPProfile({ id: "ip-detail-b", name: "IP B" });
@@ -147,4 +158,190 @@ test("切换IP时关闭已打开的旧IP知识详情", async () => {
   assert.equal(view.queryAllByText("IP A私有详情的完整内容").length, 0);
   assert.equal(view.queryByText("IP A私有详情"), null);
   assert.ok(view.getByText("IP B私有详情"));
+});
+
+test("知识卡片按真实采用和发布复盘拆分统计且历史未验证记录单列", async () => {
+  const ip = createTopicBoardIPProfile();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([]));
+  const boardResult = createValidTopicBoardResult();
+  const firstTopic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const secondTopic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: `${boardResult.topic}第二条`,
+    source: "manual",
+  }, boardResult);
+  const knowledge = addKnowledgeEntry({
+    category: "IP人设资料",
+    title: "只统计真实采用的知识",
+    rawContent: "统计必须来自真实采用的脚本。",
+    tags: [], keywords: [], ipId: ip.id,
+    sourceTier: "高", sourceTierReason: "测试", contentDirection: [],
+    sourcePlatform: "测试", sourceUrl: "", note: "",
+    extractedAt: "2026-08-20T00:00:00.000Z",
+    metrics: null, viralEvaluation: null, usageRecords: [],
+    status: "未使用", dna: null,
+  });
+  const scripts = [firstTopic, secondTopic].map((topic, index) =>
+    addScriptAssetForTopic({
+      topicId: topic.id,
+      ipId: ip.id,
+      title: `真实采用脚本${index + 1}`,
+      cover: "",
+      content: "最终脚本正文",
+      status: "定稿",
+      knowledgeTracking: {
+        status: "unavailable",
+        candidateKnowledgeEntryIds: [knowledge.id],
+        verifiedAt: "2026-08-20T08:00:00.000Z",
+        usages: [],
+      },
+    })
+  );
+  for (const [index, script] of scripts.entries()) {
+    recordKnowledgeUsage(knowledge.id, {
+      module: "脚本工厂",
+      usedAt: `2026-08-2${index}T08:00:00.000Z`,
+      reason: "脚本生成成功",
+      relevanceTier: "高度相关",
+      relevanceReason: "与脚本主题直接相关",
+      context: index === 0 ? firstTopic.title : secondTopic.title,
+    }, "已用于脚本", script.id);
+  }
+  const publishedReview = addVideoReviewForSource({
+    activeIPId: ip.id,
+    source: { type: "flowpilot", scriptId: scripts[0]!.id },
+    review: {
+      title: "真实发布复盘",
+      platform: "视频号",
+      publishedAt: "2026-08-21",
+      videoUrl: "",
+      contentDirection: "商业洞察",
+      scriptText: "最终脚本正文",
+      metrics: { views: 3200, likes: 180, comments: 24, favorites: 31, shares: 12, newFollowers: 15, dms: 2, leads: 1, conversions: 0 },
+      analysis: null,
+    },
+  });
+  const [storedKnowledge] = getKnowledgeEntries();
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    ...storedKnowledge,
+    usageRecords: [{
+      ...storedKnowledge!.usageRecords[0]!,
+      id: "same-script-without-review",
+      usedAt: "2026-08-19T08:00:00.000Z",
+      reviewId: null,
+    }, ...storedKnowledge!.usageRecords.map(record =>
+      record.scriptId === scripts[0]!.id
+        ? { ...record, reviewId: "old-review" }
+        : record
+    ), {
+      id: "legacy-usage",
+      module: "脚本工厂",
+      usedAt: "2025-01-01T00:00:00.000Z",
+      reason: "历史旧记录",
+      relevanceTier: "中度相关",
+      relevanceReason: "历史数据无法验证",
+      context: "旧内容",
+      trackingStatus: "legacy_unverified",
+      topicId: null,
+      scriptId: null,
+      reviewId: null,
+      usageType: null,
+      sectionLabel: null,
+      evidenceExcerpt: null,
+    }, {
+      ...storedKnowledge!.usageRecords[1]!,
+      id: "damaged-usage-without-used-at",
+      usedAt: undefined,
+      reviewId: null,
+    }],
+  }]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    ...publishedReview,
+    id: "old-review",
+    createdAt: "2026-08-20T09:00:00.000Z",
+  }, {
+    ...publishedReview,
+    knowledgeEffectStatus: "tracked_status_pending",
+    metrics: {
+      ...publishedReview.metrics,
+      conversions: undefined,
+    },
+  }]));
+  const storagePrototype = Object.getPrototypeOf(localStorage) as Storage;
+  const originalSetItem = storagePrototype.setItem;
+  let videoReviewWritesDuringRender = 0;
+  storagePrototype.setItem = function (key: string, value: string): void {
+    if (key === "ipwr:videoReviews") videoReviewWritesDuringRender += 1;
+    originalSetItem.call(this, key, value);
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+    const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+    const user = userEvent.setup({ document });
+
+    await view.findByText("只统计真实采用的知识");
+    assert.ok(view.getByText("已用于脚本：2次"));
+    assert.ok(view.getByText("已有发布复盘：1次"));
+    assert.ok(view.getByText("尚未发布或未复盘：1次"));
+    assert.ok(view.getByText("历史未验证：1次（不计入上述统计）"));
+    assert.equal(view.queryByText(/被引用3次/), null);
+
+    await user.click(view.getByText("只统计真实采用的知识"));
+    assert.ok(view.getByText("知识效果参考"));
+    assert.ok(view.getByText("真实采用脚本1"));
+    assert.ok(view.getByText("真实采用脚本2"));
+    assert.ok(view.getByText(/播放3,200/));
+    assert.ok(view.getByText(/点赞180/));
+    assert.ok(view.getByText(/评论24/));
+    assert.ok(view.getByText(/转化—/));
+    assert.ok(view.getByText("尚未发布或未复盘"));
+    assert.ok(view.getByText("历史未验证记录1次（不计入新口径）"));
+    assert.equal(view.queryByText(/知识有效|知识无效|效果评分/), null);
+    assert.equal(videoReviewWritesDuringRender, 0);
+  } finally {
+    storagePrototype.setItem = originalSetItem;
+  }
+});
+
+test("复盘列表不是数组时安全降级为空列表", async () => {
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify({ damaged: true }));
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await view.findByText("IP A私有详情");
+  assert.ok(view.getByText("已有发布复盘：0次"));
+});
+
+test("缺少创建时间的历史复盘不会导致知识库页面崩溃", async () => {
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    id: "damaged-review-without-created-at",
+    sourceType: "external",
+    title: "损坏的历史复盘",
+  }, {
+    id: "valid-review",
+    createdAt: "2026-08-22T00:00:00.000Z",
+    sourceType: "external",
+    title: "可读取的历史复盘",
+  }]));
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await view.findByText("IP A私有详情");
+  assert.ok(view.getByText("已有发布复盘：0次"));
 });

@@ -738,7 +738,7 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
   return {
     ...e,
     category: e.category === "评论" ? "评论需求" : (e.category as KnowledgeCategory),
-    usageRecords: (e.usageRecords ?? []).map(record => ({
+    usageRecords: (Array.isArray(e.usageRecords) ? e.usageRecords : []).map(record => ({
       ...record,
       trackingStatus: record.trackingStatus ?? "legacy_unverified",
       topicId: record.topicId ?? null,
@@ -1146,6 +1146,35 @@ export function getVideoReviews(ipId?: string): VideoReview[] {
     ? collapseResult.reviews.filter(r => r.ipId === ipId)
     : collapseResult.reviews;
   return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export interface VideoReviewReadOnlySnapshot {
+  reviews: VideoReview[];
+  retainedReviewIdByRemovedId: ReadonlyMap<string, string>;
+}
+
+function isReadableVideoReview(value: unknown): value is VideoReview {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const review = value as Record<string, unknown>;
+  return typeof review.id === "string" && review.id.length > 0 &&
+    typeof review.createdAt === "string" && review.createdAt.length > 0;
+}
+
+export function getVideoReviewsReadOnly(ipId?: string): VideoReviewReadOnlySnapshot {
+  const storedReviews = readJSON<unknown>(KEY_VIDEO_REVIEWS, []);
+  const readableReviews = Array.isArray(storedReviews)
+    ? storedReviews.filter(isReadableVideoReview)
+    : [];
+  const collapseResult = collapseDuplicateVideoReviews(
+    readableReviews,
+  );
+  const filtered = ipId
+    ? collapseResult.reviews.filter(review => review.ipId === ipId)
+    : collapseResult.reviews;
+  return {
+    reviews: filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    retainedReviewIdByRemovedId: collapseResult.retainedReviewIdByRemovedId,
+  };
 }
 
 type AddVideoReviewInput = Omit<
