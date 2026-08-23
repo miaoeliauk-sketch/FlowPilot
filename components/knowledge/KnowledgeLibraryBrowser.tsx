@@ -4,10 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import {
   loadKnowledgeLibrarySnapshot,
   queryKnowledgeLibrary,
+  type KnowledgeLibraryItem,
   type KnowledgeLibrarySnapshot,
   type KnowledgeLibrarySourceKind,
   type KnowledgeLibraryTrustStatus,
 } from "@/lib/knowledge-library-view";
+import { KnowledgeDetailPanel } from "@/components/knowledge/KnowledgeDetailPanel";
 
 const TRUST_LABELS: Record<KnowledgeLibraryTrustStatus, string> = {
   ai_derived_unverified: "AI拆解，尚未验证",
@@ -21,6 +23,8 @@ const SOURCE_LABELS: Record<KnowledgeLibrarySourceKind, string> = {
   ip_original: "IP原始内容",
   hot_analysis_case: "爆款分析完整案例",
   hot_analysis_method: "爆款分析方法卡",
+  reviewed_method: "人工审核方法卡",
+  exact_template: "原文保真执行模板",
   review_experience: "人工复盘经验",
   external_case: "外部爆款案例",
   other: "其他已记录来源",
@@ -42,12 +46,14 @@ export function KnowledgeLibraryBrowser({
   const [category, setCategory] = useState("");
   const [trustStatus, setTrustStatus] = useState<KnowledgeLibraryTrustStatus | "">("");
   const [sourceKind, setSourceKind] = useState<KnowledgeLibrarySourceKind | "">("");
+  const [selectedItem, setSelectedItem] = useState<KnowledgeLibraryItem | null>(null);
 
   useEffect(() => {
     setSearch("");
     setCategory("");
     setTrustStatus("");
     setSourceKind("");
+    setSelectedItem(null);
     try {
       setSnapshot(loadKnowledgeLibrarySnapshot(activeIPId));
       setLoadError(null);
@@ -172,9 +178,20 @@ export function KnowledgeLibraryBrowser({
                 </p>
                 {item.relatedKnowledge.length > 0 && <p>关联案例／方法卡{item.relatedKnowledge.length}条</p>}
               </div>
+              <button
+                type="button"
+                aria-label={`查看${item.title}详情`}
+                onClick={() => setSelectedItem(item)}
+                className="mt-3 w-full rounded-[9px] border border-[#DAD9D2] py-2 text-[12px] font-semibold text-[#555] hover:border-[#639922] hover:text-[#3B6D11]"
+              >
+                查看详情与证据
+              </button>
             </article>
           ))}
         </div>
+      )}
+      {selectedItem && (
+        <KnowledgeDetailPanel item={selectedItem} onClose={() => setSelectedItem(null)} />
       )}
     </section>
   );

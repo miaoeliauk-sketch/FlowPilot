@@ -267,3 +267,126 @@ test("切换IP过程中不会把旧知识短暂显示成新IP归属", async () =
   assert.equal(observedFalseOwnership, false);
   assert.equal(view.queryByText("IP A私有知识"), null);
 });
+
+test("知识详情展示原始来源、真实证据和历史未验证记录但不替用户下结论", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    entry("detail-method", "可追溯方法卡", activeIP.id, {
+      rawContent: "方法卡完整原文。",
+      trustStatus: "ai_derived_unverified",
+      sourceReference: {
+        sourceType: "hot_analysis",
+        analysisId: "analysis-detail",
+        role: "method_card",
+        groupItemId: "method-1",
+      },
+      usageRecords: [
+        {
+          id: "legacy-detail",
+          module: "脚本工厂",
+          usedAt: "2025-01-01T00:00:00.000Z",
+          reason: "旧记录无法核验",
+          relevanceTier: "中度相关",
+          relevanceReason: "历史数据",
+          context: "旧脚本",
+          trackingStatus: "legacy_unverified",
+          topicId: null,
+          scriptId: null,
+          reviewId: null,
+          usageType: null,
+          sectionLabel: null,
+          evidenceExcerpt: null,
+        },
+        {
+          id: "trusted-detail",
+          module: "脚本工厂",
+          usedAt: "2026-08-23T01:00:00.000Z",
+          reason: "最终正文真实采用",
+          relevanceTier: "高度相关",
+          relevanceReason: "正文存在证据",
+          context: "生成脚本",
+          trackingStatus: "script_adopted",
+          topicId: "topic-detail",
+          scriptId: "script-detail",
+          reviewId: "review-detail",
+          usageType: "structure",
+          sectionLabel: "开头",
+          evidenceExcerpt: "真实采用片段",
+        },
+      ],
+    }),
+    entry("detail-case", "来源完整案例", activeIP.id, {
+      category: "爆款案例",
+      rawContent: "爆款分析保存的完整案例原文。",
+      sourceReference: {
+        sourceType: "hot_analysis",
+        analysisId: "analysis-detail",
+        role: "viral_case",
+        groupItemId: "case-1",
+      },
+    }),
+  ]));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-detail",
+    ipId: activeIP.id,
+    topicId: "topic-detail",
+    title: "真实采用脚本",
+    cover: "",
+    content: "真实采用片段",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "verified",
+      candidateKnowledgeEntryIds: ["detail-method"],
+      verifiedAt: "2026-08-23T01:00:00.000Z",
+      usages: [{
+        knowledgeEntryId: "detail-method",
+        usageType: "structure",
+        sectionLabel: "开头",
+        evidenceExcerpt: "真实采用片段",
+        reason: "最终正文真实采用",
+      }],
+    },
+    createdAt: "2026-08-23T01:00:00.000Z",
+  }]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    id: "review-detail",
+    ipId: activeIP.id,
+    title: "真实发布复盘",
+    platform: "视频号",
+    publishedAt: "2026-08-24",
+    videoUrl: "https://example.com/video",
+    contentDirection: "知识",
+    topicId: "topic-detail",
+    scriptId: "script-detail",
+    sourceType: "flowpilot",
+    traceabilityStatus: "traceable",
+    knowledgeEffectStatus: "tracked",
+    scriptText: "真实采用片段",
+    metrics: { views: 1200, likes: 88, comments: 12, favorites: 30, shares: 9, newFollowers: 6, dms: 2, leads: 1, conversions: 0 },
+    analysis: null,
+    savedToKnowledge: false,
+    knowledgeEntryId: null,
+    createdAt: "2026-08-25T00:00:00.000Z",
+    updatedAt: "2026-08-25T00:00:00.000Z",
+    manualReviewStatus: "completed",
+    manualReviewTags: ["标题结构有效"],
+    manualReviewNote: "发布数据已人工复盘。",
+  }]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看可追溯方法卡详情" }));
+  const detail = await view.findByRole("dialog", { name: "知识详情：可追溯方法卡" });
+  assert.match(detail.textContent ?? "", /方法卡完整原文/);
+  assert.match(detail.textContent ?? "", /来源完整案例/);
+  assert.match(detail.textContent ?? "", /真实采用脚本/);
+  assert.match(detail.textContent ?? "", /真实发布复盘/);
+  assert.match(detail.textContent ?? "", /播放1,200/);
+  assert.match(detail.textContent ?? "", /历史未验证记录/);
+  assert.match(detail.textContent ?? "", /旧记录无法核验/);
+  assert.equal(/方法有效|方法无效|判定有效|判定无效/.test(detail.textContent ?? ""), false);
+});

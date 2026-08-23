@@ -26,6 +26,8 @@ export type KnowledgeLibrarySourceKind =
   | "ip_original"
   | "hot_analysis_case"
   | "hot_analysis_method"
+  | "reviewed_method"
+  | "exact_template"
   | "review_experience"
   | "external_case"
   | "other"
@@ -43,7 +45,48 @@ export interface KnowledgeLibraryRelatedKnowledge {
   id: string;
   title: string;
   category: string;
-  role: "viral_case" | "method_card";
+  role: "viral_case" | "method_card" | "reviewed_method" | "execution_template";
+}
+
+export interface KnowledgeLibraryOriginalSource {
+  kind: KnowledgeLibrarySourceKind;
+  content: string;
+  sourceName: string | null;
+  sourcePlatform: string | null;
+  sourceUrl: string | null;
+  analysisId: string | null;
+  templateKey: string | null;
+  templateVersion: string | null;
+  reviewStatus: string | null;
+}
+
+export interface KnowledgeLibraryEffectEvidence {
+  scriptId: string;
+  scriptTitle: string;
+  usedAt: string;
+  sectionLabel: string | null;
+  evidenceExcerpt: string | null;
+  reviewId: string | null;
+  reviewTitle: string | null;
+  platform: string | null;
+  publishedAt: string | null;
+  videoUrl: string | null;
+  metrics: VideoReview["metrics"] | null;
+  manualReviewStatus: VideoReview["manualReviewStatus"] | null;
+  manualReviewNote: string | null;
+}
+
+export interface KnowledgeLibraryLegacyUsage {
+  id: string;
+  usedAt: string;
+  module: string;
+  reason: string;
+}
+
+export interface KnowledgeLibraryDetail {
+  originalSource: KnowledgeLibraryOriginalSource;
+  effectEvidence: KnowledgeLibraryEffectEvidence[];
+  legacyUnverifiedRecords: KnowledgeLibraryLegacyUsage[];
 }
 
 export interface KnowledgeLibraryItem {
@@ -59,6 +102,7 @@ export interface KnowledgeLibraryItem {
   source: KnowledgeLibrarySource;
   relatedKnowledge: KnowledgeLibraryRelatedKnowledge[];
   effect: KnowledgeEffectReference;
+  detail: KnowledgeLibraryDetail;
   entry: KnowledgeEntry;
 }
 
@@ -96,12 +140,34 @@ function safeTrustStatus(value: unknown): KnowledgeLibraryTrustStatus {
     : "not_in_trust_system";
 }
 
+function hasTrustedExecutionTemplate(entry: KnowledgeEntry): boolean {
+  const template = entry.executionTemplate;
+  return Boolean(
+    template &&
+    cleanOptionalText(template.templateKey) &&
+    cleanOptionalText(template.version) &&
+    typeof template.contentHash === "string" &&
+    /^[a-f0-9]{64}$/.test(template.contentHash)
+  );
+}
+
+function isReviewedMethod(entry: KnowledgeEntry): boolean {
+  return entry.sourcePlatform === "人工确认方法卡" &&
+    cleanStringArray(entry.tags).includes("人工确认方法卡");
+}
+
 function describeSource(entry: KnowledgeEntry): KnowledgeLibrarySource {
   const sourceMember = trustedSourceGroupMember(entry);
   let kind: KnowledgeLibrarySourceKind;
   let label: string;
 
-  if (sourceMember?.role === "method_card") {
+  if (hasTrustedExecutionTemplate(entry)) {
+    kind = "exact_template";
+    label = "原文保真执行模板";
+  } else if (isReviewedMethod(entry)) {
+    kind = "reviewed_method";
+    label = "人工审核方法卡";
+  } else if (sourceMember?.role === "method_card") {
     kind = "hot_analysis_method";
     label = "爆款分析拆解的方法卡";
   } else if (sourceMember?.role === "viral_case") {
@@ -134,6 +200,61 @@ function describeSource(entry: KnowledgeEntry): KnowledgeLibrarySource {
     name: cleanOptionalText(entry.sourceName),
     platform: cleanOptionalText(entry.sourcePlatform),
     url: cleanOptionalText(entry.sourceUrl),
+  };
+}
+
+function buildKnowledgeLibraryDetail(
+  entry: KnowledgeEntry,
+  source: KnowledgeLibrarySource,
+  effect: KnowledgeEffectReference,
+): KnowledgeLibraryDetail {
+  const sourceMember = trustedSourceGroupMember(entry);
+  const template = hasTrustedExecutionTemplate(entry) ? entry.executionTemplate : null;
+  const usageRecords = Array.isArray(entry.usageRecords) ? entry.usageRecords : [];
+  return {
+    originalSource: {
+      kind: source.kind,
+      content: typeof entry.rawContent === "string" ? entry.rawContent : "",
+      sourceName: source.name,
+      sourcePlatform: source.platform,
+      sourceUrl: source.url,
+      analysisId: sourceMember?.analysisId ?? null,
+      templateKey: cleanOptionalText(template?.templateKey),
+      templateVersion: cleanOptionalText(template?.version),
+      reviewStatus: source.kind === "reviewed_method"
+        ? "人工已审核，来源和效果仍待验证"
+        : null,
+    },
+    effectEvidence: effect.scripts.map(({ script, usage, review }) => ({
+      scriptId: script.id,
+      scriptTitle: script.title,
+      usedAt: usage.usedAt,
+      sectionLabel: cleanOptionalText(usage.sectionLabel),
+      evidenceExcerpt: cleanOptionalText(usage.evidenceExcerpt),
+      reviewId: review?.id ?? null,
+      reviewTitle: review ? cleanOptionalText(review.title) : null,
+      platform: review ? cleanOptionalText(review.platform) : null,
+      publishedAt: review ? cleanOptionalText(review.publishedAt) : null,
+      videoUrl: review ? cleanOptionalText(review.videoUrl) : null,
+      metrics: review?.metrics ?? null,
+      manualReviewStatus: review?.manualReviewStatus ?? null,
+      manualReviewNote: review ? cleanOptionalText(review.manualReviewNote) : null,
+    })),
+    legacyUnverifiedRecords: usageRecords
+      .filter(usage =>
+        Boolean(usage) &&
+        typeof usage === "object" &&
+        usage.trackingStatus === "legacy_unverified" &&
+        typeof usage.id === "string" &&
+        typeof usage.usedAt === "string" &&
+        usage.usedAt.length > 0
+      )
+      .map(usage => ({
+        id: usage.id,
+        usedAt: usage.usedAt,
+        module: typeof usage.module === "string" ? usage.module : "未记录模块",
+        reason: typeof usage.reason === "string" ? usage.reason : "历史记录缺少说明",
+      })),
   };
 }
 
@@ -184,17 +305,29 @@ export function createKnowledgeLibrarySnapshot(input: {
     input.retainedReviewIdByRemovedId,
   );
   const sourceGroups = new Map<string, TrustedSourceGroupMember[]>();
+  const exactTemplatesBySource = new Map<string, KnowledgeEntry[]>();
+  const reviewedMethodsBySource = new Map<string, KnowledgeEntry[]>();
   for (const entry of visibleEntries) {
     const member = trustedSourceGroupMember(entry);
     if (!member) continue;
     const key = sourceGroupKey(entry, member.analysisId);
     sourceGroups.set(key, [...(sourceGroups.get(key) ?? []), member]);
   }
+  for (const entry of visibleEntries) {
+    const sourceName = cleanOptionalText(entry.sourceName);
+    if (!sourceName) continue;
+    const key = `${entry.ipId ?? "__global__"}\u0000${sourceName}`;
+    if (hasTrustedExecutionTemplate(entry)) {
+      exactTemplatesBySource.set(key, [...(exactTemplatesBySource.get(key) ?? []), entry]);
+    } else if (isReviewedMethod(entry)) {
+      reviewedMethodsBySource.set(key, [...(reviewedMethodsBySource.get(key) ?? []), entry]);
+    }
+  }
 
   return {
     items: visibleEntries.map(entry => {
       const sourceMember = trustedSourceGroupMember(entry);
-      const relatedKnowledge = sourceMember
+      const sourceGroupRelations: KnowledgeLibraryRelatedKnowledge[] = sourceMember
         ? (sourceGroups.get(sourceGroupKey(entry, sourceMember.analysisId)) ?? [])
           .filter(member => member.entry.id !== entry.id && member.role !== sourceMember.role)
           .map(member => ({
@@ -204,9 +337,30 @@ export function createKnowledgeLibrarySnapshot(input: {
             role: member.role,
           }))
         : [];
+      const sourceName = cleanOptionalText(entry.sourceName);
+      const documentSourceKey = sourceName
+        ? `${entry.ipId ?? "__global__"}\u0000${sourceName}`
+        : null;
+      const documentRelations: KnowledgeLibraryRelatedKnowledge[] = documentSourceKey && isReviewedMethod(entry)
+        ? (exactTemplatesBySource.get(documentSourceKey) ?? []).map(related => ({
+          id: related.id,
+          title: related.title,
+          category: related.category,
+          role: "execution_template",
+        }))
+        : documentSourceKey && hasTrustedExecutionTemplate(entry)
+          ? (reviewedMethodsBySource.get(documentSourceKey) ?? []).map(related => ({
+            id: related.id,
+            title: related.title,
+            category: related.category,
+            role: "reviewed_method",
+          }))
+          : [];
+      const relatedKnowledge = [...sourceGroupRelations, ...documentRelations];
       const effect = buildKnowledgeEffectReference(entry, effectIndex);
       const derivedTrustStatus = deriveKnowledgeTrustStatus(entry, effectIndex);
       const tags = cleanStringArray(entry.tags);
+      const source = describeSource(entry);
       return {
         id: entry.id,
         title: entry.title,
@@ -217,9 +371,10 @@ export function createKnowledgeLibrarySnapshot(input: {
         tags,
         keywords: cleanStringArray(entry.keywords),
         trustStatus: safeTrustStatus(derivedTrustStatus),
-        source: describeSource(entry),
+        source,
         relatedKnowledge,
         effect,
+        detail: buildKnowledgeLibraryDetail(entry, source, effect),
         entry,
       };
     }),

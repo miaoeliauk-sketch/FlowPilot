@@ -491,3 +491,99 @@ test("损坏记录不能把爆款案例伪装成方法卡并建立虚假来源�
     "unknown",
   );
 });
+
+test("知识详情如实区分四类原始来源并保留模板版本", () => {
+  const snapshot = createKnowledgeLibrarySnapshot({
+    activeIPId: "ip-a",
+    entries: [
+      knowledgeEntry("ip-original", "ip-a", {
+        category: "IP原始内容",
+        title: "直播原文",
+        rawContent: "老师直播逐字原文。",
+        sourceKind: "直播逐字稿",
+      }),
+      knowledgeEntry("viral-case", "ip-a", {
+        category: "爆款案例",
+        title: "完整爆款案例",
+        rawContent: "完整案例正文。",
+        sourceReference: {
+          sourceType: "hot_analysis",
+          analysisId: "analysis-detail",
+          role: "viral_case",
+          groupItemId: "case-1",
+        },
+      }),
+      knowledgeEntry("reviewed-method", null, {
+        title: "人工审核方法卡",
+        rawContent: "审核后的方法卡正文。",
+        sourceName: "精准客户行为诊断法",
+        sourcePlatform: "人工确认方法卡",
+        tags: ["人工确认方法卡"],
+      }),
+      knowledgeEntry("exact-template", null, {
+        title: "标准执行模板",
+        rawContent: "必须逐字保留的模板正文。",
+        sourcePlatform: "原文保真保存",
+        sourceName: "精准客户行为诊断法",
+        executionTemplate: {
+          templateKey: "precise-customer-behavior-diagnosis",
+          version: "1.0.0",
+          contentHash: "a".repeat(64),
+        },
+      }),
+    ],
+  });
+
+  assert.deepEqual(
+    snapshot.items.map(item => ({
+      id: item.id,
+      kind: item.detail.originalSource.kind,
+      content: item.detail.originalSource.content,
+      version: item.detail.originalSource.templateVersion,
+      reviewStatus: item.detail.originalSource.reviewStatus,
+    })),
+    [
+      { id: "ip-original", kind: "ip_original", content: "老师直播逐字原文。", version: null, reviewStatus: null },
+      { id: "viral-case", kind: "hot_analysis_case", content: "完整案例正文。", version: null, reviewStatus: null },
+      { id: "reviewed-method", kind: "reviewed_method", content: "审核后的方法卡正文。", version: null, reviewStatus: "人工已审核，来源和效果仍待验证" },
+      { id: "exact-template", kind: "exact_template", content: "必须逐字保留的模板正文。", version: "1.0.0", reviewStatus: null },
+    ],
+  );
+  assert.deepEqual(
+    snapshot.items.find(item => item.id === "reviewed-method")?.relatedKnowledge,
+    [{ id: "exact-template", title: "标准执行模板", category: "文案框架方法库", role: "execution_template" }],
+  );
+});
+
+test("知识详情陈列真实采用证据并把历史未验证记录单独隔离", () => {
+  const trusted = adoptedUsage("method-detail");
+  const legacy = adoptedUsage("method-detail", {
+    id: "legacy-usage",
+    trackingStatus: "legacy_unverified",
+    scriptId: null,
+    reviewId: null,
+    usedAt: "2025-01-01T00:00:00.000Z",
+    reason: "历史记录无法核验",
+  });
+  const method = knowledgeEntry("method-detail", "ip-a", {
+    trustStatus: "ai_derived_unverified",
+    usageRecords: [legacy, trusted],
+  });
+  const snapshot = createKnowledgeLibrarySnapshot({
+    activeIPId: "ip-a",
+    entries: [method],
+    scripts: [adoptedScript(method.id)],
+    reviews: [publishedReview()],
+  });
+  const detail = snapshot.items[0]!.detail;
+
+  assert.equal(detail.effectEvidence[0]?.scriptTitle, "真实采用脚本");
+  assert.equal(detail.effectEvidence[0]?.reviewTitle, "真实发布复盘");
+  assert.equal(detail.effectEvidence[0]?.metrics?.views, 1000);
+  assert.deepEqual(detail.legacyUnverifiedRecords, [{
+    id: "legacy-usage",
+    usedAt: "2025-01-01T00:00:00.000Z",
+    module: "脚本工厂",
+    reason: "历史记录无法核验",
+  }]);
+});
