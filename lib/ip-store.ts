@@ -697,12 +697,64 @@ function migrateScriptAsset(asset: ScriptAsset): ScriptAsset {
   };
 }
 
+function readScriptAssetSafely(value: unknown): ScriptAsset | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.id !== "string" ||
+    typeof raw.ipId !== "string" ||
+    (raw.topicId !== undefined && typeof raw.topicId !== "string") ||
+    typeof raw.title !== "string" ||
+    typeof raw.cover !== "string" ||
+    typeof raw.content !== "string" ||
+    (raw.status !== "草稿" && raw.status !== "定稿" && raw.status !== "已拍摄") ||
+    typeof raw.createdAt !== "string"
+  ) {
+    return null;
+  }
+  let knowledgeTracking: ScriptKnowledgeTracking = createNotTrackedKnowledgeState();
+  const tracking = raw.knowledgeTracking;
+  if (tracking && typeof tracking === "object" && !Array.isArray(tracking)) {
+    const candidate = tracking as Record<string, unknown>;
+    if (
+      candidate.status === "verified" &&
+      Array.isArray(candidate.candidateKnowledgeEntryIds) &&
+      candidate.candidateKnowledgeEntryIds.every(id => typeof id === "string") &&
+      typeof candidate.verifiedAt === "string"
+    ) {
+      try {
+        knowledgeTracking = parseVerifiedScriptKnowledgeTracking({
+          candidateKnowledgeEntryIds: candidate.candidateKnowledgeEntryIds as string[],
+          finalScriptText: raw.content,
+          verifiedAt: candidate.verifiedAt,
+          usages: candidate.usages,
+        });
+      } catch {
+        knowledgeTracking = createNotTrackedKnowledgeState();
+      }
+    }
+  }
+  return {
+    ...(raw as unknown as ScriptAsset),
+    knowledgeTracking,
+  };
+}
+
 export function getScriptAssets(ipId: string): ScriptAsset[] {
   const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
   return all
     .map(migrateScriptAsset)
     .filter(a => a.ipId === ipId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getScriptAssetsReadOnly(ipId: string): ScriptAsset[] {
+  const raw = readJSON<unknown>(KEY_SCRIPT_ASSETS, []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(readScriptAssetSafely)
+    .filter((asset): asset is ScriptAsset => asset !== null && asset.ipId === ipId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 export function addScriptAsset(input: NewScriptAssetInput): ScriptAsset {
@@ -966,6 +1018,43 @@ export function getHotAnalysisKnowledgeGroup(
       .filter(item => item.reference!.role === "method_card")
       .map(item => item.entry),
   };
+}
+
+export function getHotAnalysisKnowledgeGroupsByAnalysisId(
+  activeIPId: string | null,
+): ReadonlyMap<
+  string,
+  HotAnalysisKnowledgeGroup
+> {
+  const grouped = new Map<string, Array<{
+    entry: KnowledgeEntry;
+    reference: HotAnalysisKnowledgeSourceReference;
+  }>>();
+  for (const entry of getKnowledgeEntries()) {
+    if (entry.ipId !== null && entry.ipId !== activeIPId) continue;
+    const reference = getValidHotAnalysisSourceReference(entry);
+    if (!reference) continue;
+    const members = grouped.get(reference.analysisId) ?? [];
+    members.push({ entry, reference });
+    grouped.set(reference.analysisId, members);
+  }
+
+  const result = new Map<string, HotAnalysisKnowledgeGroup>();
+  for (const [analysisId, members] of grouped) {
+    if (new Set(members.map(member => member.entry.ipId)).size !== 1) continue;
+    const viralCases = members.filter(member => member.reference.role === "viral_case");
+    result.set(analysisId, {
+      analysisId,
+      viralCase: viralCases.length === 1 ? viralCases[0]!.entry : null,
+      methodCards: members
+        .filter(member => member.reference.role === "method_card")
+        .sort((left, right) =>
+          left.reference.groupItemId.localeCompare(right.reference.groupItemId)
+        )
+        .map(member => member.entry),
+    });
+  }
+  return result;
 }
 
 export type KnowledgeEntryEditablePatch = Omit<

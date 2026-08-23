@@ -1,12 +1,28 @@
 "use client";
 import { apiFetch } from "@/lib/api-fetch";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useIP } from "@/lib/ip-context";
-import { KnowledgeEntry, HotMaterialAnalysis } from "@/lib/types";
+import { KnowledgeEntry, HotMaterialAnalysis, KnowledgeTrustStatus } from "@/lib/types";
 import {
-  getKnowledgeEntries, addKnowledgeEntry,
-  getHotAnalyses, addHotAnalysis, deleteHotAnalysis, markHotAnalysisAdded,
+  getKnowledgeEntries,
+  getHotAnalyses, addHotAnalysis, deleteHotAnalysis,
+  saveHotAnalysisKnowledgeEntries,
+  getHotAnalysisKnowledgeGroupsByAnalysisId,
+  getScriptAssetsReadOnly,
+  getVideoReviewsReadOnly,
 } from "@/lib/ip-store";
+import type { HotAnalysisKnowledgeGroup } from "@/lib/ip-store";
+import {
+  buildHotAnalysisMethodCardContent,
+  runHotAnalysisKnowledgePrecheck,
+} from "@/lib/hot-analysis-knowledge";
+import type { KnowledgeIntakePrecheckAssessment } from "@/lib/knowledge-intake-precheck";
+import {
+  buildKnowledgeEffectReference,
+  createKnowledgeEffectReferenceIndex,
+  deriveKnowledgeTrustStatus,
+} from "@/lib/knowledge-effect-reference";
+import type { KnowledgeEffectReferenceIndex } from "@/lib/knowledge-effect-reference";
 import { Icon } from "@/components/ui/icon";
 import { Select } from "@/components/ui/select";
 
@@ -132,6 +148,87 @@ const CATEGORY_COLOR: Record<string, string> = {
   "开头方法库": "#F0C86B", "文案框架方法库": "#E88A66",
 };
 
+const SIMILARITY_LABEL = {
+  exact: "完全相同",
+  high: "高度相似",
+  partial: "部分相似",
+} as const;
+
+const TRUST_STATUS_LABEL: Record<KnowledgeTrustStatus, string> = {
+  ai_derived_unverified: "AI拆解，尚未验证",
+  adopted_awaiting_effect: "已被采用，等待效果",
+  effect_evidence_awaiting_judgment: "已有发布效果证据，待人工判断",
+  human_confirmed_effective: "人工确认有效",
+};
+
+function formatHistoricalMetric(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toLocaleString()
+    : "—";
+}
+
+function KnowledgePrecheckPanel({
+  title,
+  assessment,
+  onConfirm,
+  onCancel,
+  confirmLabel,
+  cancelLabel = "暂不入库",
+  saving,
+}: {
+  title: string;
+  assessment: KnowledgeIntakePrecheckAssessment;
+  onConfirm: () => void;
+  onCancel: () => void;
+  confirmLabel: string;
+  cancelLabel?: string;
+  saving: boolean;
+}) {
+  return (
+    <section className="rounded-[12px] border border-[#E5E4DE] bg-[#FCFCFA] p-4">
+      <h3 className="text-[13px] font-bold text-[#333]">{title}</h3>
+      <p className="mt-1 text-[11.5px] text-[#666]">
+        {assessment.quality.status === "pass"
+          ? "基础质量：未发现明显问题"
+          : "基础质量：需要人工检查"}
+      </p>
+      {assessment.quality.issues.length > 0 && (
+        <ul className="mt-1 list-disc space-y-1 pl-4 text-[11.5px] text-[#8A6418]">
+          {assessment.quality.issues.map(issue => <li key={issue.code}>{issue.message}</li>)}
+        </ul>
+      )}
+      {assessment.similarEntries.length === 0 ? (
+        <p className="mt-2 text-[11.5px] text-[#888]">全库暂未发现相似内容</p>
+      ) : (
+        <div className="mt-2 space-y-2">
+          {assessment.similarEntries.map(similar => (
+            <div key={similar.knowledgeId} className="rounded-[8px] bg-white px-3 py-2 text-[11.5px] text-[#666]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-[#F2EEDF] px-2 py-0.5 font-bold text-[#735F21]">
+                  {SIMILARITY_LABEL[similar.tier]}
+                </span>
+                <span>{similar.title || "未命名内容"}｜{similar.category || "分类未标注"}</span>
+              </div>
+              <p className="mt-1">相似原因：{similar.reasons.join("；")}</p>
+              <p className="mt-1 text-[#888]">{similar.ownershipLabel}｜{similar.sourceDescription}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" onClick={onConfirm} disabled={saving}
+          className="rounded-[8px] bg-[#1C1C1B] px-3 py-1.5 text-[11.5px] font-bold text-white disabled:opacity-40">
+          {saving ? "保存中…" : confirmLabel}
+        </button>
+        <button type="button" onClick={onCancel} disabled={saving}
+          className="rounded-[8px] border border-[#D8D5C9] bg-white px-3 py-1.5 text-[11.5px] text-[#666] disabled:opacity-40">
+          {cancelLabel}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 const METHOD_CATEGORY_FALLBACK: MethodCard["targetCategory"] = "选题方法库";
 const METHOD_CATEGORY_MAP: Record<string, MethodCard["targetCategory"]> = {
   "案例": "选题方法库",
@@ -241,17 +338,6 @@ function normalizeMethodCards(rawCards: unknown, result: AnalyzeResult, inputRaw
   return cards;
 }
 
-function buildMethodCardContent(card: MethodCard): string {
-  return [
-    `核心方法：${card.coreMethod || card.summary}`,
-    `适用场景：${(card.applicableScenes?.length ? card.applicableScenes : ["短视频内容生产"]).join("、")}`,
-    `触发关键词：${(card.triggerKeywords?.length ? card.triggerKeywords : [card.name]).join("、")}`,
-    `AI调用方式：${card.aiUsage || "当用户输入相似选题或脚本时，参考此方法判断内容角度和表达结构。"}`,
-    `示例：${card.example || card.evidenceQuote || card.name}`,
-    `不适用情况：${card.unsuitableCases || "缺少明确用户问题、场景或表达目标时不建议套用。"}`,
-  ].join("\n\n");
-}
-
 function buildOriginalContentMetadata(inputRaw: string, analysisId: string, sourceUrl: string) {
   return JSON.stringify({
     metadata: {
@@ -303,15 +389,61 @@ function RadarTab() {
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [added, setAdded] = useState(false);
   const [caseAdded, setCaseAdded] = useState(false);
+  const [casePrecheck, setCasePrecheck] = useState<KnowledgeIntakePrecheckAssessment | null>(null);
+  const [caseSaving, setCaseSaving] = useState(false);
+  const [methodPrechecks, setMethodPrechecks] = useState<KnowledgeIntakePrecheckAssessment[] | null>(null);
+  const [methodDecisions, setMethodDecisions] = useState<Array<"include" | "skip" | null>>([]);
+  const [methodSaving, setMethodSaving] = useState(false);
   const [addedCount, setAddedCount] = useState(0);          // 本次入库的条目数（方法卡场景可能 >1）
   const [history, setHistory] = useState<HotMaterialAnalysis[]>([]);
+  const [historyKnowledgeGroups, setHistoryKnowledgeGroups] = useState<ReadonlyMap<string, HotAnalysisKnowledgeGroup>>(new Map());
+  const [effectIndex, setEffectIndex] = useState<KnowledgeEffectReferenceIndex>(() => createKnowledgeEffectReferenceIndex([], []));
   const [lastAnalysisId, setLastAnalysisId] = useState<string | null>(null);
+  const previousActiveIPId = useRef<string | null | undefined>(undefined);
+  const analysisRequestSequence = useRef(0);
 
-  useEffect(() => { setHistory(getHotAnalyses()); }, []);
+  function refreshHistory() {
+    const scopedHistory = getHotAnalyses().filter(item =>
+      activeIP ? item.ipId === activeIP.id : item.ipId === null
+    );
+    setHistory(scopedHistory);
+    setHistoryKnowledgeGroups(getHotAnalysisKnowledgeGroupsByAnalysisId(activeIP?.id ?? null));
+    if (!activeIP) {
+      setEffectIndex(createKnowledgeEffectReferenceIndex([], []));
+      return;
+    }
+    const reviewSnapshot = getVideoReviewsReadOnly(activeIP.id);
+    setEffectIndex(createKnowledgeEffectReferenceIndex(
+      getScriptAssetsReadOnly(activeIP.id),
+      reviewSnapshot.reviews,
+      reviewSnapshot.retainedReviewIdByRemovedId,
+    ));
+  }
+
+  useEffect(() => { refreshHistory(); }, [activeIP?.id]);
+
+  useEffect(() => {
+    const currentActiveIPId = activeIP?.id ?? null;
+    const previous = previousActiveIPId.current;
+    previousActiveIPId.current = currentActiveIPId;
+    if (previous === undefined || previous === currentActiveIPId) return;
+    analysisRequestSequence.current += 1;
+    setLoading(false);
+    setResult(null);
+    setLastAnalysisId(null);
+    setCasePrecheck(null);
+    setMethodPrechecks(null);
+    setMethodDecisions([]);
+    setAdded(false);
+    setCaseAdded(false);
+    setAddedCount(0);
+    setError(null);
+  }, [activeIP?.id]);
 
   async function handleAnalyze() {
     if (!inputRaw.trim()) { setError("请提供要分析的内容"); return; }
-    setLoading(true); setError(null); setResult(null); setAdded(false); setCaseAdded(false); setAddedCount(0);
+    const requestSequence = ++analysisRequestSequence.current;
+    setLoading(true); setError(null); setResult(null); setAdded(false); setCaseAdded(false); setAddedCount(0); setCasePrecheck(null); setMethodPrechecks(null); setMethodDecisions([]);
     try {
       const res = await apiFetch("/api/hot-analysis/analyze", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -321,13 +453,16 @@ function RadarTab() {
           metrics: hasMetrics ? { likes: Number(likes) || 0, comments: Number(comments) || 0, shares: Number(shares) || 0, favorites: Number(favorites) || 0, aboveAccountAverage: aboveAvg } : null,
         }),
       });
+      if (requestSequence !== analysisRequestSequence.current) return;
       let data: Record<string, any>;
       try {
         data = await res.json();
       } catch {
+        if (requestSequence !== analysisRequestSequence.current) return;
         setError(res.ok ? "AI返回格式异常" : "AI请求失败");
         return;
       }
+      if (requestSequence !== analysisRequestSequence.current) return;
       if (!res.ok) {
         if (process.env.NODE_ENV !== "production") {
           console.error("[hot-analysis]", {
@@ -356,97 +491,112 @@ function RadarTab() {
         dna: isTitle ? EMPTY_DNA : (normalizedResult.dna ?? EMPTY_DNA),
       });
       setLastAnalysisId(saved.id);
-      setHistory(getHotAnalyses());
+      refreshHistory();
     } catch {
-      setError("AI请求失败");
-    } finally { setLoading(false); }
+      if (requestSequence === analysisRequestSequence.current) setError("AI请求失败");
+    } finally {
+      if (requestSequence === analysisRequestSequence.current) setLoading(false);
+    }
+  }
+
+  function getMethodCardsForSave(): MethodCard[] {
+    if (!result) return [];
+    if (result.mode !== "title") return result.methodCards;
+    return [{
+      name: inputRaw.slice(0, 40) || "标题方法",
+      targetCategory: "标题方法库",
+      summary: result.titleEvaluation?.overallSummary ?? "标题诊断沉淀",
+      evidenceQuote: inputRaw,
+      coreMethod: result.titleEvaluation?.overallSummary ?? "根据标题吸引力、选题潜力和痛点清晰度判断标题是否值得继续扩展。",
+      applicableScenes: ["标题诊断", "标题优化", "选题补全"],
+      triggerKeywords: compactKeywords([inputRaw, result.titleStructure, "标题"]),
+      aiUsage: "当用户输入相似标题时，参考此标题结构判断是否值得补全为完整内容。",
+      example: inputRaw,
+      unsuitableCases: "没有明确对象、场景或利益点的标题不建议直接套用。",
+    }];
   }
 
   function handleAddToKB() {
     if (!result || !lastAnalysisId) return;
-
-    // ── 标题模式：作为一条标题案例入到"标题方法库"，原文=标题本身 ──
-    if (result.mode === "title") {
-      const entry = addKnowledgeEntry({
-        category: "标题方法库",
-        title: inputRaw.slice(0, 40) || "未命名标题",
-        rawContent: buildMethodCardContent({
-          name: inputRaw.slice(0, 40) || "标题方法",
-          targetCategory: "标题方法库",
-          summary: result.titleEvaluation?.overallSummary ?? "标题诊断沉淀",
-          evidenceQuote: inputRaw,
-          coreMethod: result.titleEvaluation?.overallSummary ?? "根据标题吸引力、选题潜力和痛点清晰度判断标题是否值得继续扩展。",
-          applicableScenes: ["标题诊断", "标题优化", "选题补全"],
-          triggerKeywords: compactKeywords([inputRaw, result.titleStructure, "标题"]),
-          aiUsage: "当用户输入相似标题时，参考此标题结构判断是否值得补全为完整内容。",
-          example: inputRaw,
-          unsuitableCases: "没有明确对象、场景或利益点的标题不建议直接套用。",
-        }),
-        tags: [result.titleStructure ?? "标题案例"],
-        keywords: [],
-        ipId: activeIP?.id ?? null,
-        sourceTier: "中",
-        sourceTierReason: "标题级素材，未验证完整传播表现",
-        contentDirection: result.contentDirection, sourcePlatform: "", sourceUrl,
-        note: buildOriginalContentMetadata(inputRaw, lastAnalysisId, sourceUrl),
-        extractedAt: new Date().toISOString(),
-        metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
-      });
-      markHotAnalysisAdded(lastAnalysisId, entry.id);
-      setAdded(true); setAddedCount(1); setHistory(getHotAnalyses());
-      return;
-    }
-
-    // ── 逐字稿/文案模式：拆方法卡入库，原文只作为来源记录写在 note 里 ──
-    if (result.methodCards.length === 0) {
+    const cards = getMethodCardsForSave();
+    if (cards.length === 0) {
       setError("本次分析没有提炼出可复用的方法卡（可能内容偏流水账或质量不足），不建议入库。若确需保留原文，请去知识库中心手动添加。");
       return;
     }
-    const sourceLabel = result.title || inputRaw.slice(0, 20);
-    const entryIds: string[] = [];
-    for (const card of result.methodCards) {
-      const entry = addKnowledgeEntry({
-        category: card.targetCategory,          // ← 每张卡自动入到对应分类
-        title: card.name,                        // ← 方法名做条目标题
-        rawContent: buildMethodCardContent(card),
-        tags: [card.name, card.targetCategory, ...(card.triggerKeywords ?? []).slice(0, 4)],
-        keywords: card.triggerKeywords ?? [],
-        ipId: activeIP?.id ?? null,
-        sourceTier: result.hasRealMetrics ? "高" : "中",
-        sourceTierReason: result.hasRealMetrics
-          ? `从「${sourceLabel}」（有真实互动数据）中沉淀`
-          : `从「${sourceLabel}」中沉淀，未验证真实传播表现`,
-        contentDirection: result.contentDirection,
-        sourcePlatform: result.platform || "",
-        sourceUrl,
-        note: buildOriginalContentMetadata(inputRaw, lastAnalysisId, sourceUrl),
-        extractedAt: new Date().toISOString(),
-        // 方法论条目不带互动指标 / 整段评估 / DNA —— 这些属于案例级别的元数据
-        metrics: null, viralEvaluation: null, dna: null,
-        usageRecords: [], status: "未使用",
-      });
-      entryIds.push(entry.id);
-    }
-    // markHotAnalysisAdded 接口只支持关联单个 entryId，用第一条作为主关联即可
-    markHotAnalysisAdded(lastAnalysisId, entryIds[0]);
-    setAdded(true); setAddedCount(entryIds.length); setHistory(getHotAnalyses());
+    const alreadySavedKnowledgeEntryIds = getKnowledgeEntries()
+      .filter(item => item.sourceReference?.analysisId === lastAnalysisId)
+      .map(item => item.id);
+    const precheck = runHotAnalysisKnowledgePrecheck({
+      analysisId: lastAnalysisId,
+      viralCase: null,
+      methodCards: cards,
+      ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
+      alreadySavedKnowledgeEntryIds,
+    });
+    setMethodPrechecks(precheck.methodCards);
+    setMethodDecisions(cards.map(() => null));
   }
 
-  function handleAddViralCase() {
-    if (!result || !lastAnalysisId || !result.evaluation || !result.dna) return;
-    const admission = getViralCaseAdmission(result);
-    if (!admission.canCollect) {
-      setError(`不建议收录到爆款案例库：${admission.reasons.join("；")}`);
-      return;
+  function handleConfirmMethodCards() {
+    if (!result || !lastAnalysisId || methodSaving) return;
+    const cards = getMethodCardsForSave();
+    if (methodDecisions.some(decision => decision === null)) return;
+    const selected = cards
+      .map((card, index) => ({ card, index }))
+      .filter(({ index }) => methodDecisions[index] === "include");
+    if (selected.length === 0) return;
+    const sourceLabel = result.title || inputRaw.slice(0, 20);
+    setMethodSaving(true);
+    setError(null);
+    try {
+      saveHotAnalysisKnowledgeEntries({
+        analysisId: lastAnalysisId,
+        entries: selected.map(({ card, index }) => ({
+          slotId: `method-card-${index + 1}`,
+          role: "method_card" as const,
+          entry: {
+            category: card.targetCategory,
+            title: card.name,
+            rawContent: buildHotAnalysisMethodCardContent(card),
+            tags: [card.name, card.targetCategory, ...(card.triggerKeywords ?? []).slice(0, 4)],
+            keywords: card.triggerKeywords ?? [],
+            ipId: activeIP?.id ?? null,
+            sourceTier: result.hasRealMetrics ? "高" as const : "中" as const,
+            sourceTierReason: result.hasRealMetrics
+              ? `从「${sourceLabel}」（有真实互动数据）中沉淀`
+              : `从「${sourceLabel}」中沉淀，未验证真实传播表现`,
+            contentDirection: result.contentDirection,
+            sourcePlatform: result.platform || "",
+            sourceUrl,
+            note: buildOriginalContentMetadata(inputRaw, lastAnalysisId, sourceUrl),
+            extractedAt: new Date().toISOString(),
+            metrics: null,
+            viralEvaluation: null,
+            dna: null,
+          },
+        })),
+      });
+      setAdded(true);
+      setAddedCount(selected.length);
+      setMethodPrechecks(null);
+      refreshHistory();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "方法卡保存失败，请稍后重试");
+    } finally {
+      setMethodSaving(false);
     }
-    const entry = addKnowledgeEntry({
-      category: "爆款案例",
+  }
+
+  function buildViralCaseSaveEntry() {
+    if (!result || !lastAnalysisId || !result.evaluation || !result.dna) return null;
+    return {
+      category: "爆款案例" as const,
       title: result.title || inputRaw.slice(0, 40) || "未命名爆款案例",
       rawContent: inputRaw,
       tags: [...result.contentDirection, result.evaluation.hookType ?? "爆款案例"].filter(Boolean) as string[],
       keywords: compactKeywords([result.title, result.evaluation.hookType, result.dna.titleStructure, result.dna.userNeedLayer, ...result.contentDirection]),
       ipId: activeIP?.id ?? null,
-      sourceTier: "高",
+      sourceTier: "高" as const,
       sourceTierReason: "由爆款分析中心严格收录：真实互动数据、内容层、结构层和自我检查均通过。",
       contentDirection: result.contentDirection,
       sourcePlatform: result.platform || "",
@@ -461,17 +611,106 @@ function RadarTab() {
         aboveAccountAverage: aboveAvg,
       },
       viralEvaluation: result.evaluation,
-      usageRecords: [],
-      status: "未使用",
       dna: result.dna,
+    };
+  }
+
+  function handleAddViralCase() {
+    if (!result || !lastAnalysisId || !result.evaluation || !result.dna) return;
+    const admission = getViralCaseAdmission(result);
+    if (!admission.canCollect) {
+      setError(`不建议收录到爆款案例库：${admission.reasons.join("；")}`);
+      return;
+    }
+    const entry = buildViralCaseSaveEntry();
+    if (!entry) return;
+    const alreadySavedKnowledgeEntryIds = getKnowledgeEntries()
+      .filter(item => item.sourceReference?.analysisId === lastAnalysisId)
+      .map(item => item.id);
+    const precheck = runHotAnalysisKnowledgePrecheck({
+      analysisId: lastAnalysisId,
+      viralCase: { title: entry.title, rawContent: entry.rawContent },
+      methodCards: [],
+      ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
+      alreadySavedKnowledgeEntryIds,
     });
-    markHotAnalysisAdded(lastAnalysisId, entry.id);
-    setCaseAdded(true);
-    setHistory(getHotAnalyses());
+    setCasePrecheck(precheck.viralCase);
+  }
+
+  function handleConfirmViralCase() {
+    if (!lastAnalysisId || caseSaving) return;
+    const entry = buildViralCaseSaveEntry();
+    if (!entry) return;
+    setCaseSaving(true);
+    setError(null);
+    try {
+      saveHotAnalysisKnowledgeEntries({
+        analysisId: lastAnalysisId,
+        entries: [{ slotId: "viral-case", role: "viral_case", entry }],
+      });
+      setCaseAdded(true);
+      setCasePrecheck(null);
+      refreshHistory();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "爆款案例保存失败，请稍后重试");
+    } finally {
+      setCaseSaving(false);
+    }
   }
 
   const isTitleMode = inputType === "title";
   const viralAdmission = getViralCaseAdmission(result);
+  const methodCardsForSave = getMethodCardsForSave();
+  const methodChoicesComplete = methodPrechecks !== null
+    && methodDecisions.length === methodPrechecks.length
+    && methodDecisions.every(decision => decision !== null);
+  const hasSelectedMethod = methodDecisions.some(decision => decision === "include");
+  const methodPrecheckSection = methodPrechecks && !added ? (
+    <section className="rounded-[12px] border border-[#DCDAD2] bg-[#F7F6F2] p-4">
+      <h3 className="text-[13px] font-bold text-[#1C1C1B]">方法卡入库前检查</h3>
+      <p className="mt-1 text-[11.5px] text-[#666]">请逐张查看依据，并明确选择继续入库或暂不入库。</p>
+      <div className="mt-3 space-y-3">
+        {methodPrechecks.map((assessment, index) => {
+          const card = methodCardsForSave[index];
+          if (!card) return null;
+          const decision = methodDecisions[index];
+          if (decision) {
+            return (
+              <div key={card.name} className="rounded-[10px] border border-[#E5E4DE] bg-white px-3 py-2 text-[11.5px] text-[#555]">
+                {card.name}：{decision === "include" ? "已选择继续入库" : "已选择暂不入库"}
+                <button
+                  type="button"
+                  onClick={() => setMethodDecisions(current => current.map((value, itemIndex) => itemIndex === index ? null : value))}
+                  className="ml-2 text-[#639922]"
+                >重新选择</button>
+              </div>
+            );
+          }
+          return (
+            <KnowledgePrecheckPanel
+              key={card.name}
+              title={`${card.name}：检查结果`}
+              assessment={assessment}
+              onConfirm={() => setMethodDecisions(current => current.map((value, itemIndex) => itemIndex === index ? "include" : value))}
+              onCancel={() => setMethodDecisions(current => current.map((value, itemIndex) => itemIndex === index ? "skip" : value))}
+              confirmLabel={`继续入库：${card.name}`}
+              cancelLabel={`暂不入库：${card.name}`}
+              saving={false}
+            />
+          );
+        })}
+      </div>
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <button type="button" onClick={() => { setMethodPrechecks(null); setMethodDecisions([]); }} className="rounded-[9px] border border-[#D8D6CF] px-4 py-2 text-[12px] text-[#666]">取消本次入库</button>
+        <button
+          type="button"
+          onClick={handleConfirmMethodCards}
+          disabled={!methodChoicesComplete || !hasSelectedMethod || methodSaving}
+          className="rounded-[9px] bg-[#1C1C1B] px-4 py-2 text-[12px] font-semibold text-white disabled:opacity-40"
+        >{methodSaving ? "保存中…" : "保存已选择的方法卡"}</button>
+      </div>
+    </section>
+  ) : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -572,9 +811,11 @@ function RadarTab() {
             </div>
           </div>
 
+          {methodPrecheckSection}
+
           <div className="flex items-center justify-between border-t border-[#F0EFE9] pt-3">
             <span className="text-[11.5px] text-[#888]">入库位置：标题方法库</span>
-            <button onClick={handleAddToKB} disabled={added} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">
+            <button onClick={handleAddToKB} disabled={added || methodPrechecks !== null} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">
               {added ? "已加入标题方法库" : "加入标题方法库"}
             </button>
           </div>
@@ -689,6 +930,19 @@ function RadarTab() {
             )}
           </div>
 
+          {casePrecheck && !caseAdded && (
+            <KnowledgePrecheckPanel
+              title="爆款案例入库前检查"
+              assessment={casePrecheck}
+              onConfirm={handleConfirmViralCase}
+              onCancel={() => setCasePrecheck(null)}
+              confirmLabel="确认继续收录爆款案例"
+              saving={caseSaving}
+            />
+          )}
+
+          {methodPrecheckSection}
+
           <div className="flex items-center justify-between border-t border-[#F0EFE9] pt-3">
             <span className="text-[11.5px] text-[#888]">
               {added
@@ -699,12 +953,12 @@ function RadarTab() {
             </span>
             <div className="flex flex-wrap justify-end gap-2">
               {viralAdmission.canCollect && (
-                <button onClick={handleAddViralCase} disabled={caseAdded}
+                <button onClick={handleAddViralCase} disabled={caseAdded || caseSaving || Boolean(casePrecheck)}
                   className="rounded-[10px] bg-[#EAF3DE] px-5 py-2.5 text-[13px] font-semibold text-[#3B6D11] disabled:opacity-40">
                   {caseAdded ? "已收录爆款案例" : "收录到爆款案例库"}
                 </button>
               )}
-              <button onClick={handleAddToKB} disabled={added || result.methodCards.length === 0}
+              <button onClick={handleAddToKB} disabled={added || result.methodCards.length === 0 || methodPrechecks !== null}
                 className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">
                 {added ? `已入库 (${addedCount})` : "拆解为方法卡"}
               </button>
@@ -717,20 +971,57 @@ function RadarTab() {
         <div>
           <div className="mb-2 text-[12px] font-bold text-[#888]">历史分析记录（{history.length}）</div>
           <div className="flex flex-col gap-1.5">
-            {history.slice(0, 10).map(h => (
-              <div key={h.id} className="flex items-center justify-between rounded-[10px] bg-[#F7F6F2] px-3 py-2 text-[12px]">
-                <span className="flex items-center gap-2 text-[#444]">
-                  <span>{h.title || h.inputRaw.slice(0, 24)}</span>
-                  {h.inputType === "title"
-                    ? <span className="rounded-full bg-white px-2 py-0.5 text-[10.5px] font-bold text-[#666]">标题诊断</span>
-                    : <GradeBadge grade={h.evaluation.grade} />}
-                </span>
-                <div className="flex items-center gap-2">
-                  {h.addedToKnowledgeBase && <span className="text-[10.5px] text-[#3B6D11]">已入库</span>}
-                  <button onClick={() => { deleteHotAnalysis(h.id); setHistory(getHotAnalyses()); }} className="text-[#999] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
+            {history.slice(0, 10).map(h => {
+              const group = historyKnowledgeGroups.get(h.id);
+              return (
+                <div key={h.id} className="rounded-[10px] bg-[#F7F6F2] px-3 py-2 text-[12px]">
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-2 text-[#444]">
+                      <span>{h.title || h.inputRaw.slice(0, 24)}</span>
+                      {h.inputType === "title"
+                        ? <span className="rounded-full bg-white px-2 py-0.5 text-[10.5px] font-bold text-[#666]">标题诊断</span>
+                        : <GradeBadge grade={h.evaluation.grade} />}
+                    </span>
+                    <button onClick={() => { deleteHotAnalysis(h.id); refreshHistory(); }} className="text-[#999] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
+                  </div>
+                  {group && (
+                    <div className="mt-2 border-t border-[#E5E4DE] pt-2">
+                      <div className="text-[11px] font-semibold text-[#555]">
+                        案例{group.viralCase ? 1 : 0}条｜方法卡{group.methodCards.length}张
+                      </div>
+                      {group.methodCards.map(card => {
+                        const trustStatus = deriveKnowledgeTrustStatus(card, effectIndex);
+                        const effect = buildKnowledgeEffectReference(card, effectIndex);
+                        return (
+                          <div key={card.id} className="mt-2 rounded-[8px] bg-white px-3 py-2 text-[11px] text-[#666]">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-[#333]">{card.title}</span>
+                              {trustStatus && <span className="rounded-full bg-[#F2EEDF] px-2 py-0.5 text-[#735F21]">{TRUST_STATUS_LABEL[trustStatus]}</span>}
+                            </div>
+                            <p className="mt-1">已用于脚本{effect.adoptedScriptCount}次｜已有发布复盘{effect.reviewedScriptCount}次｜尚未发布或未复盘{effect.awaitingReviewCount}次</p>
+                            {effect.scripts.map(({ script, review }) => (
+                              <div key={script.id} className="mt-2 border-t border-[#F0EFE9] pt-2">
+                                <p className="font-semibold text-[#444]">{script.title || "未命名脚本"}</p>
+                                {review ? (
+                                  <>
+                                    <p className="mt-1">{review.title || "未命名复盘"}｜{review.platform || "平台未记录"}｜{review.publishedAt || "发布时间未记录"}</p>
+                                    <p className="mt-1 text-[#777]">
+                                      播放{formatHistoricalMetric(review.metrics?.views)}｜点赞{formatHistoricalMetric(review.metrics?.likes)}｜评论{formatHistoricalMetric(review.metrics?.comments)}｜收藏{formatHistoricalMetric(review.metrics?.favorites)}｜分享{formatHistoricalMetric(review.metrics?.shares)}
+                                    </p>
+                                  </>
+                                ) : (
+                                  <p className="mt-1 text-[#999]">尚未发布或尚未完成发布复盘</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

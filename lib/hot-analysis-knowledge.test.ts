@@ -3,6 +3,7 @@ import { after, test } from "node:test";
 import {
   deleteHotAnalysis,
   getHotAnalysisKnowledgeGroup,
+  getHotAnalysisKnowledgeGroupsByAnalysisId,
   getKnowledgeEntries,
   recordKnowledgeUsage,
   saveHotAnalysisKnowledgeEntries,
@@ -728,6 +729,37 @@ test("旧知识只展示真实存在的来源关联且不根据备注补造缺�
   assert.deepEqual(
     group?.methodCards.map(entry => entry.id),
     ["explicitly-linked-method"],
+  );
+});
+
+test("历史来源组查询按当前IP收窄且没有当前IP时只读取全局知识", () => {
+  const linkedMethod = (id: string, analysisId: string, ipId: string | null) => knowledgeEntry({
+    id,
+    category: "开头方法库",
+    title: id,
+    rawContent: `【核心方法】${id}`,
+    ipId,
+    trustStatus: "ai_derived_unverified",
+    sourceReference: {
+      sourceType: "hot_analysis",
+      analysisId,
+      role: "method_card",
+      groupItemId: "method-card-1",
+    },
+  });
+  storage.seedKnowledge([
+    linkedMethod("current-method", "analysis-current", "ip-a"),
+    linkedMethod("other-method", "analysis-other", "ip-b"),
+    linkedMethod("global-method", "analysis-global", null),
+  ]);
+
+  assert.deepEqual(
+    [...getHotAnalysisKnowledgeGroupsByAnalysisId("ip-a").keys()].sort(),
+    ["analysis-current", "analysis-global"],
+  );
+  assert.deepEqual(
+    [...getHotAnalysisKnowledgeGroupsByAnalysisId(null).keys()],
+    ["analysis-global"],
   );
 });
 
