@@ -370,6 +370,49 @@ test("统一加载入口只读当前IP快照且没有当前IP时只返回全局�
   }
 });
 
+test("统一加载入口不会让其他IP的损坏采用记录阻断当前IP浏览", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    get length() { return values.size; },
+    clear() { values.clear(); },
+    getItem(key: string) { return values.get(key) ?? null; },
+    key(index: number) { return [...values.keys()][index] ?? null; },
+    removeItem(key: string) { values.delete(key); },
+    setItem(key: string, value: string) { values.set(key, value); },
+  } satisfies Storage;
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+
+  try {
+    storage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+      knowledgeEntry("global-entry", null),
+      knowledgeEntry("current-entry", "ip-a"),
+      {
+        ...knowledgeEntry("other-broken-entry", "ip-b"),
+        usageRecords: [null],
+      },
+    ]));
+    storage.setItem("ipwr:scriptAssets", JSON.stringify([]));
+    storage.setItem("ipwr:videoReviews", JSON.stringify([]));
+
+    assert.deepEqual(
+      loadKnowledgeLibrarySnapshot("ip-a").items.map(item => item.id).sort(),
+      ["current-entry", "global-entry"],
+    );
+    assert.deepEqual(
+      loadKnowledgeLibrarySnapshot(null).items.map(item => item.id),
+      ["global-entry"],
+    );
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else delete (globalThis as Record<string, unknown>).window;
+    if (previousStorage) Object.defineProperty(globalThis, "localStorage", previousStorage);
+    else delete (globalThis as Record<string, unknown>).localStorage;
+  }
+});
+
 test("知识浏览安全降级损坏的可选字段且不伪造可信度或来源关系", () => {
   const broken = {
     ...knowledgeEntry("broken-entry", null),

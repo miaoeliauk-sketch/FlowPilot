@@ -7,7 +7,7 @@ import {
 } from "./knowledge-effect-reference";
 import { filterKnowledgeVisibleToIP } from "./knowledge-scope";
 import {
-  getKnowledgeEntries,
+  getKnowledgeEntriesForLibraryView,
   getScriptAssetsReadOnly,
   getVideoReviewsReadOnly,
 } from "./ip-store";
@@ -260,13 +260,13 @@ export function loadKnowledgeLibrarySnapshot(
   if (!activeIPId) {
     return createKnowledgeLibrarySnapshot({
       activeIPId: null,
-      entries: getKnowledgeEntries(),
+      entries: getKnowledgeEntriesForLibraryView(null),
     });
   }
   const reviewSnapshot = getVideoReviewsReadOnly(activeIPId);
   return createKnowledgeLibrarySnapshot({
     activeIPId,
-    entries: getKnowledgeEntries(),
+    entries: getKnowledgeEntriesForLibraryView(activeIPId),
     scripts: getScriptAssetsReadOnly(activeIPId),
     reviews: reviewSnapshot.reviews,
     retainedReviewIdByRemovedId: reviewSnapshot.retainedReviewIdByRemovedId,

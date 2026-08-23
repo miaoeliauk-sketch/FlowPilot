@@ -826,6 +826,15 @@ export function getKnowledgeEntries(category?: KnowledgeCategory): KnowledgeEntr
   return filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+// 知识浏览专用：先按明确归属收窄原始记录，再迁移可见数据。
+// 这样其他IP的损坏可选字段不会阻断当前IP浏览，也不会进入页面状态。
+export function getKnowledgeEntriesForLibraryView(activeIPId: string | null): KnowledgeEntry[] {
+  return readKnowledgeEntriesStrict()
+    .filter(entry => entry.ipId === null || (activeIPId !== null && entry.ipId === activeIPId))
+    .map(migrateKnowledgeEntry)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 export function getKnowledgeEntriesForFullLibraryComparison(): KnowledgeEntry[] {
   return getKnowledgeEntries();
 }

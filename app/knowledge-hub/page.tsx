@@ -30,6 +30,7 @@ import {
 } from "@/lib/knowledge-hub-view";
 import { buildKnowledgeEffectReference, createKnowledgeEffectReferenceIndex } from "@/lib/knowledge-effect-reference";
 import { assessVideoReviewTraceability } from "@/lib/review-traceability";
+import { KnowledgeLibraryBrowser } from "@/components/knowledge/KnowledgeLibraryBrowser";
 
 const SOURCE_ANALYSIS_KIND_LABEL: Record<string, string> = {
   question: "老师在回答什么",
@@ -1182,8 +1183,8 @@ function AddCoverModal({ activeIPId, onClose, onSaved }: {
 
 export default function KnowledgeHubPage() {
   const { ips, loading: ipLoading, activeIP } = useIP();
-  // 视图模式：legacy=旧Tab视图（完整保留），unified=新统一视图（筛选器）
-  const [viewMode, setViewMode] = useState<"legacy" | "unified">("legacy");
+  // 默认只读浏览；原有录入、导入和专项库能力收在次级管理入口。
+  const [viewMode, setViewMode] = useState<"browse" | "legacy" | "unified">("browse");
   const [scopeFilter, setScopeFilter] = useState<KnowledgeHubSection>("global");
   const [globalCatFilter, setGlobalCatFilter] = useState<GlobalCategoryId>("定位方法库");
   const [ipCatFilter, setIpCatFilter] = useState<IPCategoryId>("IP人设资料");
@@ -1213,6 +1214,7 @@ export default function KnowledgeHubPage() {
     const scope = new URLSearchParams(window.location.search).get("scope");
     if (["global", "ip", "viral", "hook", "voice", "material"].includes(scope ?? "")) {
       setScopeFilter(scope as KnowledgeHubSection);
+      setViewMode("legacy");
     }
   }, []);
 
@@ -1436,8 +1438,22 @@ export default function KnowledgeHubPage() {
     setVoiceSamples(getAllVoiceSamples());
     setHookEntries(getHookEntries());
   }
-  useEffect(refresh, []);
   useEffect(() => {
+    if (viewMode !== "legacy") {
+      setEntries([]);
+      setVoiceSamples([]);
+      setHookEntries([]);
+      return;
+    }
+    refresh();
+  }, [viewMode]);
+  useEffect(() => {
+    if (viewMode !== "legacy") {
+      setKnowledgeEffectScripts([]);
+      setTraceableVideoReviews([]);
+      setRetainedReviewIdByRemovedId(new Map());
+      return;
+    }
     setKnowledgeEffectScripts(ips.flatMap(ip => getScriptAssets(ip.id)));
     const reviewSnapshot = getVideoReviewsReadOnly();
     setTraceableVideoReviews(
@@ -1446,7 +1462,7 @@ export default function KnowledgeHubPage() {
       ),
     );
     setRetainedReviewIdByRemovedId(reviewSnapshot.retainedReviewIdByRemovedId);
-  }, [ips]);
+  }, [ips, viewMode]);
   async function refreshCovers() {
     const requestId = ++coverRequestIdRef.current;
     const requestedIPId = activeIP?.id ?? null;
@@ -1471,11 +1487,17 @@ export default function KnowledgeHubPage() {
     setDetail(null);
     setCoverDetail(null);
     setShowAddCover(false);
+    if (viewMode !== "legacy") {
+      setCoverRefs([]);
+      setCoverLoadError(null);
+      coverRequestIdRef.current += 1;
+      return;
+    }
     void refreshCovers();
     return () => { coverRequestIdRef.current += 1; };
     // 当前IP改变时必须重新按归属读取封面。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIP?.id]);
+  }, [activeIP?.id, viewMode]);
 
   async function handleBatchAnalyze() {
     const pending = getUnanalyzedHookEntries();
@@ -1523,7 +1545,10 @@ export default function KnowledgeHubPage() {
     : scopeFilter === "ip"
       ? ipCatFilter
       : null;
-  const scopeEntries = entries.filter(e => matchesKnowledgeHubSection({
+  const legacyEntries = viewMode === "legacy" ? entries : [];
+  const legacyVoiceSamples = viewMode === "legacy" ? voiceSamples : [];
+  const legacyHookEntries = viewMode === "legacy" ? hookEntries : [];
+  const scopeEntries = legacyEntries.filter(e => matchesKnowledgeHubSection({
     category: e.category,
     normalizedCategory: getNormalizedCategory(e),
     ipId: e.ipId,
@@ -1532,7 +1557,7 @@ export default function KnowledgeHubPage() {
     selectedCategory: null,
     activeIPId: activeIP?.id ?? null,
   }));
-  const scopedEntries = entries.filter(e => matchesKnowledgeHubSection({
+  const scopedEntries = legacyEntries.filter(e => matchesKnowledgeHubSection({
     category: e.category,
     normalizedCategory: getNormalizedCategory(e),
     ipId: e.ipId,
@@ -1560,13 +1585,13 @@ export default function KnowledgeHubPage() {
     traceableVideoReviews,
     retainedReviewIdByRemovedId,
   );
-  const knowledgeEffectByEntryId = new Map(entries.map(entry => [
+  const knowledgeEffectByEntryId = new Map(legacyEntries.map(entry => [
     entry.id,
     buildKnowledgeEffectReference(entry, knowledgeEffectIndex),
   ]));
-  const filteredSamples = voiceSamples.filter(s => !q || s.title.toLowerCase().includes(q));
-  const filteredHooks = hookEntries.filter(h => !q || h.hookText.toLowerCase().includes(q) || h.title.toLowerCase().includes(q));
-  const unanalyzedCount = hookEntries.filter(h => !h.analyzed).length;
+  const filteredSamples = legacyVoiceSamples.filter(s => !q || s.title.toLowerCase().includes(q));
+  const filteredHooks = legacyHookEntries.filter(h => !q || h.hookText.toLowerCase().includes(q) || h.title.toLowerCase().includes(q));
+  const unanalyzedCount = legacyHookEntries.filter(h => !h.analyzed).length;
   const addAction = getKnowledgeHubAddAction(scopeFilter);
   const standardIntakeHref = scopeFilter === "ip"
     ? `/knowledge-intake?scope=ip&category=${encodeURIComponent(ipCatFilter)}`
@@ -1598,8 +1623,33 @@ export default function KnowledgeHubPage() {
             FlowPilot的底层数据中心。AI模块不应凭空生成结论，应优先检索这里积累的真实案例、口播样本、方法论和评论作为依据。
           </p>
         </div>
-        {/* 统一视图入口暂隐藏（MVP阶段）*/}
+        <div className="flex rounded-[10px] bg-[#F2F1ED] p-1">
+          <button
+            type="button"
+            onClick={() => setViewMode("browse")}
+            className="rounded-[8px] px-4 py-2 text-[12.5px] font-semibold"
+            style={viewMode === "browse" ? { background: "#1C1C1B", color: "#fff" } : { color: "#666" }}
+          >
+            知识浏览
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("legacy")}
+            className="rounded-[8px] px-4 py-2 text-[12.5px] font-semibold"
+            style={viewMode === "legacy" ? { background: "#1C1C1B", color: "#fff" } : { color: "#666" }}
+          >
+            管理知识库
+          </button>
+        </div>
       </header>
+
+      {viewMode === "browse" && (
+        <KnowledgeLibraryBrowser
+          key={activeIP?.id ?? "__global__"}
+          activeIPId={activeIP?.id ?? null}
+          activeIPName={activeIP ? getIPDisplayLabel(activeIP, ips) : null}
+        />
+      )}
 
       {/* ════════ 统一视图（V2）════════ */}
       {viewMode === "unified" && (
