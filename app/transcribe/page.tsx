@@ -3,6 +3,13 @@ import { apiFetch } from "@/lib/api-fetch";
 import { useState, useRef, useEffect } from "react";
 import { useIP } from "@/lib/ip-context";
 import { addVoiceSample, addKnowledgeEntry } from "@/lib/ip-store";
+import { addIPOriginalSource } from "@/lib/ip-original-source";
+import { DouyinTranscribePanel } from "@/components/transcribe/DouyinTranscribePanel";
+import {
+  attachManualTranscript,
+  buildTranscriptText,
+  type TranscriptSource,
+} from "@/lib/transcription-source";
 
 // ── 类型 ──
 type Step = 1 | 2 | 3 | 4;
@@ -38,7 +45,7 @@ function StepBadge({ n, current }: { n: number; current: Step }) {
 // 后续接入Whisper/DeepSeek ASR/通义听悟/火山引擎时，把hasASRConfig改为true并实现handleAutoTranscribe。
 const hasASRConfig = false;
 
-function Step1Panel({ onDone }: { onDone: (text: string, source: string) => void }) {
+function Step1Panel({ onDone }: { onDone: (text: string, source: TranscriptSource) => void }) {
   const [recordState, setRecordState] = useState<RecordState>("idle");
   const [seconds, setSeconds] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -82,6 +89,8 @@ function Step1Panel({ onDone }: { onDone: (text: string, source: string) => void
 
   return (
     <div className="flex flex-col gap-4">
+      <DouyinTranscribePanel onDone={source => onDone(buildTranscriptText(source), source)} />
+
       {/* 上传音频 */}
       <Card>
         <div className="mb-1 text-[13px] font-bold text-[#1C1C1B]">上传音频文件</div>
@@ -115,7 +124,7 @@ function Step1Panel({ onDone }: { onDone: (text: string, source: string) => void
 
             {/* 模式1：手动粘贴——始终可用 */}
             <div>
-              <button onClick={() => onDone("", "manual")}
+              <button onClick={() => onDone("", { kind: "audio", items: [{ title: audioFile.name, text: "", sourceUrl: "" }] })}
                 className="w-full rounded-[10px] bg-[#639922] px-5 py-3 text-[13px] font-semibold text-white text-left">
                 📋 我已有逐字稿，直接粘贴整理
               </button>
@@ -169,7 +178,7 @@ function Step1Panel({ onDone }: { onDone: (text: string, source: string) => void
               ⚡ 开始AI自动转写
               {!hasASRConfig && <span className="ml-2 text-[11px]">（未配置转写服务）</span>}
             </button>
-            <button onClick={() => onDone("", "manual")}
+            <button onClick={() => onDone("", { kind: "audio", items: [{ title: "在线录音", text: "", sourceUrl: "" }] })}
               className="rounded-[10px] bg-[#639922] px-4 py-2.5 text-[12.5px] font-semibold text-white text-left">
               📋 录音完成，去粘贴逐字稿 →
             </button>
@@ -179,7 +188,7 @@ function Step1Panel({ onDone }: { onDone: (text: string, source: string) => void
 
       {/* 没有上传文件时的引导 */}
       {!audioFile && recordState === "idle" && (
-        <button onClick={() => onDone("", "manual")}
+        <button onClick={() => onDone("", { kind: "manual", items: [] })}
           className="text-[12.5px] text-[#639922] underline self-start">
           我直接有逐字稿文本，跳过录音步骤 →
         </button>
@@ -189,8 +198,8 @@ function Step1Panel({ onDone }: { onDone: (text: string, source: string) => void
 }
 
 // ════════════════════ Step2：输入逐字稿 ════════════════════
-function Step2Panel({ onDone }: { onDone: (text: string) => void }) {
-  const [text, setText] = useState("");
+function Step2Panel({ initialText = "", onDone }: { initialText?: string; onDone: (text: string) => void }) {
+  const [text, setText] = useState(initialText);
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-[10px] bg-[#F7F6F2] px-4 py-3 text-[12.5px] text-[#666]">
@@ -313,32 +322,53 @@ function Step3Panel({ rawText, onDone }: { rawText: string; onDone: (result: Cle
 }
 
 // ════════════════════ Step4：保存和流转 ════════════════════
-function Step4Panel({ rawText, result }: { rawText: string; result: CleanResult }) {
+function Step4Panel({ rawText, result, source }: { rawText: string; result: CleanResult; source: TranscriptSource }) {
   const { activeIP } = useIP();
   const [saved, setSaved] = useState<string[]>([]);
+  const isDouyin = source.kind === "douyin";
+  const sourceLabel = isDouyin ? "抖音逐字稿" : source.kind === "audio" ? "录音转逐字稿" : "手动逐字稿";
+  const sourceUrl = source.items.length === 1 ? source.items[0]?.sourceUrl ?? "" : "";
 
   function handleSaveVoiceSample() {
     if (!activeIP) { alert("请先在IP身份中心选择一个IP"); return; }
     addVoiceSample({
       ipId: activeIP.id, type: "口播逐字稿",
-      title: result.summary.theme.slice(0, 30) || "录音转写样本",
-      rawText: result.cleaned || rawText, note: `来源：录音转逐字稿 | 主题：${result.summary.theme}`,
+      title: result.summary.theme.slice(0, 30) || `${sourceLabel}样本`,
+      rawText: result.cleaned || rawText, note: `来源：${sourceLabel} | 主题：${result.summary.theme}`,
     });
     setSaved(s => [...s, "voice"]);
   }
 
   function handleSaveKnowledge() {
     if (!activeIP) { alert("请先在IP身份中心选择一个IP"); return; }
-    addKnowledgeEntry({
-      category: "方法论", title: result.summary.theme.slice(0, 40) || "录音整理内容",
-      rawContent: result.cleaned || rawText,
-      tags: ["录音转写", activeIP.name], keywords: result.summary.keyPoints.slice(0, 3),
-      ipId: activeIP.id, sourceTier: "中", sourceTierReason: "来自录音转写，内容真实但未验证传播效果",
-      contentDirection: [activeIP.contentDirection?.[0] ?? ""], sourcePlatform: "录音",
-      sourceUrl: "", note: "", extractedAt: new Date().toISOString(),
-      metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
-    });
-    setSaved(s => [...s, "knowledge"]);
+    try {
+      const sourceItems = source.items.length > 0
+        ? source.items.map(item => ({ ...item, text: item.text || rawText }))
+        : [{ title: `${sourceLabel}原文`, text: rawText, sourceUrl: "" }];
+      const sourceIds = sourceItems.map((item, index) => addIPOriginalSource({
+        ipId: activeIP.id,
+        title: item.title.trim() || `${sourceLabel}${index + 1}`,
+        sourceKind: source.kind === "manual" ? "其他" : "语音整理",
+        originalContent: item.text,
+        sourceName: isDouyin ? "抖音" : sourceLabel,
+        sourceUrl: item.sourceUrl,
+        analysis: { analyzedAt: new Date().toISOString(), parserVersion: 1, items: [] },
+      }).id);
+      addKnowledgeEntry({
+        category: "方法论", title: result.summary.theme.slice(0, 40) || "录音整理内容",
+        rawContent: result.cleaned || rawText,
+        tags: [isDouyin ? "抖音逐字稿" : source.kind === "audio" ? "录音转写" : "手动逐字稿", activeIP.name], keywords: result.summary.keyPoints.slice(0, 3),
+        ipId: activeIP.id, sourceTier: "中", sourceTierReason: `AI整理自Source：${sourceIds.join("、")}`,
+        contentDirection: [activeIP.contentDirection?.[0] ?? ""].filter(Boolean), sourcePlatform: isDouyin ? "抖音" : source.kind === "audio" ? "录音" : "手动输入",
+        sourceUrl,
+        note: JSON.stringify({ derivedFromSourceIds: sourceIds, aiCleaned: true, summary: result.summary }),
+        extractedAt: new Date().toISOString(), trustStatus: "ai_derived_unverified",
+        metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null,
+      });
+      setSaved(s => [...s, "knowledge"]);
+    } catch (saveError) {
+      alert(saveError instanceof Error ? saveError.message : "保存失败，请重试");
+    }
   }
 
   function handleCopyToClipboard(text: string) {
@@ -355,10 +385,10 @@ function Step4Panel({ rawText, result }: { rawText: string; result: CleanResult 
 
       <Card>
         <div className="mb-3 text-[13px] font-bold text-[#1C1C1B]">保存到知识库</div>
-        <p className="mb-3 text-[12px] text-[#888]">整理后的内容保存为当前IP的方法论条目，可在选题、脚本生成时自动调用。</p>
+        <p className="mb-3 text-[12px] text-[#888]">每条原始逐字稿会先独立保存并保留来源链接，再关联AI整理的方法论，可随时回看原文。</p>
         <button onClick={handleSaveKnowledge} disabled={saved.includes("knowledge")}
           className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">
-          {saved.includes("knowledge") ? "✓ 已保存到知识库" : "保存到知识库（方法论）"}
+          {saved.includes("knowledge") ? "✓ 原文和方法论已保存" : "保存原文和方法论"}
         </button>
       </Card>
 
@@ -388,32 +418,33 @@ function Step4Panel({ rawText, result }: { rawText: string; result: CleanResult 
 export default function TranscribePage() {
   const [step, setStep] = useState<Step>(1);
   const [rawText, setRawText] = useState("");
+  const [source, setSource] = useState<TranscriptSource>({ kind: "manual", items: [] });
   const [cleanResult, setCleanResult] = useState<CleanResult | null>(null);
 
   return (
     <div className="min-h-screen p-6 md:p-8">
       <header className="mb-6">
         <div className="mb-1.5 text-[13px] text-[#8A8A86]">
-          <a href="/" className="font-semibold text-[#639922]">工作台</a> / 录音转逐字稿
+          <a href="/" className="font-semibold text-[#639922]">工作台</a> / 逐字稿中心
         </div>
-        <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">录音转逐字稿中心</h1>
+        <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">逐字稿中心</h1>
         <p className="mt-1.5 max-w-[600px] text-[13.5px] leading-6 text-[#8A8A86]">
-          录音 / 上传音频 → 粘贴逐字稿 → AI清洗+分段+摘要 → 保存到知识库或IP口播样本
+          抖音链接 / 录音 / 上传音频 → 生成或粘贴逐字稿 → AI清洗+分段+摘要 → 保存到知识库或IP口播样本
         </p>
       </header>
 
       <div className="rounded-[10px] bg-[#F7F6F2] px-4 py-2.5 mb-5 text-[12.5px] text-[#666]">
-        三种用法都支持：① 直接粘贴已有逐字稿 → ② 先录音/上传再用剪映转写 → ③ 手动整理后粘贴。所有路径都可以完整走完清洗+摘要+保存。
+        四种用法都支持：① 抖音链接自动提取 → ② 直接粘贴已有逐字稿 → ③ 先录音或上传再转写 → ④ 手动整理后粘贴。所有路径都可以完整走完清洗、摘要和保存。
       </div>
 
       <div className="mb-6 flex flex-wrap gap-4">
         {([1, 2, 3, 4] as Step[]).map(n => <StepBadge key={n} n={n} current={step} />)}
       </div>
 
-      {step === 1 && <Step1Panel onDone={(text, source) => { setRawText(text); setStep(2); }} />}
-      {step === 2 && <Step2Panel onDone={(text) => { setRawText(text); setStep(3); }} />}
+      {step === 1 && <Step1Panel onDone={(text, nextSource) => { setRawText(text); setSource(nextSource); setStep(text.trim() ? 3 : 2); }} />}
+      {step === 2 && <Step2Panel initialText={rawText} onDone={(text) => { setRawText(text); setSource(current => attachManualTranscript(current, text)); setStep(3); }} />}
       {step === 3 && <Step3Panel rawText={rawText} onDone={(result, raw) => { setCleanResult(result); setRawText(raw); setStep(4); }} />}
-      {step === 4 && cleanResult && <Step4Panel rawText={rawText} result={cleanResult} />}
+      {step === 4 && cleanResult && <Step4Panel rawText={rawText} result={cleanResult} source={source} />}
 
       {step > 1 && (
         <button onClick={() => setStep(s => (s - 1) as Step)} className="mt-6 text-[12.5px] text-[#639922]">

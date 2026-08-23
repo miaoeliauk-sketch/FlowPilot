@@ -30,6 +30,7 @@ const WORKFLOW_NAV: { label: string; href: string; icon: IconName; step: string 
 ];
 
 const OPERATIONS_NAV: { label: string; href: string; icon: IconName }[] = [
+  { label: "逐字稿中心", href: "/transcribe", icon: "mic" },
   { label: "智能知识入库", href: "/knowledge-intake", icon: "sparkle" },
   { label: "评论区需求雷达", href: "/comment-radar", icon: "radar" },
   { label: "爆款分析", href: "/hot-analysis", icon: "fire" },
