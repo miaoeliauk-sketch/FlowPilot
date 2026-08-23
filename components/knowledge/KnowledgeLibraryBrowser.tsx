@@ -10,26 +10,10 @@ import {
   type KnowledgeLibraryTrustStatus,
 } from "@/lib/knowledge-library-view";
 import { KnowledgeDetailPanel } from "@/components/knowledge/KnowledgeDetailPanel";
-
-const TRUST_LABELS: Record<KnowledgeLibraryTrustStatus, string> = {
-  ai_derived_unverified: "AI拆解，尚未验证",
-  adopted_awaiting_effect: "已被采用，等待效果",
-  effect_evidence_awaiting_judgment: "已有真实效果证据，待人工判断",
-  human_confirmed_effective: "人工确认有效",
-  not_in_trust_system: "未纳入可信度体系",
-};
-
-const SOURCE_LABELS: Record<KnowledgeLibrarySourceKind, string> = {
-  ip_original: "IP原始内容",
-  hot_analysis_case: "爆款分析完整案例",
-  hot_analysis_method: "爆款分析方法卡",
-  reviewed_method: "人工审核方法卡",
-  exact_template: "原文保真执行模板",
-  review_experience: "人工复盘经验",
-  external_case: "外部爆款案例",
-  other: "其他已记录来源",
-  unknown: "未记录来源",
-};
+import {
+  KNOWLEDGE_SOURCE_LABELS,
+  KNOWLEDGE_TRUST_LABELS,
+} from "@/components/knowledge/knowledge-library-labels";
 
 const EMPTY_SNAPSHOT: KnowledgeLibrarySnapshot = { items: [] };
 
@@ -117,7 +101,7 @@ export function KnowledgeLibraryBrowser({
           className="h-[40px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[13px] text-[#555]"
         >
           <option value="">全部可信度</option>
-          {(Object.entries(TRUST_LABELS) as [KnowledgeLibraryTrustStatus, string][]).map(([value, label]) => (
+          {(Object.entries(KNOWLEDGE_TRUST_LABELS) as [KnowledgeLibraryTrustStatus, string][]).map(([value, label]) => (
             <option key={value} value={value}>{label}</option>
           ))}
         </select>
@@ -128,7 +112,7 @@ export function KnowledgeLibraryBrowser({
           className="h-[40px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[13px] text-[#555]"
         >
           <option value="">全部来源</option>
-          {sourceKinds.map(value => <option key={value} value={value}>{SOURCE_LABELS[value]}</option>)}
+          {sourceKinds.map(value => <option key={value} value={value}>{KNOWLEDGE_SOURCE_LABELS[value]}</option>)}
         </select>
         {hasFilters && (
           <button
@@ -163,7 +147,7 @@ export function KnowledgeLibraryBrowser({
                 {item.content || "暂无正文摘要"}
               </p>
               <div className="mt-3 flex flex-wrap gap-1.5 text-[10.5px]">
-                <span className="rounded-full bg-[#EAF3DE] px-2 py-0.5 text-[#3B6D11]">{TRUST_LABELS[item.trustStatus]}</span>
+                <span className="rounded-full bg-[#EAF3DE] px-2 py-0.5 text-[#3B6D11]">{KNOWLEDGE_TRUST_LABELS[item.trustStatus]}</span>
                 <span className="rounded-full bg-[#EFF6FF] px-2 py-0.5 text-[#1D4ED8]">
                   {item.ipId ? `当前IP：${activeIPName ?? "未命名IP"}` : "通用知识"}
                 </span>

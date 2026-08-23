@@ -30,6 +30,7 @@ import type { CaseDecision, CoverageAssessment, CoverageSourceReference } from "
 import type { ScriptDirectorRule } from "@/lib/script-director-rule";
 import { getScriptDirectorRules } from "@/lib/script-director-rule-store";
 import { ensureShuimuranDirectorRuleMigrated } from "@/lib/shuimuran-director-rule-migration";
+import { KnowledgeInspirationDrawer } from "@/components/knowledge/KnowledgeInspirationDrawer";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -736,6 +737,7 @@ export default function ScriptFactoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScriptResult | null>(null);
   const [showContext, setShowContext] = useState(false);
+  const [showKnowledgeDrawer, setShowKnowledgeDrawer] = useState(false);
   const [apiMeta, setApiMeta] = useState<ApiMeta | null>(null);
   const [partialDraftSavedAt, setPartialDraftSavedAt] = useState<string | null>(null);
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
@@ -1298,8 +1300,20 @@ export default function ScriptFactoryPage() {
               : "输入选题或原文后直接生成；观点归属和事实核验会在正文展示后自动补充。"}
           </p>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-[#EAF3DE] px-3.5 py-1.5 text-[12px] font-semibold text-[#3B6D11]">02 · 脚本生成</span>
+        <div className="flex items-center gap-2">
+          <button type="button" aria-label="打开灵感知识库" onClick={() => setShowKnowledgeDrawer(true)} className="whitespace-nowrap rounded-[10px] border border-[#DAD9D2] bg-white px-3.5 py-1.5 text-[12px] font-semibold text-[#555]">灵感／知识库</button>
+          <span className="whitespace-nowrap rounded-full bg-[#EAF3DE] px-3.5 py-1.5 text-[12px] font-semibold text-[#3B6D11]">02 · 脚本生成</span>
+        </div>
       </header>
+
+      {showKnowledgeDrawer && (
+        <KnowledgeInspirationDrawer
+          key={activeIP?.id ?? "__global__"}
+          activeIPId={activeIP?.id ?? null}
+          activeIPName={activeIP?.name ?? null}
+          onClose={() => setShowKnowledgeDrawer(false)}
+        />
+      )}
 
       <>
 

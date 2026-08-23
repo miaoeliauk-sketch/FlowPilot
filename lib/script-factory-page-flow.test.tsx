@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
-import type { IPProfile } from "./types";
+import type { IPProfile, KnowledgeEntry } from "./types";
 
 const SHUIMURAN: IPProfile = {
   id: "ip-shuimuran",
@@ -38,6 +38,50 @@ const SHUIMURAN: IPProfile = {
   updatedAt: "2026-08-05T00:00:00.000Z",
   scriptDirectorProfileId: "shuimuran-v1",
 };
+const OTHER_IP: IPProfile = {
+  ...SHUIMURAN,
+  id: "ip-other",
+  name: "另一位老师",
+  avatar: "另",
+  color: "#654321",
+};
+
+function knowledgeEntry(
+  id: string,
+  title: string,
+  ipId: string | null,
+  overrides: Partial<KnowledgeEntry> = {},
+): KnowledgeEntry {
+  return {
+    id,
+    category: "文案框架方法库",
+    title,
+    rawContent: `${title}完整正文。`,
+    sourceKind: null,
+    sourceName: "",
+    sourceAnalysis: null,
+    tags: [],
+    keywords: [],
+    ipId,
+    sourceTier: "中",
+    sourceTierReason: "测试来源",
+    contentDirection: [],
+    sourcePlatform: "",
+    sourceUrl: "",
+    note: "",
+    createdAt: "2026-08-23T00:00:00.000Z",
+    extractedAt: null,
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    trustStatus: null,
+    sourceReference: null,
+    executionTemplate: null,
+    dna: null,
+    ...overrides,
+  };
+}
 
 function installBrowserEnvironment() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -175,6 +219,122 @@ test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口
   assert.ok(view.getByRole("button", { name: "生成完整内容" }));
   assert.equal(view.queryByRole("button", { name: "检查观点覆盖度" }), null);
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
+});
+
+test("脚本工厂可以打开只读灵感抽屉并搜索筛选和查看知识详情", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const entries = [
+    knowledgeEntry("global-template", "通用执行模板", null, {
+      category: "文案框架方法库",
+      rawContent: "通用模板逐字正文。",
+      sourceName: "标准模板",
+      sourcePlatform: "用户提供文档",
+      executionTemplate: {
+        templateKey: "standard-template",
+        version: "1.0.0",
+        contentHash: "a".repeat(64),
+      },
+    }),
+    knowledgeEntry("current-method", "当前IP反常识开头", SHUIMURAN.id, {
+      category: "开头方法库",
+      rawContent: "先给出反常识判断，再解释原因。",
+      tags: ["认知冲突"],
+      trustStatus: "ai_derived_unverified",
+      sourceReference: {
+        sourceType: "hot_analysis",
+        analysisId: "analysis-drawer",
+        role: "method_card",
+        groupItemId: "method-1",
+      },
+    }),
+    knowledgeEntry("other-private", "其他IP私有方法", "ip-other"),
+  ];
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify(entries));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([]));
+  const originalKnowledge = localStorage.getItem("ipwr:knowledgeEntries");
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "打开灵感知识库" }));
+  const drawer = await view.findByRole("dialog", { name: "灵感知识库" });
+  assert.match(drawer.textContent ?? "", /通用执行模板/);
+  assert.match(drawer.textContent ?? "", /当前IP反常识开头/);
+  assert.doesNotMatch(drawer.textContent ?? "", /其他IP私有方法/);
+
+  await user.type(view.getByRole("searchbox", { name: "搜索灵感知识" }), "认知冲突");
+  assert.match(drawer.textContent ?? "", /当前IP反常识开头/);
+  assert.doesNotMatch(drawer.textContent ?? "", /通用执行模板/);
+  await user.clear(view.getByRole("searchbox", { name: "搜索灵感知识" }));
+  await user.selectOptions(view.getByLabelText("灵感分类筛选"), "开头方法库");
+  await user.selectOptions(view.getByLabelText("灵感可信度筛选"), "ai_derived_unverified");
+  await user.selectOptions(view.getByLabelText("灵感来源筛选"), "hot_analysis_method");
+  assert.match(drawer.textContent ?? "", /当前IP反常识开头/);
+  assert.doesNotMatch(drawer.textContent ?? "", /通用执行模板/);
+
+  await user.click(view.getByRole("button", { name: "查看当前IP反常识开头详情" }));
+  const detail = await view.findByRole("dialog", { name: "知识详情：当前IP反常识开头" });
+  assert.match(detail.textContent ?? "", /先给出反常识判断，再解释原因/);
+  assert.equal(view.queryByRole("button", { name: /插入/ }), null);
+  assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), originalKnowledge);
+});
+
+test("切换IP时灵感抽屉立即清空旧结果、筛选条件和已打开详情", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN, OTHER_IP]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    knowledgeEntry("knowledge-a", "水木然私有知识", SHUIMURAN.id, { tags: ["只找水木然"] }),
+    knowledgeEntry("knowledge-b", "另一位老师私有知识", OTHER_IP.id),
+  ]));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider, useIP } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const user = userEvent.setup({ document });
+
+  function SwitchIP() {
+    const { switchIP } = useIP();
+    return <button type="button" onClick={() => switchIP(OTHER_IP.id)}>切换抽屉IP</button>;
+  }
+
+  const view = render(<IPProvider><SwitchIP /><ScriptFactoryPage /></IPProvider>);
+  await user.click(await view.findByRole("button", { name: "打开灵感知识库" }));
+  await view.findByText("水木然私有知识");
+  await user.type(view.getByRole("searchbox", { name: "搜索灵感知识" }), "只找水木然");
+  await user.click(view.getByRole("button", { name: "查看水木然私有知识详情" }));
+  assert.ok(await view.findByRole("dialog", { name: "知识详情：水木然私有知识" }));
+
+  let showedOldKnowledgeAsNewIP = false;
+  const observer = new MutationObserver(() => {
+    const drawer = view.queryByRole("dialog", { name: "灵感知识库" });
+    const text = drawer?.textContent ?? "";
+    if (text.includes("另一位老师知识") && text.includes("水木然私有知识")) {
+      showedOldKnowledgeAsNewIP = true;
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  try {
+    await user.click(view.getByRole("button", { name: "切换抽屉IP" }));
+    await view.findByText("另一位老师私有知识");
+  } finally {
+    observer.disconnect();
+  }
+
+  assert.equal(showedOldKnowledgeAsNewIP, false);
+  assert.equal(view.queryByText("水木然私有知识"), null);
+  assert.equal(view.queryByRole("dialog", { name: "知识详情：水木然私有知识" }), null);
+  assert.equal((view.getByRole("searchbox", { name: "搜索灵感知识" }) as HTMLInputElement).value, "");
 });
 
 test("水木然迁移规则待测试时不会自动启用且底层IP存储格式异常不影响生成", async () => {
