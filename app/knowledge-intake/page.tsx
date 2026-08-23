@@ -36,6 +36,12 @@ import {
   EXACT_TEMPLATE_CATEGORIES,
   saveExactKnowledgeTemplate,
 } from "@/lib/knowledge-exact-intake";
+import {
+  prepareReviewedMethodCardBatch,
+  saveReviewedMethodCardBatch,
+  type PrepareReviewedMethodCardBatchInput,
+  type PreparedReviewedMethodCardBatch,
+} from "@/lib/knowledge-reviewed-intake";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -264,6 +270,109 @@ function ExactTemplateIntakePanel({ ipNamesById }: { ipNamesById: Record<string,
   );
 }
 
+function ReviewedMethodCardIntakePanel() {
+  const [rawInput, setRawInput] = useState("");
+  const [prepared, setPrepared] = useState<PreparedReviewedMethodCardBatch | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedCount, setSavedCount] = useState(0);
+  const [error, setError] = useState("");
+
+  function invalidateCheck() {
+    setPrepared(null);
+    setConfirmed(false);
+    setSavedCount(0);
+    setError("");
+  }
+
+  function handleCheck() {
+    try {
+      const input = JSON.parse(rawInput) as PrepareReviewedMethodCardBatchInput;
+      const result = prepareReviewedMethodCardBatch(input);
+      setPrepared(result);
+      setConfirmed(false);
+      setSavedCount(0);
+      setError("");
+    } catch (checkError) {
+      setPrepared(null);
+      setConfirmed(false);
+      setSavedCount(0);
+      setError(checkError instanceof Error ? checkError.message : "全库检查失败，请重新检查");
+    }
+  }
+
+  function handleSave() {
+    if (!prepared || !confirmed || saving || savedCount > 0) return;
+    setSaving(true);
+    setError("");
+    try {
+      const savedEntries = saveReviewedMethodCardBatch(prepared);
+      setSavedCount(savedEntries.length);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "人工确认方法卡保存失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="rounded-[16px] border border-[#E5E4DE] bg-white p-5">
+      <div className="rounded-[10px] bg-[#F5F8EE] px-4 py-3 text-[12.5px] text-[#4E6C25]">
+        <strong>不会调用AI，只保存已经人工审核完成的字段</strong>
+        <p className="mt-1">系统会在保存前重新核对全库检查结果，确认后再严格写入。</p>
+      </div>
+      <label className="mt-4 block text-[12.5px] font-semibold text-[#555]">
+        已审核方法卡数据
+        <textarea
+          aria-label="已审核方法卡数据"
+          value={rawInput}
+          onChange={event => {
+            invalidateCheck();
+            setRawInput(event.target.value);
+          }}
+          rows={14}
+          placeholder="粘贴已经人工审核完成的方法卡数据"
+          className="mt-1 w-full resize-y rounded-[10px] border border-[#E5E4DE] px-3 py-2 font-mono text-[12px] leading-5 font-normal"
+        />
+      </label>
+      <div className="mt-4 flex justify-end">
+        <button
+          type="button"
+          onClick={handleCheck}
+          disabled={!rawInput.trim() || saving || savedCount > 0}
+          className="rounded-[9px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-bold text-white disabled:opacity-40"
+        >
+          检查已审核方法卡
+        </button>
+      </div>
+      {prepared && (
+        <>
+          <div className="mt-4 space-y-3">
+            {prepared.cards.map((card, index) => (
+              <article key={card.cardKey} className="rounded-[10px] border border-[#E5E4DE] p-3">
+                <h2 className="text-[13px] font-bold text-[#333]">{card.title}</h2>
+                <p className="mt-1 text-[11.5px] text-[#777]">{card.category}｜来源：{card.sourceName}</p>
+                <KnowledgePrecheckPanel assessment={prepared.assessments[index]!} />
+              </article>
+            ))}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" aria-pressed={confirmed} onClick={() => setConfirmed(true)} disabled={saving || savedCount > 0} className="rounded-[8px] border border-[#BFD59F] px-3 py-1.5 text-[11.5px] font-bold text-[#4E6C25] disabled:opacity-40">继续保存这批方法卡</button>
+            <button type="button" aria-pressed={!confirmed} onClick={() => setConfirmed(false)} disabled={saving || savedCount > 0} className="rounded-[8px] border border-[#D8D5C9] px-3 py-1.5 text-[11.5px] font-semibold text-[#666] disabled:opacity-40">暂不入库</button>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <button type="button" onClick={handleSave} disabled={!confirmed || saving || savedCount > 0} className="rounded-[9px] bg-[#639922] px-4 py-2 text-[12.5px] font-bold text-white disabled:opacity-40">
+              {savedCount > 0 ? `已保存${savedCount}张方法卡` : saving ? "正在保存…" : `确认保存${prepared.cards.length}张方法卡`}
+            </button>
+          </div>
+        </>
+      )}
+      {savedCount > 0 && <p className="mt-3 rounded-[8px] bg-[#EAF3DE] px-3 py-2 text-[12.5px] font-semibold text-[#3B6D11]">已严格保存{savedCount}张人工确认方法卡</p>}
+      {error && <p role="alert" className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</p>}
+    </section>
+  );
+}
+
 function listText(items?: string[]) {
   return (items ?? []).map(t => t.trim()).filter(Boolean).join("、");
 }
@@ -332,11 +441,13 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const { ips, activeIP } = useIP();
   const isIPMode = searchParams?.scope === "ip";
   const requestedCategory = searchParams?.category ?? "";
-  const [intakeMode, setIntakeMode] = useState<"ai" | "exact">("ai");
+  const [intakeMode, setIntakeMode] = useState<"ai" | "exact" | "reviewed">("ai");
   const pageTitle = isIPMode
     ? "IP内容理解入库"
     : intakeMode === "exact"
       ? "原文保真保存"
+      : intakeMode === "reviewed"
+        ? "人工确认方法卡"
       : "智能入库助手";
   const availableCategories = isIPMode
     ? IP_CATEGORIES.map(category => category.id).filter(category => category !== "IP原始内容")
@@ -724,6 +835,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             ? `忠实理解你输入的完整内容，保留原文和思维脉络，确认后写入「${activeIP?.name ?? "当前IP"}」知识库。`
             : intakeMode === "exact"
               ? "逐字保存完整执行模板，不调用AI；检查全库相似内容后由你确认是否入库。"
+              : intakeMode === "reviewed"
+                ? "保存已经人工审核完成的方法卡，不调用AI；保存前重新核对全库检查结果。"
               : "粘贴原始资料，AI自动提炼成可复用的短视频方法知识，确认后写入通用知识库。"}
         </p>
       </header>
@@ -732,11 +845,14 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         <div className="mb-4 flex gap-2" aria-label="入库模式">
           <button type="button" aria-pressed={intakeMode === "ai"} onClick={() => setIntakeMode("ai")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">AI提炼方法卡</button>
           <button type="button" aria-pressed={intakeMode === "exact"} onClick={() => setIntakeMode("exact")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">原文保真保存</button>
+          <button type="button" aria-pressed={intakeMode === "reviewed"} onClick={() => setIntakeMode("reviewed")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">人工确认方法卡</button>
         </div>
       )}
 
       {intakeMode === "exact" && !isIPMode ? (
         <ExactTemplateIntakePanel ipNamesById={Object.fromEntries(ips.map(ip => [ip.id, ip.name]))} />
+      ) : intakeMode === "reviewed" && !isIPMode ? (
+        <ReviewedMethodCardIntakePanel />
       ) : (
         <>
 

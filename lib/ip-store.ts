@@ -988,6 +988,134 @@ export function saveHotAnalysisKnowledgeEntries(
   });
 }
 
+export interface ReviewedMethodCardStorageItem {
+  cardKey: string;
+  category: KnowledgeCategory;
+  title: string;
+  rawContent: string;
+  tags: string[];
+  keywords: string[];
+  contentDirection: string[];
+  sourceName: string;
+  note: string;
+}
+
+export interface ReviewedMethodCardStorageInput {
+  collectionKey: string;
+  cards: ReviewedMethodCardStorageItem[];
+}
+
+const REVIEWED_METHOD_CARD_CATEGORIES: ReadonlySet<KnowledgeCategory> = new Set([
+  "方法论",
+  "定位方法库",
+  "选题方法库",
+  "标题方法库",
+  "开头方法库",
+  "文案框架方法库",
+]);
+
+// 人工审核方法卡专用存储入口：调用方只能提供原始入库内容，ID和生命周期由系统生成。
+export function saveReviewedMethodCardEntries(
+  input: ReviewedMethodCardStorageInput,
+): KnowledgeEntry[] {
+  const collectionKey = input.collectionKey.trim();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(collectionKey)) {
+    throw new Error("方法卡集合编号只能使用小写字母、数字和连字符");
+  }
+  if (input.cards.length === 0) throw new Error("至少需要一张已审核方法卡");
+  const normalizedCards = input.cards.map(card => ({
+    ...card,
+    cardKey: card.cardKey.trim(),
+    title: card.title.trim(),
+    sourceName: card.sourceName.trim(),
+    tags: [...card.tags],
+    keywords: [...card.keywords],
+    contentDirection: [...card.contentDirection],
+  }));
+  if (normalizedCards.some(card =>
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(card.cardKey)
+    || !card.title
+    || !card.rawContent.trim()
+    || !card.sourceName
+    || !REVIEWED_METHOD_CARD_CATEGORIES.has(card.category)
+  )) {
+    throw new Error("人工确认方法卡的编号、内容、来源或分类不合法");
+  }
+  if (new Set(normalizedCards.map(card => card.cardKey)).size !== normalizedCards.length) {
+    throw new Error("同一批次存在重复的方法卡编号");
+  }
+
+  const all = readKnowledgeEntriesStrict();
+  const createdAt = new Date().toISOString();
+  const candidates = normalizedCards.map(card => migrateKnowledgeEntry({
+    id: `reviewed-method:${collectionKey}:${card.cardKey}`,
+    category: card.category,
+    title: card.title,
+    rawContent: card.rawContent,
+    sourceKind: null,
+    sourceName: card.sourceName,
+    sourceAnalysis: null,
+    tags: card.tags,
+    keywords: card.keywords,
+    ipId: null,
+    sourceTier: "中" as const,
+    sourceTierReason: "来源等级待确认；人工依据原文整理，尚未结合真实采用和发布效果验证",
+    contentDirection: card.contentDirection,
+    sourcePlatform: "人工确认方法卡",
+    sourceUrl: "",
+    note: card.note,
+    createdAt,
+    extractedAt: null,
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用" as const,
+    trustStatus: null,
+    sourceReference: null,
+    executionTemplate: null,
+    dna: null,
+  }));
+  const candidateIds = new Set(candidates.map(candidate => candidate.id));
+  const existingIdCounts = new Map<string, number>();
+  for (const entry of all) {
+    if (!candidateIds.has(entry.id)) continue;
+    existingIdCounts.set(entry.id, (existingIdCounts.get(entry.id) ?? 0) + 1);
+  }
+  if ([...existingIdCounts.values()].some(count => count > 1)) {
+    throw new Error("历史知识存在重复的方法卡编号，已拒绝保存，请先修复异常数据");
+  }
+
+  const existingById = new Map(all.map(entry => [entry.id, migrateKnowledgeEntry(entry)]));
+  const additions: KnowledgeEntry[] = [];
+  const resolved = candidates.map(candidate => {
+    const existing = existingById.get(candidate.id);
+    if (!existing) {
+      additions.push(candidate);
+      return candidate;
+    }
+    if (serializeKnowledgeSaveContent(existing) !== serializeKnowledgeSaveContent(candidate)) {
+      throw new Error("同一方法卡编号已存在，但审核内容不一致，已拒绝覆盖");
+    }
+    return existing;
+  });
+  if (additions.length === 0) return resolved;
+
+  writeKnowledgeEntriesStrict(
+    [...all, ...additions],
+    "人工确认方法卡保存失败，请稍后重试",
+  );
+  const persisted = readKnowledgeEntriesStrict();
+  return resolved.map(candidate => {
+    const matches = persisted.filter(entry => entry.id === candidate.id);
+    if (matches.length !== 1) throw new Error("人工确认方法卡保存失败，请稍后重试");
+    const saved = migrateKnowledgeEntry(matches[0]!);
+    if (serializeKnowledgeSaveContent(saved) !== serializeKnowledgeSaveContent(candidate)) {
+      throw new Error("人工确认方法卡保存失败，请稍后重试");
+    }
+    return saved;
+  });
+}
+
 export interface HotAnalysisKnowledgeGroup {
   analysisId: string;
   viralCase: KnowledgeEntry | null;

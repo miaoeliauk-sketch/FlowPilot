@@ -949,3 +949,83 @@ test("保真模式全库检查读取失败时明确提示并允许重新检查",
     storagePrototype.getItem = originalGetItem;
   }
 });
+
+test("人工确认方法卡模式不调用AI并在重新检查和人工确认后严格保存", async () => {
+  const { fireEvent, render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("人工确认方法卡模式不应调用AI");
+  };
+  const payload = {
+    collectionKey: "precise-customer-behavior-diagnosis",
+    cards: [{
+      cardKey: "customer-view",
+      title: "精准客户视角与诊断前置信息",
+      category: "定位方法库",
+      summary: "先明确目标客户，再从真实潜在客户视角诊断内容。",
+      coreMethod: "明确行业、产品、目标客户、客户需求和认知水平，再模拟第一次刷到这个IP的潜在客户。",
+      checkQuestions: ["目标客户是否明确？"],
+      applicableScenarios: ["短视频文案诊断"],
+      triggerKeywords: ["精准客户"],
+      aiUsage: "提供客户信息和完整文案，要求AI从潜在客户视角逐项诊断。",
+      unsuitableCases: ["法律合规审查"],
+      sourceChapterBasis: ["第二章“先锁定谁在看”"],
+      sourceName: "精准客户行为诊断法",
+    }],
+  };
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    await user.click(view.getByRole("button", { name: "人工确认方法卡" }));
+    assert.ok(view.getByRole("heading", { level: 1, name: "人工确认方法卡" }));
+    assert.ok(view.getByText("不会调用AI，只保存已经人工审核完成的字段"));
+    fireEvent.change(view.getByLabelText("已审核方法卡数据"), {
+      target: { value: JSON.stringify(payload) },
+    });
+    await user.click(view.getByRole("button", { name: "检查已审核方法卡" }));
+
+    assert.equal(fetchCalls, 0);
+    assert.ok(view.getByText("精准客户视角与诊断前置信息"));
+    assert.ok(view.getByText("基础质量：未发现明显问题"));
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 0);
+
+    await user.click(view.getByRole("button", { name: "继续保存这批方法卡" }));
+    const storagePrototype = Object.getPrototypeOf(localStorage) as Storage;
+    const originalSetItem = storagePrototype.setItem;
+    let shouldFail = true;
+    storagePrototype.setItem = function setItem(key: string, value: string) {
+      if (shouldFail && key === "ipwr:knowledgeEntries") throw new Error("storage unavailable");
+      originalSetItem.call(this, key, value);
+    };
+    try {
+      await user.click(view.getByRole("button", { name: "确认保存1张方法卡" }));
+      await waitFor(() => assert.ok(view.getByRole("alert").textContent?.includes("保存失败")));
+      assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 0);
+
+      shouldFail = false;
+      await user.click(view.getByRole("button", { name: "确认保存1张方法卡" }));
+      await waitFor(() => assert.ok(view.getByText("已严格保存1张人工确认方法卡")));
+    } finally {
+      storagePrototype.setItem = originalSetItem;
+    }
+
+    assert.equal(fetchCalls, 0);
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 1);
+    assert.equal(
+      (view.getByRole("button", { name: "已保存1张方法卡" }) as HTMLButtonElement).disabled,
+      true,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
