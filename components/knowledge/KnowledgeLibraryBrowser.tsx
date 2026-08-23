@@ -20,6 +20,7 @@ import {
 } from "@/components/knowledge/knowledge-library-labels";
 
 const EMPTY_SNAPSHOT: KnowledgeLibrarySnapshot = { items: [] };
+const PAGE_SIZE = 12;
 
 export function KnowledgeLibraryBrowser({
   activeIPId,
@@ -35,6 +36,8 @@ export function KnowledgeLibraryBrowser({
   const [trustStatus, setTrustStatus] = useState<KnowledgeLibraryTrustStatus | "">("");
   const [sourceKind, setSourceKind] = useState<KnowledgeLibrarySourceKind | "">("");
   const [selectedItem, setSelectedItem] = useState<KnowledgeLibraryItem | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [jumpPage, setJumpPage] = useState("1");
 
   useEffect(() => {
     setSearch("");
@@ -42,6 +45,8 @@ export function KnowledgeLibraryBrowser({
     setTrustStatus("");
     setSourceKind("");
     setSelectedItem(null);
+    setCurrentPage(1);
+    setJumpPage("1");
     try {
       setSnapshot(loadKnowledgeLibrarySnapshot(activeIPId));
       setLoadError(null);
@@ -65,7 +70,26 @@ export function KnowledgeLibraryBrowser({
     trustStatuses: trustStatus ? [trustStatus] : undefined,
     sourceKinds: sourceKind ? [sourceKind] : undefined,
   });
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const pageItems = items.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
   const hasFilters = Boolean(search || category || trustStatus || sourceKind);
+
+  useEffect(() => {
+    const validPage = Math.min(currentPage, totalPages);
+    if (validPage !== currentPage) setCurrentPage(validPage);
+    setJumpPage(String(validPage));
+  }, [currentPage, totalPages]);
+
+  function resetToFirstPage() {
+    setCurrentPage(1);
+    setJumpPage("1");
+  }
+
+  function goToPage(page: number) {
+    const validPage = Math.min(totalPages, Math.max(1, Math.trunc(page)));
+    setCurrentPage(validPage);
+    setJumpPage(String(validPage));
+  }
 
   async function handleDelete(item: KnowledgeLibraryItem) {
     await deleteKnowledgeEntryFromLibrary({
@@ -101,14 +125,14 @@ export function KnowledgeLibraryBrowser({
           type="search"
           aria-label="搜索知识"
           value={search}
-          onChange={event => setSearch(event.target.value)}
+          onChange={event => { setSearch(event.target.value); resetToFirstPage(); }}
           placeholder="搜索标题、正文、标签或来源"
           className="h-[40px] rounded-[10px] border border-[#E5E4DE] px-3 text-[13px] outline-none focus:border-[#639922]"
         />
         <select
           aria-label="按分类筛选"
           value={category}
-          onChange={event => setCategory(event.target.value)}
+          onChange={event => { setCategory(event.target.value); resetToFirstPage(); }}
           className="h-[40px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[13px] text-[#555]"
         >
           <option value="">全部分类</option>
@@ -117,7 +141,10 @@ export function KnowledgeLibraryBrowser({
         <select
           aria-label="按可信度筛选"
           value={trustStatus}
-          onChange={event => setTrustStatus(event.target.value as KnowledgeLibraryTrustStatus | "")}
+          onChange={event => {
+            setTrustStatus(event.target.value as KnowledgeLibraryTrustStatus | "");
+            resetToFirstPage();
+          }}
           className="h-[40px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[13px] text-[#555]"
         >
           <option value="">全部可信度</option>
@@ -128,7 +155,10 @@ export function KnowledgeLibraryBrowser({
         <select
           aria-label="按来源筛选"
           value={sourceKind}
-          onChange={event => setSourceKind(event.target.value as KnowledgeLibrarySourceKind | "")}
+          onChange={event => {
+            setSourceKind(event.target.value as KnowledgeLibrarySourceKind | "");
+            resetToFirstPage();
+          }}
           className="h-[40px] rounded-[10px] border border-[#E5E4DE] bg-white px-3 text-[13px] text-[#555]"
         >
           <option value="">全部来源</option>
@@ -137,7 +167,13 @@ export function KnowledgeLibraryBrowser({
         {hasFilters && (
           <button
             type="button"
-            onClick={() => { setSearch(""); setCategory(""); setTrustStatus(""); setSourceKind(""); }}
+            onClick={() => {
+              setSearch("");
+              setCategory("");
+              setTrustStatus("");
+              setSourceKind("");
+              resetToFirstPage();
+            }}
             className="justify-self-start text-[12px] text-[#A32D2D] md:col-span-4"
           >
             清除筛选
@@ -155,7 +191,7 @@ export function KnowledgeLibraryBrowser({
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {items.map(item => (
+          {pageItems.map(item => (
             <article key={item.id} data-testid="knowledge-browser-card" className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
               <div className="mb-2 flex items-start justify-between gap-2">
                 <h3 className="min-w-0 text-[14px] font-semibold leading-5 text-[#1C1C1B]">{item.title}</h3>
@@ -193,6 +229,65 @@ export function KnowledgeLibraryBrowser({
             </article>
           ))}
         </div>
+      )}
+      {!loadError && items.length > 0 && (
+        <nav aria-label="知识分页" className="flex flex-wrap items-center justify-center gap-2 rounded-[12px] border border-[#E5E4DE] bg-white px-3 py-3">
+          <button
+            type="button"
+            onClick={() => goToPage(currentPage - 1)}
+            disabled={currentPage === 1}
+            className="rounded-[8px] border border-[#DAD9D2] px-3 py-1.5 text-[12px] text-[#555] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            上一页
+          </button>
+          {Array.from({ length: totalPages }, (_, index) => index + 1).map(page => (
+            <button
+              key={page}
+              type="button"
+              aria-label={`第${page}页`}
+              aria-current={page === currentPage ? "page" : undefined}
+              onClick={() => goToPage(page)}
+              className="h-8 min-w-8 rounded-[8px] px-2 text-[12px] font-semibold"
+              style={page === currentPage
+                ? { background: "#1C1C1B", color: "#fff" }
+                : { border: "1px solid #DAD9D2", color: "#555" }}
+            >
+              {page}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => goToPage(currentPage + 1)}
+            disabled={currentPage === totalPages}
+            className="rounded-[8px] border border-[#DAD9D2] px-3 py-1.5 text-[12px] text-[#555] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            下一页
+          </button>
+          <span className="ml-1 text-[12px] text-[#8A8A86]">第{currentPage}/{totalPages}页</span>
+          <label className="ml-1 flex items-center gap-1.5 text-[12px] text-[#666]">
+            跳到
+            <input
+              type="number"
+              min={1}
+              max={totalPages}
+              aria-label="跳转页码"
+              value={jumpPage}
+              onChange={event => setJumpPage(event.target.value)}
+              className="h-8 w-16 rounded-[8px] border border-[#DAD9D2] px-2 text-center outline-none focus:border-[#639922]"
+            />
+            页
+          </label>
+          <button
+            type="button"
+            onClick={() => {
+              const requestedPage = Number(jumpPage);
+              if (Number.isFinite(requestedPage)) goToPage(requestedPage);
+            }}
+            className="rounded-[8px] border border-[#DAD9D2] px-3 py-1.5 text-[12px] font-semibold text-[#555]"
+          >
+            跳转
+          </button>
+        </nav>
       )}
       {selectedItem && (
         <KnowledgeDetailPanel

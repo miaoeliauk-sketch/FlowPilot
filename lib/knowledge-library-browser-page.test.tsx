@@ -212,6 +212,139 @@ test("知识中心默认使用只读浏览并支持搜索和组合筛选", async
   assert.deepEqual(view.getAllByTestId("knowledge-browser-card").map(node => node.textContent?.includes("反常识开头方法")), [true]);
 });
 
+test("知识浏览每页显示12条并支持页码、上一页下一页和直接跳转", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify(
+    Array.from({ length: 26 }, (_, index) => entry(
+      `paged-${index + 1}`,
+      `分页知识${String(index + 1).padStart(2, "0")}`,
+      activeIP.id,
+    )),
+  ));
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await view.findByText("分页知识01");
+  assert.equal(view.getAllByTestId("knowledge-browser-card").length, 12);
+  assert.equal(view.queryByText("分页知识13"), null);
+  assert.equal(view.getByRole("button", { name: "第1页" }).getAttribute("aria-current"), "page");
+
+  await user.click(view.getByRole("button", { name: "下一页" }));
+  assert.ok(await view.findByText("分页知识13"));
+  assert.equal(view.queryByText("分页知识01"), null);
+  assert.equal(view.getByRole("button", { name: "第2页" }).getAttribute("aria-current"), "page");
+
+  await user.clear(view.getByRole("spinbutton", { name: "跳转页码" }));
+  await user.type(view.getByRole("spinbutton", { name: "跳转页码" }), "3");
+  await user.click(view.getByRole("button", { name: "跳转" }));
+  assert.ok(await view.findByText("分页知识25"));
+  assert.equal(view.getAllByTestId("knowledge-browser-card").length, 2);
+  assert.equal(view.getByRole("button", { name: "下一页" }).hasAttribute("disabled"), true);
+
+  await user.click(view.getByRole("button", { name: "上一页" }));
+  assert.ok(await view.findByText("分页知识13"));
+});
+
+test("删除当前末页唯一一条知识后自动退回有效页", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify(
+    Array.from({ length: 13 }, (_, index) => entry(
+      `delete-page-${index + 1}`,
+      `待分页删除知识${String(index + 1).padStart(2, "0")}`,
+      activeIP.id,
+    )),
+  ));
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await view.findByText("待分页删除知识01");
+  await user.click(view.getByRole("button", { name: "第2页" }));
+  await user.click(await view.findByRole("button", { name: "查看待分页删除知识13详情" }));
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+  await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+
+  assert.ok(await view.findByText("待分页删除知识01"));
+  assert.equal(view.queryByText("待分页删除知识13"), null);
+  assert.equal(view.getByRole("button", { name: "第1页" }).getAttribute("aria-current"), "page");
+  assert.equal((view.getByRole("spinbutton", { name: "跳转页码" }) as HTMLInputElement).value, "1");
+});
+
+test("修改搜索或筛选条件后自动回到第1页", async () => {
+  const entries = Array.from({ length: 25 }, (_, index) => entry(
+    `reset-filter-${index + 1}`,
+    `筛选分页知识${String(index + 1).padStart(2, "0")}`,
+    activeIP.id,
+    index === 24 ? { category: "开头方法库" } : {},
+  ));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify(entries));
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await view.findByText("筛选分页知识01");
+  await user.click(view.getByRole("button", { name: "第2页" }));
+  await user.type(view.getByRole("searchbox", { name: "搜索知识" }), "筛选分页知识01");
+  assert.ok(await view.findByText("筛选分页知识01"));
+  assert.equal(view.getByRole("button", { name: "第1页" }).getAttribute("aria-current"), "page");
+
+  await user.clear(view.getByRole("searchbox", { name: "搜索知识" }));
+  await user.click(view.getByRole("button", { name: "第2页" }));
+  await user.selectOptions(view.getByLabelText("按分类筛选"), "开头方法库");
+  assert.ok(await view.findByText("筛选分页知识25"));
+  assert.equal(view.getByRole("button", { name: "第1页" }).getAttribute("aria-current"), "page");
+  assert.equal((view.getByRole("spinbutton", { name: "跳转页码" }) as HTMLInputElement).value, "1");
+});
+
+test("切换IP后分页状态回到第1页", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    ...Array.from({ length: 25 }, (_, index) => entry(
+      `switch-a-${index + 1}`,
+      `IP A分页知识${String(index + 1).padStart(2, "0")}`,
+      activeIP.id,
+    )),
+    ...Array.from({ length: 13 }, (_, index) => entry(
+      `switch-b-${index + 1}`,
+      `IP B分页知识${String(index + 1).padStart(2, "0")}`,
+      otherIP.id,
+    )),
+  ]));
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider, useIP } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+
+  function SwitchIP() {
+    const { switchIP } = useIP();
+    return <button onClick={() => switchIP(otherIP.id)}>切换到IP B并重置分页</button>;
+  }
+
+  const view = render(
+    <IPProvider>
+      <SwitchIP />
+      <KnowledgeHubPage />
+    </IPProvider>,
+  );
+  await view.findByText("IP A分页知识01");
+  await user.click(view.getByRole("button", { name: "第2页" }));
+  assert.ok(await view.findByText("IP A分页知识13"));
+
+  await user.click(view.getByRole("button", { name: "切换到IP B并重置分页" }));
+  assert.ok(await view.findByText("IP B分页知识01"));
+  assert.equal(view.queryByText("IP B分页知识13"), null);
+  assert.equal(view.getByRole("button", { name: "第1页" }).getAttribute("aria-current"), "page");
+  assert.equal((view.getByRole("spinbutton", { name: "跳转页码" }) as HTMLInputElement).value, "1");
+});
+
 test("原有新增导入和专项库能力保留在次级管理入口", async () => {
   const { render } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
