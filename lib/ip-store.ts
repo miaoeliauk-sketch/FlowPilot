@@ -813,6 +813,7 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
     status: e.status ?? "未使用",
     trustStatus: e.trustStatus ?? null,
     sourceReference: e.sourceReference ?? null,
+    executionTemplate: e.executionTemplate ?? null,
     dna: e.dna ?? null,
     sourceKind: e.sourceKind ?? null,
     sourceName: e.sourceName ?? "",
@@ -841,7 +842,12 @@ export function getKnowledgeEntriesForFullLibraryComparison(): KnowledgeEntry[] 
 
 export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt">): KnowledgeEntry {
   const all = readKnowledgeEntriesStrict();
-  const entry: KnowledgeEntry = { ...input, id: genId(), createdAt: new Date().toISOString() };
+  const entry: KnowledgeEntry = {
+    ...input,
+    executionTemplate: null,
+    id: genId(),
+    createdAt: new Date().toISOString(),
+  };
   writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
   return entry;
 }
@@ -851,7 +857,11 @@ export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">
   if (all.some(entry => entry.id === input.id)) {
     throw new Error("知识条目编号重复，未保存任何内容");
   }
-  const entry: KnowledgeEntry = { ...input, createdAt: new Date().toISOString() };
+  const entry: KnowledgeEntry = {
+    ...input,
+    executionTemplate: null,
+    createdAt: new Date().toISOString(),
+  };
   writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
   const persisted = readKnowledgeEntriesStrict()
     .find(saved => saved.id === entry.id);
@@ -870,6 +880,7 @@ export interface HotAnalysisKnowledgeSaveEntry {
     | "status"
     | "trustStatus"
     | "sourceReference"
+    | "executionTemplate"
   >;
 }
 
@@ -934,6 +945,7 @@ export function saveHotAnalysisKnowledgeEntries(
         role: item.role,
         groupItemId,
       },
+      executionTemplate: null,
     });
   });
   if (new Set(candidates.map(entry => entry.id)).size !== candidates.length) {
@@ -1068,18 +1080,124 @@ export function getHotAnalysisKnowledgeGroupsByAnalysisId(
 
 export type KnowledgeEntryEditablePatch = Omit<
   Partial<KnowledgeEntry>,
-  "trustStatus" | "sourceReference"
+  "trustStatus" | "sourceReference" | "executionTemplate"
 >;
 
 export function updateKnowledgeEntry(id: string, patch: KnowledgeEntryEditablePatch): void {
   if (
     Object.prototype.hasOwnProperty.call(patch, "trustStatus") ||
-    Object.prototype.hasOwnProperty.call(patch, "sourceReference")
+    Object.prototype.hasOwnProperty.call(patch, "sourceReference") ||
+    Object.prototype.hasOwnProperty.call(patch, "executionTemplate")
   ) {
     throw new Error("系统维护字段不能通过通用编辑入口修改");
   }
   const all = readKnowledgeEntriesStrict();
+  const target = all.find(entry => entry.id === id);
+  if (target?.executionTemplate) {
+    throw new Error("保真执行模板保存后不能编辑；如需更新，请使用新版本号另存");
+  }
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+}
+
+export interface ExactKnowledgeTemplateStorageInput {
+  templateKey: string;
+  version: string;
+  category: KnowledgeCategory;
+  title: string;
+  rawContent: string;
+  sourceName: string;
+  tags: string[];
+  keywords: string[];
+  sourceUrl: string;
+}
+
+async function calculateExactTemplateContentHash(rawContent: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(rawContent),
+  );
+  return [...new Uint8Array(digest)]
+    .map(byte => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function serializeExactTemplateOriginalContent(entry: KnowledgeEntry): string {
+  return serializeKnowledgeSaveContent({
+    ...entry,
+    usageRecords: [],
+    status: "未使用",
+    trustStatus: null,
+  });
+}
+
+// 保真模板专用存储入口：调用方只能提供原始内容和模板身份，生命周期一律由系统生成。
+export async function saveExactKnowledgeTemplateEntry(
+  input: ExactKnowledgeTemplateStorageInput,
+): Promise<KnowledgeEntry> {
+  const templateKey = input.templateKey.trim();
+  const version = input.version.trim();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(templateKey)) {
+    throw new Error("模板编号只能使用小写字母、数字和连字符");
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error("模板版本必须使用x.y.z格式");
+  }
+  const contentHash = await calculateExactTemplateContentHash(input.rawContent);
+  const id = `knowledge-template:${templateKey}:${version}`;
+  const all = readKnowledgeEntriesStrict();
+  const matches = all.filter(entry => entry.id === id);
+  if (matches.length > 1) {
+    throw new Error("历史知识存在重复模板编号，已拒绝保存，请先修复异常数据");
+  }
+  const candidate = migrateKnowledgeEntry({
+    id,
+    category: input.category,
+    title: input.title,
+    rawContent: input.rawContent,
+    sourceKind: null,
+    sourceName: input.sourceName,
+    sourceAnalysis: null,
+    tags: [...input.tags],
+    keywords: [...input.keywords],
+    ipId: null,
+    sourceTier: "中",
+    sourceTierReason: "用户提供的执行模板原文已保真保存，内容本身尚未经过效果验证",
+    contentDirection: [],
+    sourcePlatform: "用户提供文档",
+    sourceUrl: input.sourceUrl,
+    note: "保真执行模板；仅供代码按模板编号和版本明确绑定使用",
+    createdAt: new Date().toISOString(),
+    extractedAt: null,
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    trustStatus: null,
+    sourceReference: null,
+    executionTemplate: {
+      templateKey,
+      version,
+      contentHash,
+    },
+    dna: null,
+  });
+  const existing = matches[0];
+  if (existing) {
+    const migrated = migrateKnowledgeEntry(existing);
+    if (serializeExactTemplateOriginalContent(migrated) !== serializeExactTemplateOriginalContent(candidate)) {
+      throw new Error("同一模板版本已存在，但正文不一致，已拒绝覆盖");
+    }
+    return migrated;
+  }
+  writeKnowledgeEntriesStrict(
+    [...all, candidate],
+    "执行模板保存失败，请稍后重试",
+  );
+  const persisted = readKnowledgeEntriesStrict().filter(entry => entry.id === id);
+  if (persisted.length !== 1) {
+    throw new Error("执行模板保存失败，请稍后重试");
+  }
+  return migrateKnowledgeEntry(persisted[0]!);
 }
 
 export function deleteKnowledgeEntry(id: string): void {

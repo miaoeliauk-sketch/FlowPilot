@@ -341,6 +341,12 @@ export interface HotAnalysisKnowledgeSourceReference {
   groupItemId: string;
 }
 
+export interface KnowledgeExecutionTemplateReference {
+  templateKey: string;
+  version: string;
+  contentHash: string;
+}
+
 export interface KnowledgeEntry {
   id: string;
   category: KnowledgeCategory;
@@ -372,6 +378,8 @@ export interface KnowledgeEntry {
   trustStatus?: KnowledgeTrustStatus | null;
   // 爆款分析来源组直接保存在知识条目上，不依赖分析历史继续存在；旧数据不推断、不补造。
   sourceReference?: HotAnalysisKnowledgeSourceReference | null;
+  // 保真执行模板的系统身份。普通新增和通用编辑入口不能写入或修改。
+  executionTemplate?: KnowledgeExecutionTemplateReference | null;
   // 仅通过"爆款分析中心"录入的条目会有值，其余录入方式（知识库中心手动添加）始终为null。
   // 基因库统计直接读这个字段做计数，不需要额外调用AI。
   dna: ViralDNA | null;
