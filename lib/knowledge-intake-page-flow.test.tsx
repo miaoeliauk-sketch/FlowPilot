@@ -788,3 +788,164 @@ test("长文档批次内完全重复只提示并保留全部内容供人工选�
     globalThis.fetch = originalFetch;
   }
 });
+
+test("通用智能入库可切换原文保真模式并在人工确认后逐字保存且不调用AI", async () => {
+  const { render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("保真模式不应调用AI接口");
+  };
+  const originalTemplate = "# 标准诊断Prompt\n\n请逐字保留“中文引号”和固定输出格式。\n";
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    buildExistingKnowledgeEntry("existing-template", {
+      title: "历史诊断模板",
+      category: "文案框架方法库",
+      rawContent: originalTemplate,
+      sourcePlatform: "用户提供文档",
+      sourceName: "旧版模板.md",
+    }),
+  ]));
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+
+    await user.click(view.getByRole("button", { name: "原文保真保存" }));
+    assert.ok(view.getByRole("heading", { level: 1, name: "原文保真保存" }));
+    assert.equal(view.queryByText(/AI自动提炼成可复用的短视频方法知识/), null);
+    assert.ok(view.getByText("不会调用AI，正文将逐字保存"));
+    await user.type(view.getByLabelText("模板标题"), "精准客户行为诊断法｜标准执行模板v1");
+    await user.selectOptions(view.getByLabelText("保存分类"), "文案框架方法库");
+    await user.type(view.getByLabelText("来源名称"), "FlowPilot_精准客户行为诊断法.md");
+    await user.type(view.getByLabelText("模板标识"), "precise-customer-behavior-diagnosis");
+    await user.clear(view.getByLabelText("模板版本"));
+    await user.type(view.getByLabelText("模板版本"), "1.0.0");
+    await user.type(view.getByLabelText("模板正文"), originalTemplate);
+    await user.click(view.getByRole("button", { name: "检查入库内容" }));
+
+    assert.equal(fetchCalls, 0);
+    assert.ok(view.getByText("入库前检查"));
+    assert.ok(view.getByText("完全相同"));
+    assert.ok(view.getByText(/历史诊断模板.*文案框架方法库/));
+    assert.ok(view.getByText(/用户提供文档.*旧版模板.md/));
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 1);
+
+    await user.click(view.getByRole("button", { name: "继续保真保存" }));
+    await user.click(view.getByRole("button", { name: "确认并保真保存" }));
+
+    await waitFor(() => assert.ok(view.getByText("执行模板已保真保存")));
+    const saveButton = view.getByRole("button", { name: "已保真保存" }) as HTMLButtonElement;
+    assert.equal(saveButton.disabled, true);
+    assert.equal(fetchCalls, 0);
+    const savedEntries = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{
+      rawContent?: string;
+      executionTemplate?: { templateKey?: string; version?: string };
+    }>;
+    assert.equal(savedEntries.length, 2);
+    assert.equal(savedEntries[1]?.rawContent, originalTemplate);
+    assert.equal(savedEntries[1]?.executionTemplate?.templateKey, "precise-customer-behavior-diagnosis");
+    assert.equal(savedEntries[1]?.executionTemplate?.version, "1.0.0");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("原文保真模式不向IP理解开放且严格写入失败后可以重试", async () => {
+  const { fireEvent, render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+
+  const ipView = render(
+    <IPProvider>
+      <KnowledgeIntakePage searchParams={{ scope: "ip" }} />
+    </IPProvider>,
+  );
+  assert.equal(ipView.queryByRole("button", { name: "原文保真保存" }), null);
+  ipView.unmount();
+
+  const view = render(
+    <IPProvider>
+      <KnowledgeIntakePage />
+    </IPProvider>,
+  );
+  const user = userEvent.setup({ document });
+  await user.click(view.getByRole("button", { name: "原文保真保存" }));
+  fireEvent.change(view.getByLabelText("模板标题"), { target: { value: "可重试模板" } });
+  fireEvent.change(view.getByLabelText("来源名称"), { target: { value: "重试测试.md" } });
+  fireEvent.change(view.getByLabelText("模板标识"), { target: { value: "retryable-template" } });
+  fireEvent.change(view.getByLabelText("模板版本"), { target: { value: "1.0.0" } });
+  fireEvent.change(view.getByLabelText("模板正文"), { target: { value: "这是一份用于验证严格写入失败后可以安全重试的完整模板正文。" } });
+  await user.click(view.getByRole("button", { name: "检查入库内容" }));
+  await user.click(view.getByRole("button", { name: "继续保真保存" }));
+
+  const storagePrototype = Object.getPrototypeOf(localStorage) as Storage;
+  const originalSetItem = storagePrototype.setItem;
+  let shouldFail = true;
+  storagePrototype.setItem = function setItem(key: string, value: string) {
+    if (shouldFail && key === "ipwr:knowledgeEntries") throw new Error("quota");
+    return originalSetItem.call(this, key, value);
+  };
+  try {
+    await user.click(view.getByRole("button", { name: "确认并保真保存" }));
+    await waitFor(() => assert.ok(view.getByRole("alert").textContent?.includes("执行模板保存失败")));
+    const retryButton = view.getByRole("button", { name: "确认并保真保存" }) as HTMLButtonElement;
+    assert.equal(retryButton.disabled, false);
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 0);
+
+    shouldFail = false;
+    await user.click(retryButton);
+    await waitFor(() => assert.ok(view.getByText("执行模板已保真保存")));
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 1);
+  } finally {
+    storagePrototype.setItem = originalSetItem;
+  }
+});
+
+test("保真模式全库检查读取失败时明确提示并允许重新检查", async () => {
+  const { fireEvent, render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const view = render(
+    <IPProvider>
+      <KnowledgeIntakePage />
+    </IPProvider>,
+  );
+  const user = userEvent.setup({ document });
+  await user.click(view.getByRole("button", { name: "原文保真保存" }));
+  fireEvent.change(view.getByLabelText("模板标题"), { target: { value: "检查重试模板" } });
+  fireEvent.change(view.getByLabelText("来源名称"), { target: { value: "检查重试.md" } });
+  fireEvent.change(view.getByLabelText("模板标识"), { target: { value: "precheck-retry-template" } });
+  fireEvent.change(view.getByLabelText("模板正文"), { target: { value: "这是一份用于验证全库检查读取失败后能够安全重试的完整正文。" } });
+
+  const storagePrototype = Object.getPrototypeOf(localStorage) as Storage;
+  const originalGetItem = storagePrototype.getItem;
+  let shouldFail = true;
+  storagePrototype.getItem = function getItem(key: string) {
+    if (shouldFail && key === "ipwr:knowledgeEntries") throw new Error("storage unavailable");
+    return originalGetItem.call(this, key);
+  };
+  try {
+    await user.click(view.getByRole("button", { name: "检查入库内容" }));
+    await waitFor(() => assert.ok(view.getByRole("alert").textContent?.includes("入库前检查失败")));
+    assert.ok(view.getByRole("button", { name: "重新检查" }));
+    assert.equal(view.queryByText("入库前检查"), null);
+
+    shouldFail = false;
+    await user.click(view.getByRole("button", { name: "重新检查" }));
+    await waitFor(() => assert.ok(view.getByText("入库前检查")));
+    assert.equal(view.queryByRole("alert"), null);
+  } finally {
+    storagePrototype.getItem = originalGetItem;
+  }
+});

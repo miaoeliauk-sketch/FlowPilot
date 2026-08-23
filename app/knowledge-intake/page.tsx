@@ -32,6 +32,10 @@ import {
   type KnowledgeIntakePrecheckCandidate,
   type SimilarExistingKnowledgeEvidence,
 } from "@/lib/knowledge-intake-precheck";
+import {
+  EXACT_TEMPLATE_CATEGORIES,
+  saveExactKnowledgeTemplate,
+} from "@/lib/knowledge-exact-intake";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -88,6 +92,177 @@ const SIMILARITY_LABEL: Record<SimilarExistingKnowledgeEvidence["tier"], string>
   high: "高度相似",
   partial: "部分相似",
 };
+
+function KnowledgePrecheckPanel({ assessment }: { assessment: KnowledgeIntakePrecheckAssessment }) {
+  return (
+    <section className="mt-3 rounded-[10px] border border-[#E5E4DE] bg-[#FCFCFA] p-3">
+      <h3 className="text-[12.5px] font-bold text-[#333]">入库前检查</h3>
+      <p className="mt-1 text-[11.5px] text-[#666]">
+        {assessment.quality.status === "pass"
+          ? "基础质量：未发现明显问题"
+          : "基础质量：需要人工检查"}
+      </p>
+      {assessment.quality.issues.length > 0 && (
+        <ul className="mt-1 list-disc space-y-1 pl-4 text-[11.5px] text-[#8A6418]">
+          {assessment.quality.issues.map(issue => <li key={issue.code}>{issue.message}</li>)}
+        </ul>
+      )}
+      {assessment.similarEntries.length === 0 ? (
+        <p className="mt-2 text-[11.5px] text-[#888]">全库暂未发现相似内容</p>
+      ) : (
+        <div className="mt-2 space-y-2">
+          {assessment.similarEntries.map(similar => (
+            <div key={similar.knowledgeId} className="rounded-[8px] bg-white px-3 py-2 text-[11.5px] text-[#666]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-[#F2EEDF] px-2 py-0.5 font-bold text-[#735F21]">
+                  {SIMILARITY_LABEL[similar.tier]}
+                </span>
+                <span>{similar.title || "未命名内容"}｜{similar.category || "分类未标注"}</span>
+              </div>
+              <p className="mt-1">相似原因：{similar.reasons.join("；")}</p>
+              <p className="mt-1 text-[#888]">{similar.ownershipLabel}｜{similar.sourceDescription}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExactTemplateIntakePanel({ ipNamesById }: { ipNamesById: Record<string, string> }) {
+  const [title, setTitle] = useState("");
+  const [category, setCategory] = useState<KnowledgeCategory>("文案框架方法库");
+  const [sourceName, setSourceName] = useState("");
+  const [templateKey, setTemplateKey] = useState("");
+  const [version, setVersion] = useState("1.0.0");
+  const [rawContent, setRawContent] = useState("");
+  const [assessment, setAssessment] = useState<KnowledgeIntakePrecheckAssessment | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false);
+  const [error, setError] = useState("");
+
+  function invalidateCheck() {
+    setAssessment(null);
+    setConfirmed(false);
+    setSaved(false);
+    setCheckFailed(false);
+    setError("");
+  }
+
+  function handleCheck() {
+    if (!title.trim() || !sourceName.trim() || !templateKey.trim() || !version.trim() || !rawContent.trim()) {
+      setError("请完整填写标题、来源、模板标识、版本和正文");
+      setCheckFailed(false);
+      return;
+    }
+    try {
+      const result = runKnowledgeIntakePrecheck({
+        candidates: [{
+          id: "exact-template-candidate",
+          kind: "raw_text",
+          title: title.trim(),
+          summary: "",
+          rawContent,
+        }],
+        existingEntries: getKnowledgeEntriesForFullLibraryComparison(),
+        ipNamesById,
+      });
+      setAssessment(result.assessments[0] ?? null);
+      setConfirmed(false);
+      setSaved(false);
+      setCheckFailed(false);
+      setError("");
+    } catch {
+      setAssessment(null);
+      setConfirmed(false);
+      setSaved(false);
+      setCheckFailed(true);
+      setError("入库前检查失败，请检查知识库数据后重新检查");
+    }
+  }
+
+  async function handleSave() {
+    if (!assessment || !confirmed || saving || saved) return;
+    setSaving(true);
+    setError("");
+    try {
+      await saveExactKnowledgeTemplate({
+        templateKey,
+        version,
+        title,
+        rawContent,
+        category,
+        sourceName,
+        sourceUrl: "",
+        tags: ["执行模板"],
+        keywords: [],
+      });
+      setSaved(true);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "执行模板保存失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="rounded-[16px] border border-[#E5E4DE] bg-white p-5">
+      <div className="rounded-[10px] bg-[#F5F8EE] px-4 py-3 text-[12.5px] text-[#4E6C25]">
+        <strong>不会调用AI，正文将逐字保存</strong>
+        <p className="mt-1">保存后的版本不可编辑；如需更新，请使用新的版本号另存。</p>
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <label className="text-[12.5px] font-semibold text-[#555]">
+          模板标题
+          <input aria-label="模板标题" value={title} onChange={event => { invalidateCheck(); setTitle(event.target.value); }} className="mt-1 w-full rounded-[9px] border border-[#E5E4DE] px-3 py-2 font-normal" />
+        </label>
+        <label className="text-[12.5px] font-semibold text-[#555]">
+          保存分类
+          <select aria-label="保存分类" value={category} onChange={event => { invalidateCheck(); setCategory(event.target.value as KnowledgeCategory); }} className="mt-1 w-full rounded-[9px] border border-[#E5E4DE] px-3 py-2 font-normal">
+            {EXACT_TEMPLATE_CATEGORIES.map(item => <option key={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="text-[12.5px] font-semibold text-[#555]">
+          来源名称
+          <input aria-label="来源名称" value={sourceName} onChange={event => { invalidateCheck(); setSourceName(event.target.value); }} className="mt-1 w-full rounded-[9px] border border-[#E5E4DE] px-3 py-2 font-normal" />
+        </label>
+        <label className="text-[12.5px] font-semibold text-[#555]">
+          模板标识
+          <input aria-label="模板标识" value={templateKey} onChange={event => { invalidateCheck(); setTemplateKey(event.target.value); }} placeholder="例如：precise-customer-diagnosis" className="mt-1 w-full rounded-[9px] border border-[#E5E4DE] px-3 py-2 font-normal" />
+        </label>
+        <label className="text-[12.5px] font-semibold text-[#555]">
+          模板版本
+          <input aria-label="模板版本" value={version} onChange={event => { invalidateCheck(); setVersion(event.target.value); }} placeholder="1.0.0" className="mt-1 w-full rounded-[9px] border border-[#E5E4DE] px-3 py-2 font-normal" />
+        </label>
+      </div>
+      <label className="mt-4 block text-[12.5px] font-semibold text-[#555]">
+        模板正文
+        <textarea aria-label="模板正文" value={rawContent} onChange={event => { invalidateCheck(); setRawContent(event.target.value); }} rows={12} className="mt-1 w-full resize-y rounded-[10px] border border-[#E5E4DE] px-3 py-2 font-mono text-[12px] leading-5 font-normal" />
+      </label>
+      <div className="mt-4 flex justify-end">
+        <button type="button" onClick={handleCheck} disabled={saving || saved} className="rounded-[9px] bg-[#1C1C1B] px-4 py-2 text-[12.5px] font-bold text-white disabled:opacity-40">{checkFailed ? "重新检查" : "检查入库内容"}</button>
+      </div>
+      {assessment && (
+        <>
+          <KnowledgePrecheckPanel assessment={assessment} />
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" aria-pressed={confirmed} onClick={() => setConfirmed(true)} disabled={saving || saved} className="rounded-[8px] border border-[#BFD59F] px-3 py-1.5 text-[11.5px] font-bold text-[#4E6C25] disabled:opacity-40">继续保真保存</button>
+            <button type="button" aria-pressed={!confirmed} onClick={() => setConfirmed(false)} disabled={saving || saved} className="rounded-[8px] border border-[#D8D5C9] px-3 py-1.5 text-[11.5px] font-semibold text-[#666] disabled:opacity-40">暂不入库</button>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <button type="button" onClick={handleSave} disabled={!confirmed || saving || saved} className="rounded-[9px] bg-[#639922] px-4 py-2 text-[12.5px] font-bold text-white disabled:opacity-40">
+              {saved ? "已保真保存" : saving ? "正在保存…" : "确认并保真保存"}
+            </button>
+          </div>
+        </>
+      )}
+      {saved && <p className="mt-3 rounded-[8px] bg-[#EAF3DE] px-3 py-2 text-[12.5px] font-semibold text-[#3B6D11]">执行模板已保真保存</p>}
+      {error && <p role="alert" className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</p>}
+    </section>
+  );
+}
 
 function listText(items?: string[]) {
   return (items ?? []).map(t => t.trim()).filter(Boolean).join("、");
@@ -157,6 +332,12 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const { ips, activeIP } = useIP();
   const isIPMode = searchParams?.scope === "ip";
   const requestedCategory = searchParams?.category ?? "";
+  const [intakeMode, setIntakeMode] = useState<"ai" | "exact">("ai");
+  const pageTitle = isIPMode
+    ? "IP内容理解入库"
+    : intakeMode === "exact"
+      ? "原文保真保存"
+      : "智能入库助手";
   const availableCategories = isIPMode
     ? IP_CATEGORIES.map(category => category.id).filter(category => category !== "IP原始内容")
     : ALL_CATS;
@@ -535,15 +716,29 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     <div className="min-h-screen p-6 md:p-8">
       <header className="mb-6">
         <div className="mb-1.5 text-[13px] text-[#8A8A86]">
-          <a href="/" className="font-semibold text-[#639922]">工作台</a> / <a href="/knowledge-hub" className="text-[#639922]">知识库中心</a> / {isIPMode ? "IP内容理解入库" : "智能入库助手"}
+          <a href="/" className="font-semibold text-[#639922]">工作台</a> / <a href="/knowledge-hub" className="text-[#639922]">知识库中心</a> / {pageTitle}
         </div>
-        <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">{isIPMode ? "IP内容理解入库" : "智能入库助手"}</h1>
+        <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">{pageTitle}</h1>
         <p className="mt-1 text-[13px] text-[#888]">
           {isIPMode
             ? `忠实理解你输入的完整内容，保留原文和思维脉络，确认后写入「${activeIP?.name ?? "当前IP"}」知识库。`
-            : "粘贴原始资料，AI自动提炼成可复用的短视频方法知识，确认后写入通用知识库。"}
+            : intakeMode === "exact"
+              ? "逐字保存完整执行模板，不调用AI；检查全库相似内容后由你确认是否入库。"
+              : "粘贴原始资料，AI自动提炼成可复用的短视频方法知识，确认后写入通用知识库。"}
         </p>
       </header>
+
+      {!isIPMode && (
+        <div className="mb-4 flex gap-2" aria-label="入库模式">
+          <button type="button" aria-pressed={intakeMode === "ai"} onClick={() => setIntakeMode("ai")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">AI提炼方法卡</button>
+          <button type="button" aria-pressed={intakeMode === "exact"} onClick={() => setIntakeMode("exact")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">原文保真保存</button>
+        </div>
+      )}
+
+      {intakeMode === "exact" && !isIPMode ? (
+        <ExactTemplateIntakePanel ipNamesById={Object.fromEntries(ips.map(ip => [ip.id, ip.name]))} />
+      ) : (
+        <>
 
       {items.length === 0 && !loading && (
         <div className="rounded-[16px] border border-[#E5E4DE] bg-white p-5">
@@ -824,37 +1019,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                 {!isIPMode && listText(item.triggerKeywords) && <p className="mb-1 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">触发关键词：</span>{listText(item.triggerKeywords)}</p>}
                 {!isIPMode && item.aiUsage && <p className="mb-1.5 text-[12px] text-[#888]"><span className="font-semibold text-[#555]">AI调用方式：</span>{item.aiUsage}</p>}
                 <p className="text-[11.5px] text-[#AAA]"><span className="font-semibold text-[#888]">入库依据：</span>{item.ingestReason} · {item.confidenceReason}</p>
-                <section className="mt-3 rounded-[10px] border border-[#E5E4DE] bg-[#FCFCFA] p-3">
-                  <h3 className="text-[12.5px] font-bold text-[#333]">入库前检查</h3>
-                  <p className="mt-1 text-[11.5px] text-[#666]">
-                    {item.precheck.quality.status === "pass"
-                      ? "基础质量：未发现明显问题"
-                      : "基础质量：需要人工检查"}
-                  </p>
-                  {item.precheck.quality.issues.length > 0 && (
-                    <ul className="mt-1 list-disc space-y-1 pl-4 text-[11.5px] text-[#8A6418]">
-                      {item.precheck.quality.issues.map(issue => <li key={issue.code}>{issue.message}</li>)}
-                    </ul>
-                  )}
-                  {item.precheck.similarEntries.length === 0 ? (
-                    <p className="mt-2 text-[11.5px] text-[#888]">全库暂未发现相似内容</p>
-                  ) : (
-                    <div className="mt-2 space-y-2">
-                      {item.precheck.similarEntries.map(similar => (
-                        <div key={similar.knowledgeId} className="rounded-[8px] bg-white px-3 py-2 text-[11.5px] text-[#666]">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="rounded-full bg-[#F2EEDF] px-2 py-0.5 font-bold text-[#735F21]">
-                              {SIMILARITY_LABEL[similar.tier]}
-                            </span>
-                            <span>{similar.title || "未命名内容"}｜{similar.category || "分类未标注"}</span>
-                          </div>
-                          <p className="mt-1">相似原因：{similar.reasons.join("；")}</p>
-                          <p className="mt-1 text-[#888]">{similar.ownershipLabel}｜{similar.sourceDescription}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
+                <KnowledgePrecheckPanel assessment={item.precheck} />
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -911,6 +1076,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             <a href="/knowledge-hub" className="rounded-[10px] px-5 py-2.5 text-[13px] font-bold text-white" style={{ background: "#1C1C1B" }}>去知识库查看</a>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

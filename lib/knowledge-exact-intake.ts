@@ -1,14 +1,16 @@
 import { saveExactKnowledgeTemplateEntry } from "./ip-store";
 import type { KnowledgeCategory, KnowledgeEntry } from "./types";
 
-const EXACT_TEMPLATE_CATEGORIES = new Set<KnowledgeCategory>([
+export const EXACT_TEMPLATE_CATEGORIES = [
   "方法论",
   "定位方法库",
   "选题方法库",
   "标题方法库",
   "开头方法库",
   "文案框架方法库",
-]);
+] as const satisfies readonly KnowledgeCategory[];
+
+const EXACT_TEMPLATE_CATEGORY_SET = new Set<KnowledgeCategory>(EXACT_TEMPLATE_CATEGORIES);
 
 export interface SaveExactKnowledgeTemplateInput {
   templateKey: string;
@@ -32,7 +34,7 @@ function assertInput(input: SaveExactKnowledgeTemplateInput): void {
   if (!input.title.trim()) throw new Error("执行模板标题不能为空");
   if (!input.rawContent.trim()) throw new Error("执行模板正文不能为空");
   if (!input.sourceName.trim()) throw new Error("执行模板来源名称不能为空");
-  if (!EXACT_TEMPLATE_CATEGORIES.has(input.category)) {
+  if (!EXACT_TEMPLATE_CATEGORY_SET.has(input.category)) {
     throw new Error("执行模板必须保存到全局方法类知识库");
   }
 }
