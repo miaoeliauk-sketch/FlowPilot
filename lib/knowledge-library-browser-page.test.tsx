@@ -106,6 +106,12 @@ function installBrowserEnvironment() {
     IS_REACT_ACT_ENVIRONMENT: true,
     React,
   };
+  Object.defineProperty(dom.window.navigator, "locks", {
+    configurable: true,
+    value: {
+      request: async (_name: string, operation: () => unknown) => operation(),
+    },
+  });
   const previous = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries(browserGlobals)) {
     previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
@@ -224,6 +230,37 @@ test("原有新增导入和专项库能力保留在次级管理入口", async ()
   assert.ok(view.getByText("历史专项库："));
   assert.ok(view.getByRole("link", { name: /新增知识/ }));
   assert.ok(view.getByRole("button", { name: /从 Excel 批量导入/ }));
+});
+
+test("管理知识库的旧删除入口也必须先确认，取消时不删除", async () => {
+  const previousConfirm = window.confirm;
+  let confirmMessage = "";
+  Object.defineProperty(window, "confirm", {
+    configurable: true,
+    value: (message?: string) => {
+      confirmMessage = message ?? "";
+      return false;
+    },
+  });
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+    await user.click(await view.findByRole("button", { name: "管理知识库" }));
+    await user.click(view.getByRole("button", { name: "爆款案例" }));
+    await user.click(view.getByRole("button", { name: "删除知识「全局爆款案例」" }));
+    assert.match(confirmMessage, /全局爆款案例/);
+    assert.match(confirmMessage, /通用知识/);
+    assert.match(confirmMessage, /脚本和复盘不会被删除/);
+    const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+    assert.ok(persisted.some(item => item.id === "global-case"));
+  } finally {
+    Object.defineProperty(window, "confirm", { configurable: true, value: previousConfirm });
+  }
 });
 
 test("切换IP过程中不会把旧知识短暂显示成新IP归属", async () => {
@@ -389,4 +426,590 @@ test("知识详情展示原始来源、真实证据和历史未验证记录但�
   assert.match(detail.textContent ?? "", /历史未验证记录/);
   assert.match(detail.textContent ?? "", /旧记录无法核验/);
   assert.equal(/方法有效|方法无效|判定有效|判定无效/.test(detail.textContent ?? ""), false);
+});
+
+test("用户在知识详情看清范围和引用影响后确认删除，列表立即刷新且不级联删除脚本复盘", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    entry("delete-method", "待删除的当前IP方法", activeIP.id, {
+      usageRecords: [{
+        id: "usage-delete-method",
+        module: "脚本工厂",
+        usedAt: "2026-08-23T01:00:00.000Z",
+        reason: "正文真实采用",
+        relevanceTier: "高度相关",
+        relevanceReason: "正文存在证据",
+        context: "生成脚本",
+        trackingStatus: "script_adopted",
+        topicId: "topic-delete",
+        scriptId: "script-delete",
+        reviewId: "review-delete",
+        usageType: "structure",
+        sectionLabel: "开头",
+        evidenceExcerpt: "真实采用片段",
+      }],
+    }),
+    entry("keep-global", "应保留的通用知识", null),
+    entry("keep-other", "应保留的其他IP知识", otherIP.id),
+  ]));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-delete",
+    ipId: activeIP.id,
+    topicId: "topic-delete",
+    title: "引用知识的脚本",
+    cover: "",
+    content: "真实采用片段",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "verified",
+      candidateKnowledgeEntryIds: ["delete-method"],
+      verifiedAt: "2026-08-23T01:00:00.000Z",
+      usages: [{
+        knowledgeEntryId: "delete-method",
+        usageType: "structure",
+        sectionLabel: "开头",
+        evidenceExcerpt: "真实采用片段",
+        reason: "正文真实采用",
+      }],
+    },
+    createdAt: "2026-08-23T01:00:00.000Z",
+  }]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    id: "review-delete",
+    ipId: activeIP.id,
+    title: "引用知识的复盘",
+    platform: "视频号",
+    publishedAt: "2026-08-24",
+    videoUrl: "",
+    contentDirection: "知识",
+    topicId: "topic-delete",
+    scriptId: "script-delete",
+    sourceType: "flowpilot",
+    traceabilityStatus: "traceable",
+    knowledgeEffectStatus: "tracked",
+    scriptText: "真实采用片段",
+    metrics: null,
+    analysis: null,
+    savedToKnowledge: false,
+    knowledgeEntryId: null,
+    createdAt: "2026-08-25T00:00:00.000Z",
+    updatedAt: "2026-08-25T00:00:00.000Z",
+    manualReviewStatus: "completed",
+    manualReviewTags: [],
+    manualReviewNote: "已复盘",
+  }]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看待删除的当前IP方法详情" }));
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+  const confirmation = view.getByRole("alertdialog", { name: "确认删除知识" });
+  assert.match(confirmation.textContent ?? "", /待删除的当前IP方法/);
+  assert.match(confirmation.textContent ?? "", /当前IP知识/);
+  assert.match(confirmation.textContent ?? "", /已用于脚本1次/);
+  assert.match(confirmation.textContent ?? "", /已有发布复盘1次/);
+  assert.match(confirmation.textContent ?? "", /脚本和复盘不会被删除/);
+  assert.equal((JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as unknown[]).length, 3);
+
+  await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+  assert.equal(view.queryByText("待删除的当前IP方法"), null);
+  assert.ok(view.getByText("应保留的通用知识"));
+  const storedKnowledge = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+  assert.deepEqual(storedKnowledge.map(item => item.id).sort(), ["keep-global", "keep-other"]);
+  assert.equal((JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as unknown[]).length, 1);
+  assert.equal((JSON.parse(localStorage.getItem("ipwr:videoReviews") ?? "[]") as unknown[]).length, 1);
+});
+
+test("确认删除时知识归属已经变化会明确阻止且保留原数据", async () => {
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看反常识开头方法详情" }));
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+  const stored = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as KnowledgeEntry[];
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify(stored.map(item =>
+    item.id === "current-method" ? { ...item, ipId: otherIP.id } : item
+  )));
+
+  await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+  assert.match((await view.findByRole("alert")).textContent ?? "", /知识归属已经变化/);
+  const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as KnowledgeEntry[];
+  assert.equal(persisted.find(item => item.id === "current-method")?.ipId, otherIP.id);
+  assert.ok(view.getByRole("dialog", { name: "知识详情：反常识开头方法" }));
+});
+
+test("确认删除时知识库数据已损坏会明确反馈且不把损坏状态覆盖成空库", async () => {
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看反常识开头方法详情" }));
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+  localStorage.setItem("ipwr:knowledgeEntries", "{损坏的旧数据");
+
+  await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+  assert.match((await view.findByRole("alert")).textContent ?? "", /知识库数据已损坏/);
+  assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), "{损坏的旧数据");
+  assert.ok(view.getByRole("dialog", { name: "知识详情：反常识开头方法" }));
+});
+
+test("通用知识的删除确认统计所有IP的真实脚本和复盘引用", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    entry("global-used", "被其他IP采用的通用知识", null, {
+      usageRecords: [{
+        id: "usage-global-other",
+        module: "脚本工厂",
+        usedAt: "2026-08-23T01:00:00.000Z",
+        reason: "正文真实采用",
+        relevanceTier: "高度相关",
+        relevanceReason: "正文存在证据",
+        context: "生成脚本",
+        trackingStatus: "script_adopted",
+        topicId: "topic-other",
+        scriptId: "script-other",
+        reviewId: "review-other",
+        usageType: "structure",
+        sectionLabel: "开头",
+        evidenceExcerpt: "真实采用片段",
+      }],
+    }),
+  ]));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-other",
+    ipId: otherIP.id,
+    topicId: "topic-other",
+    title: "其他IP引用脚本",
+    cover: "",
+    content: "真实采用片段",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "verified",
+      candidateKnowledgeEntryIds: ["global-used"],
+      verifiedAt: "2026-08-23T01:00:00.000Z",
+      usages: [{
+        knowledgeEntryId: "global-used",
+        usageType: "structure",
+        sectionLabel: "开头",
+        evidenceExcerpt: "真实采用片段",
+        reason: "正文真实采用",
+      }],
+    },
+    createdAt: "2026-08-23T01:00:00.000Z",
+  }]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    id: "review-other",
+    ipId: otherIP.id,
+    title: "其他IP发布复盘",
+    platform: "视频号",
+    publishedAt: "2026-08-24",
+    videoUrl: "",
+    contentDirection: "知识",
+    topicId: "topic-other",
+    scriptId: "script-other",
+    sourceType: "flowpilot",
+    traceabilityStatus: "traceable",
+    knowledgeEffectStatus: "tracked",
+    scriptText: "真实采用片段",
+    metrics: null,
+    analysis: null,
+    savedToKnowledge: false,
+    knowledgeEntryId: null,
+    createdAt: "2026-08-25T00:00:00.000Z",
+    updatedAt: "2026-08-25T00:00:00.000Z",
+    manualReviewStatus: "completed",
+    manualReviewTags: [],
+    manualReviewNote: "已复盘",
+  }]));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看被其他IP采用的通用知识详情" }));
+  const detail = view.getByRole("dialog", { name: "知识详情：被其他IP采用的通用知识" });
+  assert.equal((detail.textContent ?? "").includes("其他IP引用脚本"), false);
+  assert.equal((detail.textContent ?? "").includes("其他IP发布复盘"), false);
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+  const confirmation = view.getByRole("alertdialog", { name: "确认删除知识" });
+  assert.match(confirmation.textContent ?? "", /已用于脚本1次/);
+  assert.match(confirmation.textContent ?? "", /已有发布复盘1次/);
+});
+
+for (const damagedStore of ["ipwr:scriptAssets", "ipwr:videoReviews"] as const) {
+  test(`${damagedStore}损坏时阻止删除且不覆盖知识数据`, async () => {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+    await user.click(await view.findByRole("button", { name: "查看反常识开头方法详情" }));
+    await user.click(view.getByRole("button", { name: "删除知识" }));
+    localStorage.setItem(damagedStore, "{损坏的数据");
+    await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+
+    assert.match((await view.findByRole("alert")).textContent ?? "", /数据已损坏/);
+    const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+    assert.ok(persisted.some(item => item.id === "current-method"));
+  });
+}
+
+test("复盘库存在结构残缺记录时阻止删除且不覆盖知识数据", async () => {
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看反常识开头方法详情" }));
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([{
+    id: "broken-review",
+    createdAt: "2026-08-25T00:00:00.000Z",
+  }]));
+  await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+
+  assert.match((await view.findByRole("alert")).textContent ?? "", /数据已损坏/);
+  const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+  assert.ok(persisted.some(item => item.id === "current-method"));
+});
+
+test("删除锁内重新读取最新知识，保留另一标签页刚新增的数据", async () => {
+  const { deleteKnowledgeEntryFromLibrary } = await import("./ip-store");
+  const locksDescriptor = Object.getOwnPropertyDescriptor(navigator, "locks");
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      request: async (_name: string, operation: () => unknown) => {
+        const latest = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as KnowledgeEntry[];
+        localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+          ...latest,
+          entry("concurrent-new", "另一标签页新知识", activeIP.id),
+        ]));
+        return operation();
+      },
+    },
+  });
+  try {
+    await deleteKnowledgeEntryFromLibrary({
+      id: "current-method",
+      activeIPId: activeIP.id,
+      expectedIPId: activeIP.id,
+    });
+    const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+    assert.ok(persisted.some(item => item.id === "concurrent-new"));
+    assert.equal(persisted.some(item => item.id === "current-method"), false);
+  } finally {
+    if (locksDescriptor) Object.defineProperty(navigator, "locks", locksDescriptor);
+    else Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  }
+});
+
+test("旧口播样本删除入口需要确认且不能跨IP删除", async () => {
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    entry("voice-other", "其他IP口播样本", otherIP.id, {
+      category: "IP语料库",
+      tags: ["口播逐字稿"],
+    }),
+  ]));
+  const previousConfirm = window.confirm;
+  const previousAlert = window.alert;
+  let confirmMessage = "";
+  let alertMessage = "";
+  Object.defineProperty(window, "confirm", {
+    configurable: true,
+    value: (message?: string) => {
+      confirmMessage = message ?? "";
+      return true;
+    },
+  });
+  Object.defineProperty(window, "alert", {
+    configurable: true,
+    value: (message?: string) => { alertMessage = message ?? ""; },
+  });
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+    await user.click(await view.findByRole("button", { name: "管理知识库" }));
+    await user.click(view.getByRole("button", { name: "IP口播" }));
+    await user.click(view.getByRole("button", { name: "删除口播样本「其他IP口播样本」" }));
+
+    assert.match(confirmMessage, /其他IP口播样本/);
+    assert.match(confirmMessage, /删除后不会删除已有脚本和复盘/);
+    assert.match(alertMessage, /不属于当前IP/);
+    const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+    assert.ok(persisted.some(item => item.id === "voice-other"));
+  } finally {
+    Object.defineProperty(window, "confirm", { configurable: true, value: previousConfirm });
+    Object.defineProperty(window, "alert", { configurable: true, value: previousAlert });
+  }
+});
+
+test("脚本或复盘数据损坏时普通知识浏览仍安全返回可见知识", async () => {
+  const { loadKnowledgeLibrarySnapshot } = await import("./knowledge-library-view");
+
+  for (const damagedStore of ["ipwr:scriptAssets", "ipwr:videoReviews"] as const) {
+    localStorage.setItem("ipwr:scriptAssets", JSON.stringify([]));
+    localStorage.setItem("ipwr:videoReviews", JSON.stringify([]));
+    localStorage.setItem(damagedStore, "{损坏的数据");
+
+    const snapshot = loadKnowledgeLibrarySnapshot(activeIP.id);
+
+    assert.ok(snapshot.items.some(item => item.id === "current-method"));
+    assert.ok(snapshot.items.some(item => item.id === "global-case"));
+  }
+});
+
+test("知识已经删除但列表刷新失败时明确提示删除已完成", async () => {
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看反常识开头方法详情" }));
+  await user.click(view.getByRole("button", { name: "删除知识" }));
+
+  const storage = localStorage;
+  const originalGetItem = storage.getItem.bind(storage);
+  const originalSetItem = storage.setItem.bind(storage);
+  const localStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  let knowledgeWritten = false;
+  let knowledgeReadsAfterWrite = 0;
+  const failingStorage = {
+    get length() { return storage.length; },
+    clear: () => storage.clear(),
+    key: (index: number) => storage.key(index),
+    removeItem: (key: string) => storage.removeItem(key),
+    setItem: (key: string, value: string) => {
+      originalSetItem(key, value);
+      if (key === "ipwr:knowledgeEntries" && !value.includes("current-method")) {
+        knowledgeWritten = true;
+      }
+    },
+    getItem: (key: string) => {
+      if (key === "ipwr:knowledgeEntries" && knowledgeWritten) {
+        knowledgeReadsAfterWrite += 1;
+        if (knowledgeReadsAfterWrite === 2) throw new Error("模拟列表刷新失败");
+      }
+      return originalGetItem(key);
+    },
+  } satisfies Storage;
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    writable: true,
+    value: failingStorage,
+  });
+  try {
+    await user.click(view.getByRole("button", { name: "确认删除这条知识" }));
+
+    assert.match((await view.findByRole("alert")).textContent ?? "", /知识已删除.*列表刷新失败/);
+    const persisted = JSON.parse(originalGetItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+    assert.equal(persisted.some(item => item.id === "current-method"), false);
+  } finally {
+    if (localStorageDescriptor) {
+      Object.defineProperty(globalThis, "localStorage", localStorageDescriptor);
+    } else {
+      delete (globalThis as Record<string, unknown>).localStorage;
+    }
+  }
+});
+
+test("口播样本删除使用独立路径且不受脚本或复盘损坏影响", async () => {
+  const voiceSample = entry("voice-independent", "独立口播样本", activeIP.id, {
+    category: "IP语料库",
+    tags: ["口播逐字稿"],
+  });
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([voiceSample]));
+  localStorage.setItem("ipwr:scriptAssets", "{损坏的脚本库");
+  localStorage.setItem("ipwr:videoReviews", "{损坏的复盘库");
+  const { deleteVoiceSample } = await import("./ip-store");
+
+  await deleteVoiceSample({
+    id: voiceSample.id,
+    activeIPId: activeIP.id,
+    expectedIPId: activeIP.id,
+  });
+
+  const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+  assert.equal(persisted.some(item => item.id === voiceSample.id), false);
+});
+
+test("知识库存在重复编号时严格拒绝删除且不改写原数据", async () => {
+  const duplicateA = entry("duplicate-id", "重复知识A", activeIP.id);
+  const duplicateB = entry("duplicate-id", "重复知识B", activeIP.id);
+  const original = JSON.stringify([duplicateA, duplicateB]);
+  localStorage.setItem("ipwr:knowledgeEntries", original);
+  const { deleteKnowledgeEntryFromLibrary } = await import("./ip-store");
+
+  await assert.rejects(
+    deleteKnowledgeEntryFromLibrary({
+      id: "duplicate-id",
+      activeIPId: activeIP.id,
+      expectedIPId: activeIP.id,
+    }),
+    /重复编号/,
+  );
+  assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), original);
+});
+
+test("知识删除写入失败时明确报错且保留原数据", async () => {
+  const originalStorage = localStorage;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const original = originalStorage.getItem("ipwr:knowledgeEntries");
+  const failingStorage = {
+    get length() { return originalStorage.length; },
+    clear: () => originalStorage.clear(),
+    getItem: (key: string) => originalStorage.getItem(key),
+    key: (index: number) => originalStorage.key(index),
+    removeItem: (key: string) => originalStorage.removeItem(key),
+    setItem: (key: string, value: string) => {
+      if (key === "ipwr:knowledgeEntries") throw new Error("模拟写入失败");
+      originalStorage.setItem(key, value);
+    },
+  } satisfies Storage;
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    writable: true,
+    value: failingStorage,
+  });
+  try {
+    const { deleteKnowledgeEntryFromLibrary } = await import("./ip-store");
+    await assert.rejects(
+      deleteKnowledgeEntryFromLibrary({
+        id: "current-method",
+        activeIPId: activeIP.id,
+        expectedIPId: activeIP.id,
+      }),
+      /知识删除失败/,
+    );
+    assert.equal(originalStorage.getItem("ipwr:knowledgeEntries"), original);
+  } finally {
+    if (originalDescriptor) Object.defineProperty(globalThis, "localStorage", originalDescriptor);
+    else delete (globalThis as Record<string, unknown>).localStorage;
+  }
+});
+
+test("浏览器不支持安全锁时拒绝删除且保留原数据", async () => {
+  const locksDescriptor = Object.getOwnPropertyDescriptor(navigator, "locks");
+  const original = localStorage.getItem("ipwr:knowledgeEntries");
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: undefined,
+  });
+  try {
+    const { deleteKnowledgeEntryFromLibrary } = await import("./ip-store");
+    await assert.rejects(
+      deleteKnowledgeEntryFromLibrary({
+        id: "current-method",
+        activeIPId: activeIP.id,
+        expectedIPId: activeIP.id,
+      }),
+      /不支持安全删除知识/,
+    );
+    assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), original);
+  } finally {
+    if (locksDescriptor) Object.defineProperty(navigator, "locks", locksDescriptor);
+    else Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  }
+});
+
+test("单条脚本的知识追踪结构损坏时严格拒绝删除", async () => {
+  const original = localStorage.getItem("ipwr:knowledgeEntries");
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-broken-tracking",
+    ipId: activeIP.id,
+    topicId: "topic-broken-tracking",
+    title: "追踪结构损坏的脚本",
+    cover: "",
+    content: "正文可能引用了知识",
+    status: "定稿",
+    knowledgeTracking: {
+      status: "verified",
+      candidateKnowledgeEntryIds: ["current-method"],
+      verifiedAt: "2026-08-23T01:00:00.000Z",
+      usages: [{
+        knowledgeEntryId: "current-method",
+        usageType: "非法类型",
+      }],
+    },
+    createdAt: "2026-08-23T01:00:00.000Z",
+  }]));
+  const { deleteKnowledgeEntryFromLibrary } = await import("./ip-store");
+
+  await assert.rejects(
+    deleteKnowledgeEntryFromLibrary({
+      id: "current-method",
+      activeIPId: activeIP.id,
+      expectedIPId: activeIP.id,
+    }),
+    /脚本库数据已损坏/,
+  );
+  assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), original);
+});
+
+test("严格写入已回读确认后不因多余读取失败误报删除失败", async () => {
+  const originalStorage = localStorage;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  let knowledgeWritten = false;
+  let readsAfterWrite = 0;
+  const unstableStorage = {
+    get length() { return originalStorage.length; },
+    clear: () => originalStorage.clear(),
+    key: (index: number) => originalStorage.key(index),
+    removeItem: (key: string) => originalStorage.removeItem(key),
+    setItem: (key: string, value: string) => {
+      originalStorage.setItem(key, value);
+      if (key === "ipwr:knowledgeEntries" && !value.includes("current-method")) {
+        knowledgeWritten = true;
+      }
+    },
+    getItem: (key: string) => {
+      if (key === "ipwr:knowledgeEntries" && knowledgeWritten) {
+        readsAfterWrite += 1;
+        if (readsAfterWrite === 2) throw new Error("模拟写入确认后的多余读取失败");
+      }
+      return originalStorage.getItem(key);
+    },
+  } satisfies Storage;
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    writable: true,
+    value: unstableStorage,
+  });
+  try {
+    const { deleteKnowledgeEntryFromLibrary } = await import("./ip-store");
+    await deleteKnowledgeEntryFromLibrary({
+      id: "current-method",
+      activeIPId: activeIP.id,
+      expectedIPId: activeIP.id,
+    });
+    const persisted = JSON.parse(originalStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{ id: string }>;
+    assert.equal(persisted.some(item => item.id === "current-method"), false);
+  } finally {
+    if (originalDescriptor) Object.defineProperty(globalThis, "localStorage", originalDescriptor);
+    else delete (globalThis as Record<string, unknown>).localStorage;
+  }
 });

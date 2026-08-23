@@ -17,7 +17,7 @@ import {
 } from "./types";
 import {
   getKnowledgeEntries, getAllIPs, addKnowledgeEntry as legacyAdd,
-  deleteKnowledgeEntry, updateKnowledgeEntry,
+  deleteKnowledgeEntryFromLibrary, updateKnowledgeEntry,
 } from "./ip-store";
 import { searchKnowledgeEntries } from "./knowledge-search-utils";
 
@@ -199,8 +199,12 @@ export function recordKnowledgeItemUsage(
 }
 
 /** 删除知识条目（通过adapter删除旧存储） */
-export function deleteKnowledgeItem(id: string): void {
-  deleteKnowledgeEntry(id);
+export async function deleteKnowledgeItem(
+  id: string,
+  activeIPId: string | null,
+  expectedIPId: string | null,
+): Promise<KnowledgeEntry> {
+  return deleteKnowledgeEntryFromLibrary({ id, activeIPId, expectedIPId });
 }
 
 // ── 统计函数 ──

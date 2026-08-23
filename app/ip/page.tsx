@@ -369,10 +369,22 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
     setTitle(""); setRawText(""); setType("口播逐字稿"); setShowAddForm(false);
   };
 
-  const handleDelete = (id: string) => {
-    deleteVoiceSample(id);
-    setSamples(getVoiceSamples(ip.id));
-    setSelectedSampleIds((current) => current.filter((sampleId) => sampleId !== id));
+  const handleDelete = async (sample: VoiceSample) => {
+    const confirmed = window.confirm(
+      `确认删除口播样本「${sample.title}」？\n删除后不会删除已有脚本和复盘。`,
+    );
+    if (!confirmed) return;
+    try {
+      await deleteVoiceSample({
+        id: sample.id,
+        activeIPId: ip.id,
+        expectedIPId: sample.ipId,
+      });
+      setSamples(getVoiceSamples(ip.id));
+      setSelectedSampleIds((current) => current.filter((sampleId) => sampleId !== sample.id));
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : "口播样本删除失败，请稍后重试");
+    }
   };
 
   const toggleSample = (id: string) => {
@@ -527,7 +539,7 @@ function VoiceSampleModal({ ip, onClose }: { ip: IPProfile; onClose: () => void 
                 </div>
                 <button
                   disabled={extracting}
-                  onClick={() => handleDelete(s.id)}
+                  onClick={() => { void handleDelete(s); }}
                   aria-label={`删除${s.title}`}
                   className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[8px] text-[#999] hover:bg-[#FCEBEB] hover:text-[#A32D2D] disabled:opacity-40"
                 >

@@ -27,6 +27,12 @@ function installBrowserEnvironment() {
     IS_REACT_ACT_ENVIRONMENT: true,
     React,
   };
+  Object.defineProperty(dom.window.navigator, "locks", {
+    configurable: true,
+    value: {
+      request: async (_name: string, operation: () => unknown) => operation(),
+    },
+  });
   const previous = new Map<string, PropertyDescriptor | undefined>();
 
   for (const [key, value] of Object.entries(browserGlobals)) {
@@ -276,5 +282,40 @@ test("浏览器拒绝写入时页面明确提示保存失败且不展示假成�
   } finally {
     storagePrototype.setItem = originalSetItem;
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("IP身份页删除口播样本前必须明确确认，取消后保留原数据", async () => {
+  const sample = voiceEntry("a-delete", "待确认删除样本", IP_A.id, 1);
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([sample]));
+  localStorage.setItem("ipwr:scriptAssets", JSON.stringify([]));
+  localStorage.setItem("ipwr:videoReviews", JSON.stringify([]));
+  const previousConfirm = window.confirm;
+  let confirmMessage = "";
+  Object.defineProperty(window, "confirm", {
+    configurable: true,
+    value: (message?: string) => {
+      confirmMessage = message ?? "";
+      return false;
+    },
+  });
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const IPPage = (await import("../app/ip/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><IPPage /></IPProvider>);
+
+    const sampleLibraryButtons = await view.findAllByTitle("口播逐字稿样本库");
+    await user.click(sampleLibraryButtons[0]);
+    await user.click(view.getByRole("button", { name: "删除待确认删除样本" }));
+
+    assert.match(confirmMessage, /待确认删除样本/);
+    assert.match(confirmMessage, /不会删除已有脚本和复盘/);
+    const persisted = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as KnowledgeEntry[];
+    assert.ok(persisted.some(item => item.id === sample.id));
+  } finally {
+    Object.defineProperty(window, "confirm", { configurable: true, value: previousConfirm });
   }
 });

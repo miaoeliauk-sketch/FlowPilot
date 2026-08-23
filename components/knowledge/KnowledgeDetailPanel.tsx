@@ -1,6 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import type { KnowledgeLibraryItem } from "@/lib/knowledge-library-view";
+import type { KnowledgeDeletionPreview } from "@/lib/ip-store";
 
 function formatMetric(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value)
@@ -17,10 +19,18 @@ function formatDate(value: string | null): string {
 export function KnowledgeDetailPanel({
   item,
   onClose,
+  onPrepareDelete,
+  onDelete,
 }: {
   item: KnowledgeLibraryItem;
   onClose: () => void;
+  onPrepareDelete?: () => KnowledgeDeletionPreview;
+  onDelete?: () => void | Promise<void>;
 }) {
+  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deletionPreview, setDeletionPreview] = useState<KnowledgeDeletionPreview | null>(null);
   const { originalSource, effectEvidence, legacyUnverifiedRecords } = item.detail;
   const sourceHref = originalSource.sourceUrl && /^https?:\/\//i.test(originalSource.sourceUrl)
     ? originalSource.sourceUrl
@@ -48,8 +58,83 @@ export function KnowledgeDetailPanel({
             <h2 className="mt-1 text-[21px] font-semibold text-[#1C1C1B]">{item.title}</h2>
             <p className="mt-2 text-[12px] text-[#777]">以下仅陈列来源、采用和发布证据，结论由你判断。</p>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭知识详情" className="rounded-lg border border-[#E5E4DE] bg-white px-3 py-1.5 text-[12px] text-[#555]">关闭</button>
+          <div className="flex flex-shrink-0 gap-2">
+            {onPrepareDelete && onDelete && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteError(null);
+                  try {
+                    setDeletionPreview(onPrepareDelete());
+                    setShowDeleteConfirmation(true);
+                  } catch (error) {
+                    setDeletionPreview(null);
+                    setShowDeleteConfirmation(false);
+                    setDeleteError(error instanceof Error ? error.message : "删除检查失败，请稍后重试");
+                  }
+                }}
+                className="rounded-lg border border-[#E7B7B7] bg-white px-3 py-1.5 text-[12px] text-[#A32D2D]"
+              >
+                删除知识
+              </button>
+            )}
+            <button type="button" onClick={onClose} aria-label="关闭知识详情" className="rounded-lg border border-[#E5E4DE] bg-white px-3 py-1.5 text-[12px] text-[#555]">关闭</button>
+          </div>
         </div>
+
+        {deleteError && !showDeleteConfirmation && (
+          <p role="alert" className="mb-4 rounded-[12px] border border-[#F2B8B5] bg-[#FCEBEB] px-4 py-3 text-[12px] text-[#A32D2D]">
+            {deleteError}
+          </p>
+        )}
+
+        {showDeleteConfirmation && deletionPreview && onDelete && (
+          <section
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="确认删除知识"
+            className="mb-4 rounded-[14px] border border-[#E7B7B7] bg-[#FFF5F5] p-4"
+          >
+            <h3 className="text-[14px] font-semibold text-[#8C2424]">确认删除「{item.title}」？</h3>
+            <div className="mt-2 space-y-1 text-[12px] leading-5 text-[#6F3A3A]">
+              <p>归属：{item.ipId ? "当前IP知识" : "通用知识（会影响所有IP）"}</p>
+              <p>已用于脚本{deletionPreview.adoptedScriptCount}次 · 已有发布复盘{deletionPreview.reviewedScriptCount}次</p>
+              <p>删除后，这条知识不再参与检索；已有脚本和复盘不会被删除。</p>
+            </div>
+            {deleteError && <p role="alert" className="mt-2 text-[12px] text-[#A32D2D]">{deleteError}</p>}
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={async () => {
+                  setIsDeleting(true);
+                  setDeleteError(null);
+                  try {
+                    await onDelete();
+                  } catch (error) {
+                    setDeleteError(error instanceof Error ? error.message : "知识删除失败，请稍后重试");
+                    setIsDeleting(false);
+                  }
+                }}
+                className="rounded-[9px] bg-[#A32D2D] px-4 py-2 text-[12px] font-semibold text-white disabled:opacity-50"
+              >
+                {isDeleting ? "正在删除…" : "确认删除这条知识"}
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => {
+                  setShowDeleteConfirmation(false);
+                  setDeletionPreview(null);
+                  setDeleteError(null);
+                }}
+                className="rounded-[9px] border border-[#DAD9D2] bg-white px-4 py-2 text-[12px] text-[#555] disabled:opacity-50"
+              >
+                取消
+              </button>
+            </div>
+          </section>
+        )}
 
         <div className="space-y-4">
           <section className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">

@@ -5,7 +5,7 @@ import { useIP } from "@/lib/ip-context";
 import { getIPDisplayLabel } from "@/lib/ip-display";
 import { KnowledgeEntry, KnowledgeCategory, VoiceSample, HookEntry, KnowledgeItem, KnowledgeItemType, KnowledgeItemScene, KNOWLEDGE_ITEM_TYPE_LABEL, KNOWLEDGE_ITEM_SCENE_LABEL, ScriptAsset, VideoReview } from "@/lib/types";
 import {
-  getKnowledgeEntries, addKnowledgeEntry, deleteKnowledgeEntry, updateKnowledgeEntry,
+  getKnowledgeEntries, addKnowledgeEntry, deleteKnowledgeEntryFromLibrary, updateKnowledgeEntry,
   getAllVoiceSamples, addVoiceSample, deleteVoiceSample,
   getHookEntries, getUnanalyzedHookEntries, addHookEntry, addHookEntriesBatch, deleteHookEntry, applyHookAnalysisResults,
   getCoverRefs, getGlobalCoverRefs, addCoverRef, deleteCoverRef,
@@ -1774,7 +1774,23 @@ export default function KnowledgeHubPage() {
                           </div>
                         ) : null;
                       })()}
-                      <button onClick={() => { deleteKnowledgeItem(item.id); refreshUnified(); }} className="text-[#BBB] hover:text-[#A32D2D]">
+                      <button
+                        type="button"
+                        aria-label={`删除知识「${item.title}」`}
+                        onClick={async () => {
+                          const confirmed = window.confirm(
+                            `确认删除知识「${item.title}」？\n删除后知识不再参与检索，已有脚本和复盘不会被删除。`,
+                          );
+                          if (!confirmed) return;
+                          try {
+                            await deleteKnowledgeItem(item.id, activeIP?.id ?? null, item.ipId);
+                            refreshUnified();
+                          } catch (error) {
+                            window.alert(error instanceof Error ? error.message : "知识删除失败，请稍后重试");
+                          }
+                        }}
+                        className="text-[#BBB] hover:text-[#A32D2D]"
+                      >
                         <Icon name="trash" size="sm" />
                       </button>
                     </div>
@@ -2046,7 +2062,27 @@ export default function KnowledgeHubPage() {
                       {getIPDisplayLabel(ip, ips)}
                     </span>
                   )}
-                  <button onClick={() => { deleteVoiceSample(s.id); refresh(); }} className="text-[#999] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
+                  <button
+                    type="button"
+                    aria-label={`删除口播样本「${s.title}」`}
+                    onClick={async () => {
+                      const confirmed = window.confirm(
+                        `确认删除口播样本「${s.title}」？\n删除后不会删除已有脚本和复盘。`,
+                      );
+                      if (!confirmed) return;
+                      try {
+                        await deleteVoiceSample({
+                          id: s.id,
+                          activeIPId: activeIP?.id ?? null,
+                          expectedIPId: s.ipId,
+                        });
+                        refresh();
+                      } catch (error) {
+                        window.alert(error instanceof Error ? error.message : "口播样本删除失败，请稍后重试");
+                      }
+                    }}
+                    className="text-[#999] hover:text-[#A32D2D]"
+                  ><Icon name="trash" size="sm" /></button>
                 </div>
                 <div className="mb-1 flex items-center gap-2">
                   <span className="text-[13px] font-semibold text-[#1C1C1B]">{s.title}</span>
@@ -2163,7 +2199,31 @@ export default function KnowledgeHubPage() {
                 {/* 底部：来源左侧截断，删除按钮右侧固定 */}
                 <div className="mt-2 flex min-w-0 items-center justify-between gap-2 border-t border-[#F0EFE9] pt-2">
                   <span className="min-w-0 truncate text-[10.5px] text-[#BBB]">{e.sourcePlatform} · {new Date(e.createdAt).toLocaleDateString()}{ip ? ` · ${getIPDisplayLabel(ip, ips)}` : ""}</span>
-                  <button onClick={ev => { ev.stopPropagation(); deleteKnowledgeEntry(e.id); refresh(); }} className="flex-shrink-0 text-[#BBB] hover:text-[#A32D2D]"><Icon name="trash" size="sm" /></button>
+                  <button
+                    type="button"
+                    aria-label={`删除知识「${e.title}」`}
+                    onClick={async ev => {
+                      ev.stopPropagation();
+                      const scopeLabel = e.ipId ? "当前IP知识" : "通用知识（会影响所有IP）";
+                      const confirmed = window.confirm(
+                        `确认删除知识「${e.title}」？\n归属：${scopeLabel}\n已用于脚本${effect.adoptedScriptCount}次，已有发布复盘${effect.reviewedScriptCount}次。\n删除后知识不再参与检索，已有脚本和复盘不会被删除。`,
+                      );
+                      if (!confirmed) return;
+                      try {
+                        await deleteKnowledgeEntryFromLibrary({
+                          id: e.id,
+                          activeIPId: activeIP?.id ?? null,
+                          expectedIPId: e.ipId,
+                        });
+                        refresh();
+                      } catch (error) {
+                        window.alert(error instanceof Error ? error.message : "知识删除失败，请稍后重试");
+                      }
+                    }}
+                    className="flex-shrink-0 text-[#BBB] hover:text-[#A32D2D]"
+                  >
+                    <Icon name="trash" size="sm" />
+                  </button>
                 </div>
               </Card>
             );

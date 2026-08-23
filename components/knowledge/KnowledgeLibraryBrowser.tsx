@@ -11,6 +11,10 @@ import {
 } from "@/lib/knowledge-library-view";
 import { KnowledgeDetailPanel } from "@/components/knowledge/KnowledgeDetailPanel";
 import {
+  deleteKnowledgeEntryFromLibrary,
+  getKnowledgeDeletionPreview,
+} from "@/lib/ip-store";
+import {
   KNOWLEDGE_SOURCE_LABELS,
   KNOWLEDGE_TRUST_LABELS,
 } from "@/components/knowledge/knowledge-library-labels";
@@ -62,6 +66,22 @@ export function KnowledgeLibraryBrowser({
     sourceKinds: sourceKind ? [sourceKind] : undefined,
   });
   const hasFilters = Boolean(search || category || trustStatus || sourceKind);
+
+  async function handleDelete(item: KnowledgeLibraryItem) {
+    await deleteKnowledgeEntryFromLibrary({
+      id: item.id,
+      activeIPId,
+      expectedIPId: item.ipId,
+    });
+    setSelectedItem(null);
+    try {
+      setSnapshot(loadKnowledgeLibrarySnapshot(activeIPId));
+      setLoadError(null);
+    } catch {
+      setSnapshot(EMPTY_SNAPSHOT);
+      setLoadError("知识已删除，但列表刷新失败，请手动刷新页面确认最新结果。");
+    }
+  }
 
   return (
     <section aria-labelledby="knowledge-browser-title" className="flex flex-col gap-4">
@@ -175,7 +195,16 @@ export function KnowledgeLibraryBrowser({
         </div>
       )}
       {selectedItem && (
-        <KnowledgeDetailPanel item={selectedItem} onClose={() => setSelectedItem(null)} />
+        <KnowledgeDetailPanel
+          item={selectedItem}
+          onClose={() => setSelectedItem(null)}
+          onPrepareDelete={() => getKnowledgeDeletionPreview({
+            id: selectedItem.id,
+            activeIPId,
+            expectedIPId: selectedItem.ipId,
+          })}
+          onDelete={() => handleDelete(selectedItem)}
+        />
       )}
     </section>
   );

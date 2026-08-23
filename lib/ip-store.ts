@@ -12,6 +12,10 @@ import {
   parseVerifiedScriptKnowledgeTracking,
 } from "./knowledge-effect-contract";
 import {
+  buildKnowledgeEffectReference,
+  createKnowledgeEffectReferenceIndex,
+} from "./knowledge-effect-reference";
+import {
   completeManualReview,
   createPendingManualReviewFields,
   migrateManualReviewFields,
@@ -33,6 +37,7 @@ const KEY_HOT_ANALYSES = "ipwr:hotAnalyses";
 const KEY_USER_PROFILE = "ipwr:userProfile";
 const KEY_VIDEO_REVIEWS = "ipwr:videoReviews";
 const KEY_COVER_REFS = "ipwr:coverRefs";
+const KNOWLEDGE_LIBRARY_WRITE_LOCK_NAME = `${KEY_KNOWLEDGE_ENTRIES}:library-write`;
 const DEFAULT_USER_PROFILE: UserProfile = { nickname: "彭彭", name: "" };
 
 export interface CoverRef {
@@ -97,6 +102,27 @@ function readJSON<T>(key: string, fallback: T): T {
 function writeJSON<T>(key: string, value: T) {
   if (typeof window === "undefined") return;
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore quota errors */ }
+}
+
+interface KnowledgeLibraryWriteLock {
+  request<T>(name: string, operation: () => T): Promise<T>;
+}
+
+function getKnowledgeLibraryWriteLock(): KnowledgeLibraryWriteLock | null {
+  if (typeof window === "undefined") return null;
+  const locks = typeof navigator === "undefined"
+    ? undefined
+    : (navigator as Navigator & { locks?: KnowledgeLibraryWriteLock }).locks;
+  if (!locks) {
+    throw new Error("当前浏览器不支持安全删除知识，请升级浏览器后重试");
+  }
+  return locks;
+}
+
+async function runWithKnowledgeLibraryWriteLock<T>(operation: () => T): Promise<T> {
+  const lock = getKnowledgeLibraryWriteLock();
+  if (!lock) return operation();
+  return lock.request(KNOWLEDGE_LIBRARY_WRITE_LOCK_NAME, operation);
 }
 
 function writeJSONStrict<T>(key: string, value: T, failureMessage: string): void {
@@ -384,9 +410,37 @@ export function addVoiceSample(input: Omit<VoiceSample, "id" | "createdAt">): Vo
   return { id: entry.id, ipId: entry.ipId ?? "", title: entry.title, type: (entry.tags[0] ?? "口播逐字稿") as VoiceSample["type"], rawText: entry.rawContent, note: entry.note, createdAt: entry.createdAt };
 }
 
-// 透明兼容：删除改为从知识库删除
-export function deleteVoiceSample(id: string): void {
-  deleteKnowledgeEntry(id);
+// 口播样本与普通知识共用底层存储，但删除时不依赖普通知识的脚本／复盘引用检查。
+export async function deleteVoiceSample(input: {
+  id: string;
+  activeIPId: string | null;
+  expectedIPId: string | null;
+}): Promise<KnowledgeEntry> {
+  return runWithKnowledgeLibraryWriteLock(() => {
+    const all = readKnowledgeEntriesStrict();
+    const matches = all.filter(entry => entry.id === input.id);
+    if (matches.length === 0) {
+      throw new Error("没有找到这条口播样本，可能已被删除");
+    }
+    if (matches.length > 1) {
+      throw new Error("知识库存在重复编号，已阻止删除，请先恢复数据");
+    }
+    const target = migrateKnowledgeEntry(matches[0]!);
+    if (target.category !== "IP语料库") {
+      throw new Error("这条数据不是口播样本，已阻止删除");
+    }
+    if (target.ipId !== input.expectedIPId) {
+      throw new Error("口播样本归属已经变化，已阻止删除，请刷新后重试");
+    }
+    if (target.ipId === null || target.ipId !== input.activeIPId) {
+      throw new Error("这条口播样本不属于当前IP，已阻止删除");
+    }
+    writeKnowledgeEntriesStrict(
+      all.filter(entry => entry.id !== input.id),
+      "口播样本删除失败，原数据不会被覆盖，请稍后重试",
+    );
+    return target;
+  });
 }
 
 // ── IP风格画像（从样本库提取，供文案改写工作台等模块复用） ──
@@ -1328,9 +1382,210 @@ export async function saveExactKnowledgeTemplateEntry(
   return migrateKnowledgeEntry(persisted[0]!);
 }
 
-export function deleteKnowledgeEntry(id: string): void {
+export interface KnowledgeDeletionReferenceSnapshot {
+  scripts: ScriptAsset[];
+  reviews: VideoReview[];
+  retainedReviewIdByRemovedId: ReadonlyMap<string, string>;
+}
+
+export interface KnowledgeDeletionRequest {
+  id: string;
+  activeIPId: string | null;
+  expectedIPId: string | null;
+}
+
+export interface KnowledgeDeletionPreview {
+  entry: KnowledgeEntry;
+  adoptedScriptCount: number;
+  reviewedScriptCount: number;
+}
+
+function readStoredArrayStrict(key: string, label: string): unknown[] {
+  if (typeof window === "undefined") {
+    throw new Error(`${label}读取失败，已停止删除`);
+  }
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    throw new Error(`${label}读取失败，已停止删除`);
+  }
+  if (raw === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${label}数据已损坏，已停止删除，原数据不会被覆盖`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${label}数据已损坏，已停止删除，原数据不会被覆盖`);
+  }
+  return parsed;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readScriptAssetStrictlyForKnowledgeDeletion(value: unknown): ScriptAsset | null {
+  const readable = readScriptAssetSafely(value);
+  if (!readable || !isPlainRecord(value)) return null;
+  const tracking = value.knowledgeTracking;
+  if (tracking === undefined) return readable;
+  if (!isPlainRecord(tracking)) return null;
+
+  const candidateIds = tracking.candidateKnowledgeEntryIds;
+  const usages = tracking.usages;
+  if (!Array.isArray(candidateIds) || !candidateIds.every(id => typeof id === "string")) return null;
+  if (!Array.isArray(usages)) return null;
+
+  if (tracking.status === "not_tracked") {
+    if (candidateIds.length > 0 || tracking.verifiedAt !== null || usages.length > 0) return null;
+    return { ...readable, knowledgeTracking: createNotTrackedKnowledgeState() };
+  }
+  if (tracking.status === "unavailable") {
+    if (typeof tracking.verifiedAt !== "string" || !tracking.verifiedAt.trim() || usages.length > 0) return null;
+    return {
+      ...readable,
+      knowledgeTracking: {
+        status: "unavailable",
+        candidateKnowledgeEntryIds: candidateIds,
+        verifiedAt: tracking.verifiedAt,
+        usages: [],
+      },
+    };
+  }
+  if (tracking.status !== "verified" || typeof tracking.verifiedAt !== "string") return null;
+  try {
+    return {
+      ...readable,
+      knowledgeTracking: parseVerifiedScriptKnowledgeTracking({
+        candidateKnowledgeEntryIds: candidateIds,
+        finalScriptText: readable.content,
+        verifiedAt: tracking.verifiedAt,
+        usages,
+      }),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// 删除前需要比普通历史浏览更严格：字段残缺的复盘不能被当成“0次引用”。
+// 新增的追溯和人工复盘字段仍保持可选，以兼容已有历史记录。
+function isStrictlyReadableVideoReviewForKnowledgeDeletion(
+  value: unknown,
+): value is VideoReview {
+  if (!isPlainRecord(value)) return false;
+  const requiredStrings = [
+    "id",
+    "title",
+    "platform",
+    "publishedAt",
+    "videoUrl",
+    "contentDirection",
+    "scriptText",
+    "createdAt",
+  ] as const;
+  if (requiredStrings.some(field => typeof value[field] !== "string")) return false;
+  if ((value.id as string).length === 0 || (value.createdAt as string).length === 0) return false;
+  if (!(value.ipId === null || typeof value.ipId === "string")) return false;
+  if (!(value.knowledgeEntryId === null || typeof value.knowledgeEntryId === "string")) return false;
+  if (typeof value.savedToKnowledge !== "boolean") return false;
+  if (!(value.metrics === null || isPlainRecord(value.metrics))) return false;
+  if (!(value.analysis === null || isPlainRecord(value.analysis))) return false;
+  for (const optionalLink of ["topicId", "scriptId"] as const) {
+    const link = value[optionalLink];
+    if (!(link === undefined || link === null || typeof link === "string")) return false;
+  }
+  return true;
+}
+
+export function getKnowledgeDeletionReferenceSnapshot(): KnowledgeDeletionReferenceSnapshot {
+  const rawScripts = readStoredArrayStrict(KEY_SCRIPT_ASSETS, "脚本库");
+  const scripts = rawScripts.map(readScriptAssetStrictlyForKnowledgeDeletion);
+  if (scripts.some(script => script === null)) {
+    throw new Error("脚本库数据已损坏，已停止删除，原数据不会被覆盖");
+  }
+  const readableScripts = scripts as ScriptAsset[];
+  if (new Set(readableScripts.map(script => script.id)).size !== readableScripts.length) {
+    throw new Error("脚本库存在重复编号，已停止删除，请先恢复数据");
+  }
+
+  const rawReviews = readStoredArrayStrict(KEY_VIDEO_REVIEWS, "复盘库");
+  if (!rawReviews.every(isStrictlyReadableVideoReviewForKnowledgeDeletion)) {
+    throw new Error("复盘库数据已损坏，已停止删除，原数据不会被覆盖");
+  }
+  const collapseResult = collapseDuplicateVideoReviews(
+    rawReviews.map(review => migrateManualReviewFields(review as VideoReview)),
+  );
+  return {
+    scripts: readableScripts,
+    reviews: collapseResult.reviews,
+    retainedReviewIdByRemovedId: collapseResult.retainedReviewIdByRemovedId,
+  };
+}
+
+function resolveKnowledgeDeletion(
+  input: KnowledgeDeletionRequest,
+): { all: KnowledgeEntry[]; preview: KnowledgeDeletionPreview } {
+  const references = getKnowledgeDeletionReferenceSnapshot();
   const all = readKnowledgeEntriesStrict();
-  writeJSON(KEY_KNOWLEDGE_ENTRIES, all.filter((e) => e.id !== id));
+  const matches = all.filter(entry => entry.id === input.id);
+  if (matches.length === 0) {
+    throw new Error("没有找到这条知识，可能已被删除");
+  }
+  if (matches.length > 1) {
+    throw new Error("知识库存在重复编号，已阻止删除，请先恢复数据");
+  }
+  const target = migrateKnowledgeEntry(matches[0]!);
+  if (target.ipId !== input.expectedIPId) {
+    throw new Error("知识归属已经变化，已阻止删除，请刷新后重试");
+  }
+  if (target.ipId !== null && target.ipId !== input.activeIPId) {
+    throw new Error("这条知识不属于当前IP，已阻止删除");
+  }
+  const effect = buildKnowledgeEffectReference(
+    target,
+    createKnowledgeEffectReferenceIndex(
+      target.ipId === null
+        ? references.scripts
+        : references.scripts.filter(script => script.ipId === target.ipId),
+      target.ipId === null
+        ? references.reviews
+        : references.reviews.filter(review => review.ipId === target.ipId),
+      references.retainedReviewIdByRemovedId,
+    ),
+  );
+  return {
+    all,
+    preview: {
+      entry: target,
+      adoptedScriptCount: effect.adoptedScriptCount,
+      reviewedScriptCount: effect.reviewedScriptCount,
+    },
+  };
+}
+
+export function getKnowledgeDeletionPreview(
+  input: KnowledgeDeletionRequest,
+): KnowledgeDeletionPreview {
+  return resolveKnowledgeDeletion(input).preview;
+}
+
+export async function deleteKnowledgeEntryFromLibrary(
+  input: KnowledgeDeletionRequest,
+): Promise<KnowledgeEntry> {
+  return runWithKnowledgeLibraryWriteLock(() => {
+    // 获得跨标签页锁后重新执行全部严格检查并读取最新知识，避免覆盖并发新增。
+    const { all, preview } = resolveKnowledgeDeletion(input);
+
+    writeKnowledgeEntriesStrict(
+      all.filter(entry => entry.id !== input.id),
+      "知识删除失败，原数据不会被覆盖，请稍后重试",
+    );
+    return preview.entry;
+  });
 }
 
 // 记录一次知识被某个模块引用——"被哪些模块调用"和"调用次数"都从usageRecords派生，
