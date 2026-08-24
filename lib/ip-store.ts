@@ -37,6 +37,7 @@ const KEY_HOT_ANALYSES = "ipwr:hotAnalyses";
 const KEY_USER_PROFILE = "ipwr:userProfile";
 const KEY_VIDEO_REVIEWS = "ipwr:videoReviews";
 const KEY_COVER_REFS = "ipwr:coverRefs";
+export const LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY = "ipwr:legacyKnowledgeMergeAudit:v1";
 const KNOWLEDGE_LIBRARY_WRITE_LOCK_NAME = `${KEY_KNOWLEDGE_ENTRIES}:library-write`;
 const DEFAULT_USER_PROFILE: UserProfile = { nickname: "彭彭", name: "" };
 
@@ -136,6 +137,17 @@ function writeJSONStrict<T>(key: string, value: T, failureMessage: string): void
   } catch {
     throw new Error(failureMessage);
   }
+}
+
+function restoreRawStorageValueStrict(key: string, raw: string | null): void {
+  if (typeof window === "undefined") throw new Error("当前环境无法恢复本地数据");
+  if (raw === null) {
+    localStorage.removeItem(key);
+    if (localStorage.getItem(key) !== null) throw new Error("删除回滚校验失败");
+    return;
+  }
+  localStorage.setItem(key, raw);
+  if (localStorage.getItem(key) !== raw) throw new Error("写入回滚校验失败");
 }
 
 function writeVideoReviewsStrict(
@@ -1400,6 +1412,491 @@ export interface KnowledgeDeletionPreview {
   reviewedScriptCount: number;
 }
 
+export interface LegacyKnowledgeMergeRequest {
+  groupId: string;
+  backupContentSha256: string;
+  activeIPId: string | null;
+  survivor: KnowledgeEntry;
+  sources: KnowledgeEntry[];
+  mergedContent: {
+    rawContent: string;
+  };
+}
+
+export interface LegacyKnowledgeMergeAuditRecord {
+  id: string;
+  groupId: string;
+  status: "in_progress" | "completed";
+  backupContentSha256: string;
+  survivorBefore: KnowledgeEntry;
+  survivorAfter: KnowledgeEntry;
+  removedEntries: KnowledgeEntry[];
+  styleProfilesBefore: IPStyleProfile[];
+  styleProfilesAfter: IPStyleProfile[];
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface LegacyKnowledgeMergeResult {
+  survivor: KnowledgeEntry;
+  removedEntries: KnowledgeEntry[];
+  auditRecord: LegacyKnowledgeMergeAuditRecord;
+}
+
+export interface LegacyKnowledgeMergePreparationInput {
+  groupId: string;
+  activeIPId: string | null;
+  survivorId: string;
+  sourceIds: string[];
+}
+
+export interface LegacyKnowledgeMergePreparation {
+  groupId: string;
+  activeIPId: string | null;
+  survivor: KnowledgeEntry;
+  sources: KnowledgeEntry[];
+}
+
+const LEGACY_MERGE_AUDIT_KEYS = [
+  "id",
+  "groupId",
+  "status",
+  "backupContentSha256",
+  "survivorBefore",
+  "survivorAfter",
+  "removedEntries",
+  "styleProfilesBefore",
+  "styleProfilesAfter",
+  "startedAt",
+  "completedAt",
+] as const;
+
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function isValidISOTime(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isKnowledgeUsageAuditSnapshot(value: unknown): value is KnowledgeUsageRecord {
+  if (!isPlainRecord(value)) return false;
+  const stringFields = ["id", "module", "usedAt", "reason", "relevanceReason", "context"] as const;
+  if (stringFields.some(field => typeof value[field] !== "string")) return false;
+  if (!isValidISOTime(value.usedAt)) return false;
+  if (!(value.relevanceTier === "高度相关"
+    || value.relevanceTier === "中度相关"
+    || value.relevanceTier === "低度相关")) return false;
+  if (!(value.trackingStatus === "legacy_unverified"
+    || value.trackingStatus === "module_recorded"
+    || value.trackingStatus === "script_adopted")) return false;
+  for (const field of ["topicId", "scriptId", "reviewId", "sectionLabel", "evidenceExcerpt"] as const) {
+    if (!(value[field] === null || typeof value[field] === "string")) return false;
+  }
+  return value.usageType === null
+    || value.usageType === "structure"
+    || value.usageType === "argument"
+    || value.usageType === "case"
+    || value.usageType === "expression";
+}
+
+function isViralMetricsAuditSnapshot(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  if (!hasExactObjectKeys(value, ["likes", "comments", "shares", "favorites", "aboveAccountAverage"])) {
+    return false;
+  }
+  return ["likes", "comments", "shares", "favorites"].every(field => isFiniteNumber(value[field]))
+    && typeof value.aboveAccountAverage === "boolean";
+}
+
+function isHookScoreAuditSnapshot(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const fields = ["painPoint", "curiosity", "conflict", "benefit", "emotion", "total"] as const;
+  return hasExactObjectKeys(value, fields) && fields.every(field => isFiniteNumber(value[field]));
+}
+
+function isViralEvaluationAuditSnapshot(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const keys = [
+    "account", "track", "hook", "hookType", "hookScore", "grade", "whyViral",
+    "structureBreakdown", "metricsLayerPassed", "metricsLayerReason", "contentLayerPassed",
+    "contentLayerMatched", "structureLayerPassed", "structureLayerMissing", "exclusionMatched",
+    "selfCheckPassed", "selfCheckReasoning", "admitted",
+  ] as const;
+  if (!hasExactObjectKeys(value, keys)) return false;
+  const stringFields = [
+    "account", "track", "hook", "whyViral", "structureBreakdown", "metricsLayerReason",
+    "selfCheckReasoning",
+  ] as const;
+  if (stringFields.some(field => typeof value[field] !== "string")) return false;
+  const booleanFields = [
+    "metricsLayerPassed", "contentLayerPassed", "structureLayerPassed", "selfCheckPassed", "admitted",
+  ] as const;
+  if (booleanFields.some(field => typeof value[field] !== "boolean")) return false;
+  if (!isStringArray(value.contentLayerMatched) || !isStringArray(value.structureLayerMissing)) return false;
+  if (!(value.exclusionMatched === null || typeof value.exclusionMatched === "string")) return false;
+  if (!(value.hookType === null
+    || ["痛点型", "反常识型", "数据型", "故事型", "收益型", "身份型", "冲突型", "情绪型"].includes(
+      value.hookType as string,
+    ))) return false;
+  return ["S", "A", "B", "不收录"].includes(value.grade as string)
+    && isHookScoreAuditSnapshot(value.hookScore);
+}
+
+function isViralDNAAuditSnapshot(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const keys = [
+    "titleStructure", "openingHookType", "openingHookText", "structureBreakdown", "emotionValue",
+    "userNeedLayer",
+  ] as const;
+  if (!hasExactObjectKeys(value, keys)) return false;
+  if (["titleStructure", "openingHookType", "openingHookText", "userNeedLayer"]
+    .some(field => typeof value[field] !== "string")) return false;
+  if (!Array.isArray(value.structureBreakdown) || !value.structureBreakdown.every(item => (
+    isPlainRecord(item)
+    && hasExactObjectKeys(item, ["stage", "percentage", "content"])
+    && ["Hook", "Problem", "Solution", "Case", "CTA"].includes(item.stage as string)
+    && isFiniteNumber(item.percentage)
+    && typeof item.content === "string"
+  ))) return false;
+  return Array.isArray(value.emotionValue) && value.emotionValue.every(item => (
+    isPlainRecord(item)
+    && hasExactObjectKeys(item, ["emotion", "percentage"])
+    && typeof item.emotion === "string"
+    && isFiniteNumber(item.percentage)
+  ));
+}
+
+function isSourceAnalysisAuditSnapshot(value: unknown): boolean {
+  if (!isPlainRecord(value)
+    || !hasExactObjectKeys(value, ["analyzedAt", "parserVersion", "items"])
+    || !isValidISOTime(value.analyzedAt)
+    || value.parserVersion !== 1
+    || !Array.isArray(value.items)) return false;
+  return value.items.every(item => (
+    isPlainRecord(item)
+    && hasExactObjectKeys(item, [
+      "id", "kind", "content", "sourceId", "startPosition", "endPosition", "originalExcerpt",
+      "extractionStatus",
+    ])
+    && ["id", "content", "sourceId", "originalExcerpt"].every(field => typeof item[field] === "string")
+    && ["question", "claim", "reasoning", "evidence", "concept", "topic", "expression"]
+      .includes(item.kind as string)
+    && Number.isInteger(item.startPosition)
+    && Number.isInteger(item.endPosition)
+    && (item.extractionStatus === "AI提取" || item.extractionStatus === "人工确认")
+  ));
+}
+
+function isSourceReferenceAuditSnapshot(value: unknown): boolean {
+  return isPlainRecord(value)
+    && hasExactObjectKeys(value, ["sourceType", "analysisId", "role", "groupItemId"])
+    && value.sourceType === "hot_analysis"
+    && typeof value.analysisId === "string"
+    && (value.role === "viral_case" || value.role === "method_card")
+    && typeof value.groupItemId === "string";
+}
+
+function isExecutionTemplateAuditSnapshot(value: unknown): boolean {
+  return isPlainRecord(value)
+    && hasExactObjectKeys(value, ["templateKey", "version", "contentHash"])
+    && typeof value.templateKey === "string"
+    && typeof value.version === "string"
+    && /^[a-f0-9]{64}$/.test(String(value.contentHash));
+}
+
+function isKnowledgeEntryAuditSnapshot(value: unknown): value is KnowledgeEntry {
+  if (!isPlainRecord(value)) return false;
+  const stringFields = [
+    "id",
+    "category",
+    "title",
+    "rawContent",
+    "sourceTier",
+    "sourceTierReason",
+    "sourcePlatform",
+    "sourceUrl",
+    "note",
+    "createdAt",
+    "status",
+  ] as const;
+  if (stringFields.some(field => typeof value[field] !== "string")) return false;
+  if (!isValidISOTime(value.createdAt)) return false;
+  if (!(value.category === "爆款案例"
+    || value.category === "方法论"
+    || value.category === "评论需求"
+    || value.category === "选题案例"
+    || value.category === "IP语料库"
+    || value.category === "复盘经验库"
+    || value.category === "定位方法库"
+    || value.category === "选题方法库"
+    || value.category === "标题方法库"
+    || value.category === "开头方法库"
+    || value.category === "文案框架方法库"
+    || value.category === "IP原始内容"
+    || value.category === "IP人设资料"
+    || value.category === "IP表达语料"
+    || value.category === "IP历史内容"
+    || value.category === "IP高表现内容"
+    || value.category === "IP受众反馈"
+    || value.category === "IP禁用规则")) return false;
+  if (!(value.sourceTier === "高" || value.sourceTier === "中" || value.sourceTier === "低")) return false;
+  if (!(value.ipId === null || typeof value.ipId === "string")) return false;
+  if (!(value.extractedAt === null || isValidISOTime(value.extractedAt))) return false;
+  for (const field of ["tags", "keywords", "contentDirection"] as const) {
+    if (!isStringArray(value[field])) {
+      return false;
+    }
+  }
+  if (!Array.isArray(value.usageRecords) || !value.usageRecords.every(isKnowledgeUsageAuditSnapshot)) return false;
+  if (!(["未使用", "已用于选题", "已用于脚本", "已用于分析"] as const).includes(
+    value.status as KnowledgeStatus,
+  )) return false;
+  if (!(value.metrics === null || isViralMetricsAuditSnapshot(value.metrics))) return false;
+  if (!(value.viralEvaluation === null || isViralEvaluationAuditSnapshot(value.viralEvaluation))) return false;
+  if (!(value.dna === null || isViralDNAAuditSnapshot(value.dna))) return false;
+  if (!(value.sourceKind === undefined || value.sourceKind === null
+    || ["直播逐字稿", "课程内容", "文章", "语音整理", "其他"].includes(value.sourceKind as string))) return false;
+  if (!(value.sourceName === undefined || typeof value.sourceName === "string")) return false;
+  if (!(value.sourceAnalysis === undefined || value.sourceAnalysis === null
+    || isSourceAnalysisAuditSnapshot(value.sourceAnalysis))) return false;
+  if (!(value.trustStatus === undefined || value.trustStatus === null
+    || [
+      "ai_derived_unverified", "adopted_awaiting_effect", "effect_evidence_awaiting_judgment",
+      "human_confirmed_effective",
+    ].includes(value.trustStatus as string))) return false;
+  if (!(value.sourceReference === undefined || value.sourceReference === null
+    || isSourceReferenceAuditSnapshot(value.sourceReference))) return false;
+  if (!(value.executionTemplate === undefined || value.executionTemplate === null
+    || isExecutionTemplateAuditSnapshot(value.executionTemplate))) return false;
+  return true;
+}
+
+function isStyleProfileAuditSnapshot(value: unknown): value is IPStyleProfile {
+  return isPlainRecord(value)
+    && typeof value.ipId === "string"
+    && buildVoiceStyleProfileForSave(value, value.ipId) !== null;
+}
+
+function isLegacyKnowledgeMergeAuditRecord(
+  value: unknown,
+): value is LegacyKnowledgeMergeAuditRecord {
+  if (!isPlainRecord(value) || !hasExactObjectKeys(value, LEGACY_MERGE_AUDIT_KEYS)) return false;
+  if (!/^D\d{2}$/.test(String(value.groupId))) return false;
+  if (!/^[a-f0-9]{64}$/.test(String(value.backupContentSha256))) return false;
+  if (!isValidISOTime(value.startedAt)) return false;
+  if (!(value.status === "in_progress" || value.status === "completed")) return false;
+  if (value.status === "in_progress" && value.completedAt !== null) return false;
+  if (value.status === "completed" && !isValidISOTime(value.completedAt)) return false;
+  if (typeof value.id !== "string"
+    || value.id !== `legacy-knowledge-merge:${value.groupId}:${value.startedAt}`) return false;
+  if (!isKnowledgeEntryAuditSnapshot(value.survivorBefore)
+    || !isKnowledgeEntryAuditSnapshot(value.survivorAfter)) return false;
+  if (value.survivorBefore.id !== value.survivorAfter.id) return false;
+  if (serializeKnowledgeSnapshot({
+    ...value.survivorAfter,
+    rawContent: value.survivorBefore.rawContent,
+  }) !== serializeKnowledgeSnapshot(value.survivorBefore)) return false;
+  if (!Array.isArray(value.removedEntries)
+    || value.removedEntries.length === 0
+    || !value.removedEntries.every(isKnowledgeEntryAuditSnapshot)) return false;
+  const knowledgeIds = [
+    value.survivorBefore.id,
+    ...value.removedEntries.map(entry => entry.id),
+  ];
+  if (new Set(knowledgeIds).size !== knowledgeIds.length) return false;
+  for (const field of ["styleProfilesBefore", "styleProfilesAfter"] as const) {
+    if (!Array.isArray(value[field]) || !value[field].every(isStyleProfileAuditSnapshot)) return false;
+  }
+  return true;
+}
+
+function readLegacyKnowledgeMergeAuditRecordsStrict(): LegacyKnowledgeMergeAuditRecord[] {
+  if (typeof window === "undefined") return [];
+  const raw = localStorage.getItem(LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY);
+  if (raw === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("旧知识合并记录已损坏，请先恢复备份；系统已停止合并");
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isLegacyKnowledgeMergeAuditRecord)) {
+    throw new Error("旧知识合并记录已损坏，请先恢复备份；系统已停止合并");
+  }
+  return parsed as LegacyKnowledgeMergeAuditRecord[];
+}
+
+function assertNoUnfinishedLegacyKnowledgeMerge(
+  records: readonly LegacyKnowledgeMergeAuditRecord[],
+): void {
+  const unfinished = records.find(record => record.status === "in_progress");
+  if (unfinished) {
+    throw new Error(
+      `检测到${unfinished.groupId}有尚未完成的旧知识合并，请先恢复或明确处理上一组，系统已阻止继续操作`,
+    );
+  }
+}
+
+export function getLegacyKnowledgeMergeAuditRecords(): LegacyKnowledgeMergeAuditRecord[] {
+  return readLegacyKnowledgeMergeAuditRecordsStrict();
+}
+
+function serializeKnowledgeSnapshot(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function validateLegacyKnowledgeMergeRequest(
+  input: LegacyKnowledgeMergeRequest,
+  all: KnowledgeEntry[],
+): { survivor: KnowledgeEntry; sources: KnowledgeEntry[]; survivorAfter: KnowledgeEntry } {
+  if (!/^D\d{2}$/.test(input.groupId)) {
+    throw new Error("复核组编号格式不正确，已停止合并");
+  }
+  if (!/^[a-f0-9]{64}$/.test(input.backupContentSha256)) {
+    throw new Error("完整备份校验值无效，已停止合并");
+  }
+  if (
+    typeof input.mergedContent !== "object"
+    || input.mergedContent === null
+    || Array.isArray(input.mergedContent)
+    || Object.keys(input.mergedContent).length !== 1
+    || typeof input.mergedContent.rawContent !== "string"
+    || input.mergedContent.rawContent.trim().length === 0
+  ) {
+    throw new Error("人工合并内容不完整，已停止合并");
+  }
+  if (input.sources.length === 0) {
+    throw new Error("至少需要指定一条被合并知识");
+  }
+  const requestedIds = [input.survivor.id, ...input.sources.map(entry => entry.id)];
+  if (new Set(requestedIds).size !== requestedIds.length) {
+    throw new Error("保留项和被合并项编号不能重复");
+  }
+
+  const survivorMatches = all.filter(entry => entry.id === input.survivor.id);
+  if (survivorMatches.length !== 1) {
+    throw new Error("保留项编号不存在或重复，已停止合并");
+  }
+  const survivor = survivorMatches[0]!;
+  if (serializeKnowledgeSnapshot(survivor) !== serializeKnowledgeSnapshot(input.survivor)) {
+    throw new Error("保留项内容已经变化，已停止合并，请重新核对");
+  }
+  if (survivor.ipId !== null && survivor.ipId !== input.activeIPId) {
+    throw new Error("保留项不属于当前IP，已停止合并");
+  }
+  if (survivor.executionTemplate || survivor.sourceReference) {
+    throw new Error("带有系统来源身份的知识不能通过旧知识入口合并");
+  }
+
+  const sources = input.sources.map((expected) => {
+    const matches = all.filter(entry => entry.id === expected.id);
+    if (matches.length !== 1) {
+      throw new Error("被合并项编号不存在或重复，已停止合并");
+    }
+    const source = matches[0]!;
+    if (serializeKnowledgeSnapshot(source) !== serializeKnowledgeSnapshot(expected)) {
+      throw new Error("被合并项内容已经变化，已停止合并，请重新核对");
+    }
+    if (source.ipId !== survivor.ipId) {
+      throw new Error("保留项和被合并项归属不一致，已停止合并");
+    }
+    if (source.usageRecords.length > 0 || source.status !== "未使用") {
+      throw new Error("被合并项已有真实采用记录，已停止删除；请先单独迁移效果证据");
+    }
+    if (source.trustStatus || source.executionTemplate || source.sourceReference) {
+      throw new Error("带有系统生命周期或来源身份的知识不能通过旧知识入口删除");
+    }
+    return source;
+  });
+
+  return {
+    survivor,
+    sources,
+    survivorAfter: { ...survivor, rawContent: input.mergedContent.rawContent },
+  };
+}
+
+export function prepareLegacyKnowledgeMergeGroup(
+  input: LegacyKnowledgeMergePreparationInput,
+): LegacyKnowledgeMergePreparation {
+  assertNoUnfinishedLegacyKnowledgeMerge(readLegacyKnowledgeMergeAuditRecordsStrict());
+  if (!Array.isArray(input.sourceIds) || input.sourceIds.length === 0) {
+    throw new Error("至少需要指定一条被合并知识");
+  }
+  const all = readKnowledgeEntriesStrict();
+  const survivorMatches = all.filter(entry => entry.id === input.survivorId);
+  if (survivorMatches.length !== 1) {
+    throw new Error("保留项编号不存在或重复，已停止锁定");
+  }
+  const sourceEntries = input.sourceIds.map((id) => {
+    const matches = all.filter(entry => entry.id === id);
+    if (matches.length !== 1) {
+      throw new Error("被合并项编号不存在或重复，已停止锁定");
+    }
+    return matches[0]!;
+  });
+  const validated = validateLegacyKnowledgeMergeRequest({
+    groupId: input.groupId,
+    backupContentSha256: "0".repeat(64),
+    activeIPId: input.activeIPId,
+    survivor: survivorMatches[0]!,
+    sources: sourceEntries,
+    mergedContent: { rawContent: survivorMatches[0]!.rawContent },
+  }, all);
+  return JSON.parse(JSON.stringify({
+    groupId: input.groupId,
+    activeIPId: input.activeIPId,
+    survivor: validated.survivor,
+    sources: validated.sources,
+  })) as LegacyKnowledgeMergePreparation;
+}
+
+function relocateStyleProfileKnowledgeReferences(
+  profiles: IPStyleProfile[],
+  survivor: KnowledgeEntry,
+  sources: KnowledgeEntry[],
+): IPStyleProfile[] {
+  const sourceIds = new Set(sources.map(entry => entry.id));
+  return profiles.map((profile) => {
+    if (!profile.sourceSampleIds.some(id => sourceIds.has(id))) return profile;
+    if (survivor.ipId === null || profile.ipId !== survivor.ipId) {
+      throw new Error("语气画像中存在跨IP知识引用，已停止合并");
+    }
+    const ids: string[] = [];
+    const titles: string[] = [];
+    const seen = new Set<string>();
+    profile.sourceSampleIds.forEach((id, index) => {
+      const relocatedId = sourceIds.has(id) ? survivor.id : id;
+      const relocatedTitle = sourceIds.has(id)
+        ? survivor.title
+        : profile.sourceSampleTitles[index]!;
+      if (seen.has(relocatedId)) return;
+      seen.add(relocatedId);
+      ids.push(relocatedId);
+      titles.push(relocatedTitle);
+    });
+    return {
+      ...profile,
+      sourceSampleIds: ids,
+      sourceSampleTitles: titles,
+    };
+  });
+}
+
 function readStoredArrayStrict(key: string, label: string): unknown[] {
   if (typeof window === "undefined") {
     throw new Error(`${label}读取失败，已停止删除`);
@@ -1573,18 +2070,130 @@ export function getKnowledgeDeletionPreview(
   return resolveKnowledgeDeletion(input).preview;
 }
 
+function deleteKnowledgeEntryFromLibraryLocked(
+  input: KnowledgeDeletionRequest,
+): KnowledgeEntry {
+  const { all, preview } = resolveKnowledgeDeletion(input);
+  writeKnowledgeEntriesStrict(
+    all.filter(entry => entry.id !== input.id),
+    "知识删除失败，原数据不会被覆盖，请稍后重试",
+  );
+  return preview.entry;
+}
+
 export async function deleteKnowledgeEntryFromLibrary(
   input: KnowledgeDeletionRequest,
 ): Promise<KnowledgeEntry> {
   return runWithKnowledgeLibraryWriteLock(() => {
     // 获得跨标签页锁后重新执行全部严格检查并读取最新知识，避免覆盖并发新增。
-    const { all, preview } = resolveKnowledgeDeletion(input);
+    return deleteKnowledgeEntryFromLibraryLocked(input);
+  });
+}
 
-    writeKnowledgeEntriesStrict(
-      all.filter(entry => entry.id !== input.id),
-      "知识删除失败，原数据不会被覆盖，请稍后重试",
+export async function mergeLegacyKnowledgeGroupStrict(
+  input: LegacyKnowledgeMergeRequest,
+): Promise<LegacyKnowledgeMergeResult> {
+  return runWithKnowledgeLibraryWriteLock(() => {
+    if (typeof window === "undefined") {
+      throw new Error("当前环境无法执行旧知识合并");
+    }
+    const knowledgeBeforeRaw = localStorage.getItem(KEY_KNOWLEDGE_ENTRIES);
+    const styleProfilesBeforeRaw = localStorage.getItem(KEY_STYLE_PROFILES);
+    const auditBeforeRaw = localStorage.getItem(LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY);
+    const all = readKnowledgeEntriesStrict();
+    const { survivor, sources, survivorAfter } = validateLegacyKnowledgeMergeRequest(input, all);
+    const styleProfilesBefore = readStyleProfilesForWrite();
+    const styleProfilesAfter = relocateStyleProfileKnowledgeReferences(
+      styleProfilesBefore,
+      survivorAfter,
+      sources,
     );
-    return preview.entry;
+    const startedAt = new Date().toISOString();
+    const auditRecord: LegacyKnowledgeMergeAuditRecord = {
+      id: `legacy-knowledge-merge:${input.groupId}:${startedAt}`,
+      groupId: input.groupId,
+      status: "in_progress",
+      backupContentSha256: input.backupContentSha256,
+      survivorBefore: survivor,
+      survivorAfter,
+      removedEntries: sources,
+      styleProfilesBefore,
+      styleProfilesAfter,
+      startedAt,
+      completedAt: null,
+    };
+    const existingAudit = readLegacyKnowledgeMergeAuditRecordsStrict();
+    assertNoUnfinishedLegacyKnowledgeMerge(existingAudit);
+
+    try {
+      writeJSONStrict(
+        LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY,
+        [...existingAudit, auditRecord],
+        "旧知识合并记录保存失败，原数据不会被修改",
+      );
+      writeKnowledgeEntriesStrict(
+        all.map(entry => entry.id === survivor.id ? survivorAfter : entry),
+        "保留项写入失败，原数据不会被删除，请稍后重试",
+      );
+      const persistedSurvivor = readKnowledgeEntriesStrict()
+        .filter(entry => entry.id === survivor.id);
+      if (
+        persistedSurvivor.length !== 1
+        || serializeKnowledgeSnapshot(persistedSurvivor[0]!) !== serializeKnowledgeSnapshot(survivorAfter)
+      ) {
+        throw new Error("保留项回读校验失败，原数据不会被删除");
+      }
+      if (serializeKnowledgeSnapshot(styleProfilesBefore) !== serializeKnowledgeSnapshot(styleProfilesAfter)) {
+        writeJSONStrict(
+          KEY_STYLE_PROFILES,
+          styleProfilesAfter,
+          "语气画像引用迁移失败，原知识不会被删除",
+        );
+        const persistedProfiles = readStyleProfilesForWrite();
+        if (serializeKnowledgeSnapshot(persistedProfiles) !== serializeKnowledgeSnapshot(styleProfilesAfter)) {
+          throw new Error("语气画像引用回读校验失败，原知识不会被删除");
+        }
+      }
+
+      const removedEntries = sources.map(source => deleteKnowledgeEntryFromLibraryLocked({
+        id: source.id,
+        activeIPId: input.activeIPId,
+        expectedIPId: source.ipId,
+      }));
+      const completedRecord: LegacyKnowledgeMergeAuditRecord = {
+        ...auditRecord,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      };
+      writeJSONStrict(
+        LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY,
+        [...existingAudit, completedRecord],
+        "知识已合并，但操作记录保存失败；系统将尝试恢复原数据",
+      );
+      return {
+        survivor: survivorAfter,
+        removedEntries,
+        auditRecord: completedRecord,
+      };
+    } catch (error) {
+      const recoveryFailures: string[] = [];
+      for (const [key, raw, label] of [
+        [KEY_KNOWLEDGE_ENTRIES, knowledgeBeforeRaw, "知识库"],
+        [KEY_STYLE_PROFILES, styleProfilesBeforeRaw, "语气画像"],
+        [LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY, auditBeforeRaw, "操作记录"],
+      ] as const) {
+        try {
+          restoreRawStorageValueStrict(key, raw);
+        } catch {
+          recoveryFailures.push(label);
+        }
+      }
+      if (recoveryFailures.length > 0) {
+        const reason = error instanceof Error ? error.message : "旧知识合并失败";
+        throw new Error(`${reason}；${recoveryFailures.join("、")}自动恢复失败，请立即使用完整备份恢复`);
+      }
+      throw error;
+    }
   });
 }
 
