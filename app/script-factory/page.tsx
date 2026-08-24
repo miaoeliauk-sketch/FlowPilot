@@ -31,6 +31,7 @@ import type { ScriptDirectorRule } from "@/lib/script-director-rule";
 import { getScriptDirectorRules } from "@/lib/script-director-rule-store";
 import { ensureShuimuranDirectorRuleMigrated } from "@/lib/shuimuran-director-rule-migration";
 import { KnowledgeInspirationDrawer } from "@/components/knowledge/KnowledgeInspirationDrawer";
+import { getLegacyIPSourceAnalysisItems } from "@/lib/ip-source-analysis-v2";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -764,7 +765,7 @@ export default function ScriptFactoryPage() {
   function getIPSourceContext(ipId: string) {
     return getKnowledgeEntries("IP原始内容")
       .filter(entry => entry.ipId === ipId)
-      .flatMap(entry => (entry.sourceAnalysis?.items ?? []).map(item => ({
+      .flatMap(entry => getLegacyIPSourceAnalysisItems(entry.sourceAnalysis).map(item => ({
         ipId,
         sourceId: entry.id,
         sourceTitle: entry.title,

@@ -31,6 +31,7 @@ import {
 import { buildKnowledgeEffectReference, createKnowledgeEffectReferenceIndex } from "@/lib/knowledge-effect-reference";
 import { assessVideoReviewTraceability } from "@/lib/review-traceability";
 import { KnowledgeLibraryBrowser } from "@/components/knowledge/KnowledgeLibraryBrowser";
+import { getLegacyIPSourceAnalysisItems } from "@/lib/ip-source-analysis-v2";
 
 const SOURCE_ANALYSIS_KIND_LABEL: Record<string, string> = {
   question: "老师在回答什么",
@@ -2374,7 +2375,7 @@ export default function KnowledgeHubPage() {
                     <p className="mt-0.5 text-[11px] text-[#777]">这些内容可以回到原文，但不等于其中的外部事实已经核实。</p>
                   </div>
                   <div className="flex max-h-[320px] flex-col gap-2 overflow-y-auto pr-1">
-                    {detail.sourceAnalysis.items.map(item => (
+                    {getLegacyIPSourceAnalysisItems(detail.sourceAnalysis).map(item => (
                       <div key={item.id} className="rounded-[9px] bg-white px-3 py-2.5">
                         <div className="mb-1 flex flex-wrap items-center gap-2">
                           <span className="text-[10.5px] font-bold text-[#1D4ED8]">{SOURCE_ANALYSIS_KIND_LABEL[item.kind] ?? item.kind}</span>

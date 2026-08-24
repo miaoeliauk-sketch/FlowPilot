@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
+import { getLegacyIPSourceAnalysisItems } from "./ip-source-analysis-v2";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -75,13 +76,14 @@ test("IP原始内容只保存一份原文，解析结果都回溯到最终Source
   assert.equal(loaded?.rawContent, originalContent);
   assert.equal(loaded?.category, "IP原始内容");
   assert.equal(loaded?.ipId, "ip-shuimuran");
-  assert.equal(loaded?.sourceAnalysis?.items[0]?.sourceId, saved.id);
+  const loadedItems = getLegacyIPSourceAnalysisItems(loaded?.sourceAnalysis);
+  assert.equal(loadedItems[0]?.sourceId, saved.id);
   assert.equal(
     loaded?.rawContent.slice(
-      loaded.sourceAnalysis.items[0].startPosition,
-      loaded.sourceAnalysis.items[0].endPosition,
+      loadedItems[0]!.startPosition,
+      loadedItems[0]!.endPosition,
     ),
-    loaded?.sourceAnalysis?.items[0]?.originalExcerpt,
+    loadedItems[0]?.originalExcerpt,
   );
 });
 
@@ -123,8 +125,9 @@ test("重新解析只替换解析层，不改动Source原文", async () => {
 
   const loaded = getIPOriginalSource(saved.id);
   assert.equal(loaded?.rawContent, originalContent);
-  assert.equal(loaded?.sourceAnalysis?.items[0]?.sourceId, saved.id);
-  assert.equal(loaded?.sourceAnalysis?.items[0]?.extractionStatus, "人工确认");
+  const loadedItems = getLegacyIPSourceAnalysisItems(loaded?.sourceAnalysis);
+  assert.equal(loadedItems[0]?.sourceId, saved.id);
+  assert.equal(loadedItems[0]?.extractionStatus, "人工确认");
 });
 
 test("粘贴原文未填写标题时，可从理解结果生成可编辑标题", async () => {
@@ -235,4 +238,105 @@ test("知识库存储不是数组或条目缺少基础身份字段时拒绝覆�
     }), /知识库数据已损坏/);
     assert.equal(storage.getItem("ipwr:knowledgeEntries"), invalidStore);
   }
+});
+
+test("知识库存储兼容V2，并拒绝原文哈希不一致的V2记录", async () => {
+  const { addIPOriginalSource } = await import("./ip-original-source");
+  const { getKnowledgeEntries } = await import("./ip-store");
+  const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
+  const originalContent = "老师原话：判断不是追随共识，而是找到共识没有解释的矛盾。";
+  const saved = addIPOriginalSource({
+    ipId: "ip-shuimuran",
+    title: "判断与共识",
+    sourceKind: "课程内容",
+    originalContent,
+    sourceName: "",
+    sourceUrl: "",
+    analysis: {
+      analyzedAt: "2026-08-24T10:00:00.000Z",
+      parserVersion: 1,
+      items: [],
+    },
+  });
+  const stored = JSON.parse(storage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<Record<string, unknown>>;
+  stored[0]!.sourceAnalysis = buildIPSourceAnalysisV2({
+    sourceId: saved.id,
+    sourceContent: originalContent,
+    analyzedAt: "2026-08-24T11:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000004",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: {
+          content: "判断应该如何形成？",
+          derivation: "inferred",
+          anchors: [{ quote: originalContent }],
+        },
+        claim: {
+          content: "判断来自共识尚未解释的矛盾。",
+          anchors: [{ quote: "找到共识没有解释的矛盾" }],
+        },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  storage.setItem("ipwr:knowledgeEntries", JSON.stringify(stored));
+
+  assert.equal(getKnowledgeEntries("IP原始内容")[0]?.sourceAnalysis?.parserVersion, 2);
+
+  stored[0]!.rawContent = `${originalContent}被篡改`;
+  storage.setItem("ipwr:knowledgeEntries", JSON.stringify(stored));
+  assert.throws(() => getKnowledgeEntries("IP原始内容"), /知识库数据已损坏/);
+});
+
+test("知识库存储拒绝挂在错误知识记录下的合法V2解析数据", async () => {
+  const { addIPOriginalSource } = await import("./ip-original-source");
+  const { getKnowledgeEntries } = await import("./ip-store");
+  const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
+  const originalContent = "老师原话：判断不是追随共识，而是找到共识没有解释的矛盾。";
+  const saved = addIPOriginalSource({
+    ipId: "ip-shuimuran",
+    title: "判断与共识",
+    sourceKind: "课程内容",
+    originalContent,
+    sourceName: "",
+    sourceUrl: "",
+    analysis: {
+      analyzedAt: "2026-08-24T10:00:00.000Z",
+      parserVersion: 1,
+      items: [],
+    },
+  });
+  const stored = JSON.parse(storage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<Record<string, unknown>>;
+  stored[0]!.sourceAnalysis = buildIPSourceAnalysisV2({
+    sourceId: saved.id,
+    sourceContent: originalContent,
+    analyzedAt: "2026-08-24T11:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000006",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: {
+          content: "判断应该如何形成？",
+          derivation: "inferred",
+          anchors: [{ quote: originalContent }],
+        },
+        claim: {
+          content: "判断来自共识尚未解释的矛盾。",
+          anchors: [{ quote: "找到共识没有解释的矛盾" }],
+        },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  stored[0]!.id = "wrong-knowledge-id";
+  storage.setItem("ipwr:knowledgeEntries", JSON.stringify(stored));
+
+  assert.throws(() => getKnowledgeEntries("IP原始内容"), /知识库数据已损坏/);
 });

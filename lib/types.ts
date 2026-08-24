@@ -297,6 +297,62 @@ export interface IPSourceAnalysis {
   items: IPSourceAnalysisItem[];
 }
 
+export interface IPSourceAnchor {
+  quote: string;
+  startPosition: number;
+  endPosition: number;
+}
+
+export interface IPSourceBackedStatement {
+  content: string;
+  anchors: IPSourceAnchor[];
+}
+
+export type CognitionEvidenceType = "case" | "data" | "external_fact" | "analogy" | "counter_example";
+export type CognitionReviewStatus = "ai_extracted" | "human_confirmed" | "rejected";
+export type CognitionReasoningStatus = "complete" | "partial" | "not_provided";
+
+export interface CognitionNodeV2 {
+  id: string;
+  question: IPSourceBackedStatement & {
+    derivation: "explicit" | "inferred";
+  };
+  claim: IPSourceBackedStatement;
+  reasoning: {
+    status: CognitionReasoningStatus;
+    steps: Array<IPSourceBackedStatement & { order: number }>;
+  };
+  evidence: Array<IPSourceBackedStatement & {
+    type: CognitionEvidenceType;
+    verificationStatus: "unverified" | "verified";
+  }>;
+  concepts: Array<{
+    term: string;
+    definition: string;
+    anchors: IPSourceAnchor[];
+  }>;
+  reviewStatus: CognitionReviewStatus;
+}
+
+export interface CognitionAISuggestion {
+  content: string;
+  basedOnNodeIds: string[];
+}
+
+export interface IPSourceAnalysisV2 {
+  analyzedAt: string;
+  parserVersion: 2;
+  sourceId: string;
+  sourceHash: string;
+  nodes: CognitionNodeV2[];
+  aiSuggestions: {
+    potentialPrinciples: CognitionAISuggestion[];
+    topicPotential: CognitionAISuggestion[];
+  };
+}
+
+export type IPSourceAnalysisSnapshot = IPSourceAnalysis | IPSourceAnalysisV2;
+
 // 调用方模块——故意不用closed union锁死，因为AI内容工厂/内容诊断中心这类还没建出来的
 // 模块以后接入时，不应该需要回头改这个类型定义。已知模块给个集合方便UI下拉，不是类型层面的限制。
 export type ConsumerModule = string;
@@ -355,7 +411,7 @@ export interface KnowledgeEntry {
   // IP原始内容专用：原文永远保存在rawContent，解析层可以重做但不能覆盖原文。
   sourceKind?: IPOriginalSourceKind | null;
   sourceName?: string;
-  sourceAnalysis?: IPSourceAnalysis | null;
+  sourceAnalysis?: IPSourceAnalysisSnapshot | null;
   tags: string[];
   keywords: string[];
   ipId: string | null; // 所属IP，方法论/通用评论可能不属于任何IP，允许为空

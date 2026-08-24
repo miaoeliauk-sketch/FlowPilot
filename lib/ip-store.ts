@@ -22,6 +22,7 @@ import {
   transitionManualReviewStatus,
   type CompleteManualReviewInput,
 } from "./review-workflow";
+import { isIPSourceAnalysisSnapshot } from "./ip-source-analysis-v2";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -176,15 +177,17 @@ function readKnowledgeEntriesStrict(): KnowledgeEntry[] {
   }
   if (
     !Array.isArray(parsed)
-    || parsed.some(entry => (
-      typeof entry !== "object"
-      || entry === null
-      || Array.isArray(entry)
-      || typeof (entry as Record<string, unknown>).id !== "string"
-      || typeof (entry as Record<string, unknown>).category !== "string"
-      || typeof (entry as Record<string, unknown>).title !== "string"
-      || typeof (entry as Record<string, unknown>).createdAt !== "string"
-    ))
+    || parsed.some(entry => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return true;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.id !== "string"
+        || typeof record.category !== "string"
+        || typeof record.title !== "string"
+        || typeof record.createdAt !== "string") return true;
+      if (record.sourceAnalysis === undefined || record.sourceAnalysis === null) return false;
+      return typeof record.rawContent !== "string"
+        || !isIPSourceAnalysisSnapshot(record.sourceAnalysis, record.rawContent, record.id);
+    })
   ) {
     throw new Error("知识库数据已损坏，请先恢复备份；系统已阻止继续写入");
   }
@@ -1580,27 +1583,6 @@ function isViralDNAAuditSnapshot(value: unknown): boolean {
   ));
 }
 
-function isSourceAnalysisAuditSnapshot(value: unknown): boolean {
-  if (!isPlainRecord(value)
-    || !hasExactObjectKeys(value, ["analyzedAt", "parserVersion", "items"])
-    || !isValidISOTime(value.analyzedAt)
-    || value.parserVersion !== 1
-    || !Array.isArray(value.items)) return false;
-  return value.items.every(item => (
-    isPlainRecord(item)
-    && hasExactObjectKeys(item, [
-      "id", "kind", "content", "sourceId", "startPosition", "endPosition", "originalExcerpt",
-      "extractionStatus",
-    ])
-    && ["id", "content", "sourceId", "originalExcerpt"].every(field => typeof item[field] === "string")
-    && ["question", "claim", "reasoning", "evidence", "concept", "topic", "expression"]
-      .includes(item.kind as string)
-    && Number.isInteger(item.startPosition)
-    && Number.isInteger(item.endPosition)
-    && (item.extractionStatus === "AI提取" || item.extractionStatus === "人工确认")
-  ));
-}
-
 function isSourceReferenceAuditSnapshot(value: unknown): boolean {
   return isPlainRecord(value)
     && hasExactObjectKeys(value, ["sourceType", "analysisId", "role", "groupItemId"])
@@ -1672,7 +1654,7 @@ function isKnowledgeEntryAuditSnapshot(value: unknown): value is KnowledgeEntry 
     || ["直播逐字稿", "课程内容", "文章", "语音整理", "其他"].includes(value.sourceKind as string))) return false;
   if (!(value.sourceName === undefined || typeof value.sourceName === "string")) return false;
   if (!(value.sourceAnalysis === undefined || value.sourceAnalysis === null
-    || isSourceAnalysisAuditSnapshot(value.sourceAnalysis))) return false;
+    || isIPSourceAnalysisSnapshot(value.sourceAnalysis, value.rawContent as string, value.id as string))) return false;
   if (!(value.trustStatus === undefined || value.trustStatus === null
     || [
       "ai_derived_unverified", "adopted_awaiting_effect", "effect_evidence_awaiting_judgment",
