@@ -1637,7 +1637,9 @@ function isKnowledgeEntryAuditSnapshot(value: unknown): value is KnowledgeEntry 
     || value.category === "IP禁用规则")) return false;
   if (!(value.sourceTier === "高" || value.sourceTier === "中" || value.sourceTier === "低")) return false;
   if (!(value.ipId === null || typeof value.ipId === "string")) return false;
-  if (!(value.extractedAt === null || isValidISOTime(value.extractedAt))) return false;
+  if (!(value.extractedAt === null || value.extractedAt === "" || isValidISOTime(value.extractedAt))) {
+    return false;
+  }
   for (const field of ["tags", "keywords", "contentDirection"] as const) {
     if (!isStringArray(value[field])) {
       return false;

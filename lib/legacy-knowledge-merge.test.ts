@@ -239,6 +239,72 @@ test("先把被删除知识的语气引用迁移到保留项并回读确认", as
   assert.deepEqual(record?.styleProfilesAfter, [persistedProfile]);
 });
 
+test("历史知识提取时间为空字符串时，完成合并后仍能读取原样审计记录", async () => {
+  const sourceA = {
+    ...knowledge("source-a", "旧口播A", "相同原文"),
+    ipId: "ip-a",
+    extractedAt: "",
+  };
+  const sourceB = {
+    ...knowledge("source-b", "旧口播B", "相同原文"),
+    ipId: "ip-a",
+    extractedAt: "",
+  };
+  const survivor = {
+    ...knowledge("survivor-c", "保留口播", "相同原文"),
+    ipId: "ip-a",
+    extractedAt: "",
+  };
+  const profile = styleProfile(
+    [survivor.id, sourceB.id],
+    [survivor.title, sourceB.title],
+  );
+  localStorage.setItem(
+    "ipwr:knowledgeEntries",
+    JSON.stringify([sourceA, sourceB, survivor]),
+  );
+  localStorage.setItem("ipwr:ipStyleProfiles", JSON.stringify([profile]));
+
+  await mergeLegacyKnowledgeGroupStrict({
+    groupId: "D03",
+    backupContentSha256: BACKUP_SHA256,
+    activeIPId: "ip-a",
+    survivor,
+    sources: [sourceA, sourceB],
+    mergedContent: { rawContent: survivor.rawContent },
+  });
+
+  const [record] = getLegacyKnowledgeMergeAuditRecords();
+  assert.equal(record?.status, "completed");
+  assert.equal(record?.survivorBefore.extractedAt, "");
+  assert.deepEqual(
+    record?.removedEntries.map(entry => entry.extractedAt),
+    ["", ""],
+  );
+});
+
+test("审计记录中的非空非法提取时间仍会被拒绝", async () => {
+  const source = knowledge("source-a", "来源项", "来源项原文");
+  const survivor = knowledge("survivor-b", "保留项", "保留项原文");
+  localStorage.setItem(
+    "ipwr:knowledgeEntries",
+    JSON.stringify([source, survivor]),
+  );
+  await mergeLegacyKnowledgeGroupStrict(mergeInput(survivor, source));
+
+  const [record] = getLegacyKnowledgeMergeAuditRecords();
+  localStorage.setItem(LEGACY_KNOWLEDGE_MERGE_AUDIT_KEY, JSON.stringify([{
+    ...record,
+    survivorBefore: { ...record!.survivorBefore, extractedAt: "错误时间" },
+    survivorAfter: { ...record!.survivorAfter, extractedAt: "错误时间" },
+  }]));
+
+  assert.throws(
+    () => getLegacyKnowledgeMergeAuditRecords(),
+    /合并记录已损坏/,
+  );
+});
+
 test("删除阶段失败时恢复保留项、来源项、引用和审计记录", async () => {
   const source = { ...knowledge("source-a", "来源项", "来源项原文"), ipId: "ip-a" };
   const survivor = { ...knowledge("survivor-b", "保留项", "保留项原文"), ipId: "ip-a" };
