@@ -241,6 +241,7 @@ test("工作台展示当前生产流程和新增功能入口", async () => {
   assert.ok(await view.findByText("核心生产流程"));
   assert.ok(view.getByRole("link", { name: /文案整合/ }));
   assert.ok(view.getByRole("link", { name: /直播切片/ }));
+  assert.equal(view.getByRole("link", { name: /逐字稿中心/ }).getAttribute("href"), "/transcribe");
   assert.ok(view.getByRole("link", { name: /智能知识入库/ }));
   assert.ok(view.getByRole("link", { name: /内容判断库/ }));
   assert.ok(view.getByText("内容再生产与运营"));

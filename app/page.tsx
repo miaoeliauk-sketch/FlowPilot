@@ -36,6 +36,7 @@ const CORE_WORKFLOW: DashboardModule[] = [
 
 const OPERATIONS_TOOLS: DashboardModule[] = [
   { href: "/live-clips", badge: "直播", title: "直播切片", desc: "从直播逐字稿提炼可用片段，判断内容目的并生成有依据的切片计划。", icon: "film" },
+  { href: "/transcribe", badge: "转写", title: "逐字稿中心", desc: "从抖音链接、录音或已有文本获取逐字稿，再完成清洗、分段和摘要。", icon: "mic" },
   { href: "/knowledge-intake", badge: "知识", title: "智能知识入库", desc: "理解资料内容，区分通用方法与IP专属知识，并给出分类依据。", icon: "sparkle" },
   { href: "/comment-radar", badge: "洞察", title: "评论区需求雷达", desc: "整理评论区真实问题、需求信号和可继续生产的内容机会。", icon: "radar" },
   { href: "/hot-analysis", badge: "研究", title: "爆款分析", desc: "拆解高表现内容的选题、开头、结构与传播原因，形成参考样本。", icon: "fire" },
