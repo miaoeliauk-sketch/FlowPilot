@@ -23,6 +23,16 @@ export interface BuildIPSourceAnalysisV2Input {
   sourceContent: string;
   analyzedAt: string;
   createId?: () => string;
+  anchorScope?: {
+    content: string;
+    startPosition: number;
+  };
+}
+
+interface AnchorContext {
+  content: string;
+  offset: number;
+  label: "原文" | "当前分块原文";
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -57,14 +67,18 @@ function createUUID(): string {
   return globalThis.crypto.randomUUID();
 }
 
-function locateAnchor(sourceContent: string, quoteValue: unknown, errorPrefix: string): IPSourceAnchor {
+function locateAnchor(context: AnchorContext, quoteValue: unknown, errorPrefix: string): IPSourceAnchor {
   if (!isNonEmptyString(quoteValue)) {
     throw new Error(`${errorPrefix}缺少原文锚点`);
   }
-  const startPosition = sourceContent.indexOf(quoteValue);
-  if (startPosition < 0) {
-    throw new Error(`${errorPrefix}无法回溯到原文`);
+  const relativeStartPosition = context.content.indexOf(quoteValue);
+  if (relativeStartPosition < 0) {
+    throw new Error(`${errorPrefix}无法回溯到${context.label}`);
   }
+  if (context.content.lastIndexOf(quoteValue) !== relativeStartPosition) {
+    throw new Error(`${errorPrefix}锚点不唯一，无法确定对应原文位置`);
+  }
+  const startPosition = context.offset + relativeStartPosition;
   return {
     quote: quoteValue,
     startPosition,
@@ -72,12 +86,12 @@ function locateAnchor(sourceContent: string, quoteValue: unknown, errorPrefix: s
   };
 }
 
-function buildAnchors(value: unknown, sourceContent: string, errorPrefix: string): IPSourceAnchor[] {
+function buildAnchors(value: unknown, context: AnchorContext, errorPrefix: string): IPSourceAnchor[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`${errorPrefix}缺少原文锚点`);
   }
   return value.map(anchor => locateAnchor(
-    sourceContent,
+    context,
     isRecord(anchor) ? anchor.quote : undefined,
     errorPrefix,
   ));
@@ -85,7 +99,7 @@ function buildAnchors(value: unknown, sourceContent: string, errorPrefix: string
 
 function buildStatement(
   value: unknown,
-  sourceContent: string,
+  context: AnchorContext,
   errorPrefix: string,
 ): IPSourceBackedStatement {
   if (!isRecord(value) || !isNonEmptyString(value.content)) {
@@ -93,14 +107,14 @@ function buildStatement(
   }
   return {
     content: value.content.trim(),
-    anchors: buildAnchors(value.anchors, sourceContent, `${errorPrefix}锚点`),
+    anchors: buildAnchors(value.anchors, context, `${errorPrefix}锚点`),
   };
 }
 
 function buildNode(
   value: unknown,
   index: number,
-  sourceContent: string,
+  anchorContext: AnchorContext,
   id: string,
 ): { nodeRef: string; node: CognitionNodeV2 } {
   const prefix = `第${index + 1}个认知节点`;
@@ -113,8 +127,8 @@ function buildNode(
     || (value.question.derivation !== "explicit" && value.question.derivation !== "inferred")) {
     throw new Error(`${prefix}的核心问题无效`);
   }
-  const question = buildStatement(value.question, sourceContent, `${prefix}的问题`);
-  const claim = buildStatement(value.claim, sourceContent, `${prefix}的观点`);
+  const question = buildStatement(value.question, anchorContext, `${prefix}的问题`);
+  const claim = buildStatement(value.claim, anchorContext, `${prefix}的观点`);
 
   if (!isRecord(value.reasoning) || !REASONING_STATUSES.has(value.reasoning.status as CognitionReasoningStatus)
     || !Array.isArray(value.reasoning.steps)) {
@@ -128,7 +142,7 @@ function buildNode(
     throw new Error(`${prefix}的推理状态要求至少一个原文步骤`);
   }
   const steps = value.reasoning.steps.map((step, stepIndex) => {
-    const statement = buildStatement(step, sourceContent, `${prefix}的第${stepIndex + 1}步推理`);
+    const statement = buildStatement(step, anchorContext, `${prefix}的第${stepIndex + 1}步推理`);
     if (!isRecord(step) || step.order !== stepIndex + 1) {
       throw new Error(`${prefix}的推理步骤顺序无效`);
     }
@@ -139,7 +153,7 @@ function buildNode(
     throw new Error(`${prefix}的证据或概念结构无效`);
   }
   const evidence = value.evidence.map((item, evidenceIndex) => {
-    const statement = buildStatement(item, sourceContent, `${prefix}的第${evidenceIndex + 1}条证据`);
+    const statement = buildStatement(item, anchorContext, `${prefix}的第${evidenceIndex + 1}条证据`);
     if (!isRecord(item) || !EVIDENCE_TYPES.has(item.type as CognitionEvidenceType)) {
       throw new Error(`${prefix}的第${evidenceIndex + 1}条证据类型无效`);
     }
@@ -161,7 +175,7 @@ function buildNode(
       definition: item.definition.trim(),
       anchors: buildAnchors(
         item.anchors,
-        sourceContent,
+        anchorContext,
         `${prefix}的第${conceptIndex + 1}个概念锚点`,
       ),
     };
@@ -209,12 +223,27 @@ export function buildIPSourceAnalysisV2(input: BuildIPSourceAnalysisV2Input): IP
     || !isRecord(input.candidate.aiSuggestions)) {
     throw new Error("V2认知解析顶层结构无效");
   }
+  const anchorContext: AnchorContext = input.anchorScope
+    ? {
+        content: input.anchorScope.content,
+        offset: input.anchorScope.startPosition,
+        label: "当前分块原文",
+      }
+    : { content: input.sourceContent, offset: 0, label: "原文" };
+  if (!Number.isInteger(anchorContext.offset)
+    || anchorContext.offset < 0
+    || input.sourceContent.slice(
+      anchorContext.offset,
+      anchorContext.offset + anchorContext.content.length,
+    ) !== anchorContext.content) {
+    throw new Error("V2认知解析的分块位置与完整原文不一致");
+  }
 
   const createId = input.createId ?? createUUID;
   const built = input.candidate.nodes.map((node, index) => buildNode(
     node,
     index,
-    input.sourceContent,
+    anchorContext,
     createId(),
   ));
   const nodeIdsByRef = new Map<string, string>();
