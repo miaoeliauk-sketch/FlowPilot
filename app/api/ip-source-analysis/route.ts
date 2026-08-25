@@ -14,6 +14,13 @@ import {
   buildIPSourceAnalysisV2,
   parseStoredIPSourceAnalysis,
 } from "@/lib/ip-source-analysis-v2";
+import {
+  buildIPSourceAnalysisProofClaims,
+  createIPSourceAnalysisToken,
+  digestIPSourceAnalysisProofClaims,
+  getIPSourceAnalysisProofSecret,
+} from "@/lib/ip-source-analysis-proof";
+import { initializeIPSourceLedger } from "@/lib/ip-source-ledger";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -267,6 +274,7 @@ export async function POST(req: NextRequest) {
   const activeIPId = typeof body.activeIPId === "string" ? body.activeIPId.trim() : "";
   const rawContent = typeof body.rawContent === "string" ? body.rawContent : "";
   const parserVersion = body.parserVersion === undefined ? 1 : body.parserVersion;
+  const requestSeq = Number.isInteger(body.requestSeq) ? body.requestSeq as number : null;
   if (!sourceId) return NextResponse.json({ error: "缺少Source编号" }, { status: 400 });
   if (!activeIPId) return NextResponse.json({ error: "请先选择当前IP" }, { status: 400 });
   if (!rawContent.trim()) return NextResponse.json({ error: "请提供IP原始内容" }, { status: 400 });
@@ -310,6 +318,7 @@ export async function POST(req: NextRequest) {
         parserVersion: 2,
         sourceId,
         sourceHash: results[0]!.data.sourceHash,
+        nonce: 1,
         nodes: results.flatMap(result => result.data.nodes),
         aiSuggestions: {
           potentialPrinciples: results.flatMap(result => result.data.aiSuggestions.potentialPrinciples),
@@ -322,8 +331,31 @@ export async function POST(req: NextRequest) {
           ? "V2认知解析合并结果版本无效"
           : `V2认知解析合并结果校验失败：${verified.error}`);
       }
+      const proofSecret = await getIPSourceAnalysisProofSecret();
+      const proofClaims = buildIPSourceAnalysisProofClaims({
+        ipId: activeIPId,
+        analysis: verified.analysis,
+      });
+      const initialized = await initializeIPSourceLedger({
+        sourceId: verified.analysis.sourceId,
+        ipId: activeIPId,
+        nonce: verified.analysis.nonce,
+        digest: digestIPSourceAnalysisProofClaims(proofClaims),
+      });
+      if (!initialized) {
+        return NextResponse.json(
+          { error: "这个Source编号已有解析状态，请重新发起分析" },
+          { status: 409 },
+        );
+      }
       return NextResponse.json({
         analysis: verified.analysis,
+        analysisToken: createIPSourceAnalysisToken(
+          proofClaims,
+          proofSecret,
+        ),
+        activeIPId,
+        requestSeq,
         apiMeta: {
           apiCalled: true,
           model: MODEL,

@@ -38,6 +38,7 @@ import {
   parseIPSourceContext,
   parseScriptFactoryCaseEvidence,
 } from "@/lib/script-factory-source-context";
+import { verifyScriptFactoryIPSourceContext } from "@/lib/script-factory-source-context-proof";
 import {
   ARGUMENT_REVIEW_SYSTEM,
   buildArgumentReviewPrompt,
@@ -660,6 +661,13 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
   const sourceReferences = sourceContextResult.items;
+  const sourceProofResult = await verifyScriptFactoryIPSourceContext(sourceReferences, ip.id);
+  if (!sourceProofResult.ok) {
+    return NextResponse.json({
+      error: sourceProofResult.error,
+      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+    }, { status: 400 });
+  }
   const caseEvidenceResult = parseScriptFactoryCaseEvidence(
     isIPSpecificGeneration ? body.caseEvidence : undefined,
     ip.id,

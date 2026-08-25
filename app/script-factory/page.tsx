@@ -766,6 +766,10 @@ export default function ScriptFactoryPage() {
     return getKnowledgeEntries("IP原始内容")
       .filter(entry => entry.ipId === ipId)
       .flatMap(entry => getLegacyIPSourceAnalysisItems(entry.sourceAnalysis).map(item => ({
+        parserVersion: entry.sourceAnalysis?.parserVersion ?? 1,
+        ...(entry.sourceAnalysis?.parserVersion === 2
+          ? { finalProof: entry.sourceFinalProof ?? undefined }
+          : { legacyProof: entry.sourceLegacyProof ?? undefined }),
         ipId,
         sourceId: entry.id,
         sourceTitle: entry.title,

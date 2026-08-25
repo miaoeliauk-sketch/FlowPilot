@@ -240,7 +240,7 @@ test("知识库存储不是数组或条目缺少基础身份字段时拒绝覆�
   }
 });
 
-test("知识库存储兼容V2，并拒绝原文哈希不一致的V2记录", async () => {
+test("知识库存储兼容带最终凭证的V2，并拒绝原文哈希不一致的V2记录", async () => {
   const { addIPOriginalSource } = await import("./ip-original-source");
   const { getKnowledgeEntries } = await import("./ip-store");
   const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
@@ -283,6 +283,7 @@ test("知识库存储兼容V2，并拒绝原文哈希不一致的V2记录", asyn
       aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
     },
   });
+  stored[0]!.sourceFinalProof = "test-final-proof";
   storage.setItem("ipwr:knowledgeEntries", JSON.stringify(stored));
 
   assert.equal(getKnowledgeEntries("IP原始内容")[0]?.sourceAnalysis?.parserVersion, 2);
@@ -290,6 +291,173 @@ test("知识库存储兼容V2，并拒绝原文哈希不一致的V2记录", asyn
   stored[0]!.rawContent = `${originalContent}被篡改`;
   storage.setItem("ipwr:knowledgeEntries", JSON.stringify(stored));
   assert.throws(() => getKnowledgeEntries("IP原始内容"), /知识库数据已损坏/);
+});
+
+test("V2认知节点全部被拒绝时记录reviewed_none而不是人工确认", async () => {
+  const { addVerifiedIPOriginalSource } = await import("./ip-original-source");
+  const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
+  const {
+    buildIPSourceAnalysisProofClaims,
+    createIPSourceAnalysisToken,
+    digestIPSourceAnalysisProofClaims,
+  } = await import("./ip-source-analysis-proof");
+  const { initializeIPSourceLedger } = await import("./ip-source-ledger");
+  const { POST: finalizePOST } = await import("../app/api/ip-source-analysis/finalize/route");
+  const { POST: verifyPOST } = await import("../app/api/ip-source-analysis/verify/route");
+  const { NextRequest } = await import("next/server");
+  const sourceId = "source-all-rejected";
+  const originalContent = "老师明确说：这条候选观点最终不应进入认知库。";
+  const analysis = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: originalContent,
+    analyzedAt: "2026-08-24T16:30:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000071",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "这条候选观点是否有效？", derivation: "inferred", anchors: [{ quote: originalContent }] },
+        claim: { content: "这条候选观点最终不应进入认知库。", anchors: [{ quote: "这条候选观点最终不应进入认知库" }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  analysis.nodes[0]!.reviewStatus = "rejected";
+  const ipId = "ip-shuimuran";
+  const proofSecret = "test-only-ip-source-analysis-proof-secret-32-bytes";
+  const previousSecret = process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET;
+  const previousFetch = globalThis.fetch;
+  let saved;
+  try {
+    process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET = proofSecret;
+    const claims = buildIPSourceAnalysisProofClaims({ ipId, analysis });
+    await initializeIPSourceLedger({
+      sourceId,
+      ipId,
+      nonce: analysis.nonce,
+      digest: digestIPSourceAnalysisProofClaims(claims),
+    });
+    const finalizeResponse = await finalizePOST(new NextRequest(
+      "http://localhost/api/ip-source-analysis/finalize",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId: ipId,
+          sourceId,
+          rawContent: originalContent,
+          analysis,
+          analysisToken: createIPSourceAnalysisToken(claims, proofSecret),
+        }),
+      },
+    ));
+    const finalized = await finalizeResponse.json() as { finalProof?: string };
+    assert.equal(finalizeResponse.status, 200);
+    assert.equal(typeof finalized.finalProof, "string");
+    globalThis.fetch = async (_input, init) => verifyPOST(new NextRequest(
+      "http://localhost/api/ip-source-analysis/verify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: init?.body,
+      },
+    ));
+    saved = await addVerifiedIPOriginalSource({
+      sourceId,
+      ipId,
+      title: "全部拒绝的认知",
+      sourceKind: "课程内容",
+      originalContent,
+      sourceName: "",
+      sourceUrl: "",
+      analysis,
+      finalProof: finalized.finalProof!,
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousSecret === undefined) delete process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET;
+    else process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET = previousSecret;
+  }
+
+  assert.equal(
+    (JSON.parse(saved.note) as { analysisStatus?: string }).analysisStatus,
+    "reviewed_none",
+  );
+});
+
+test("V2认知不能绕过最终凭证验证直接写入浏览器知识库", async () => {
+  const { addIPOriginalSource } = await import("./ip-original-source");
+  const { addKnowledgeEntry, addKnowledgeEntryWithId } = await import("./ip-store");
+  const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
+  const sourceId = "source-v2-without-final-proof";
+  const originalContent = "老师明确说：没有最终凭证的认知不能入库。";
+  const analysis = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: originalContent,
+    analyzedAt: "2026-08-25T09:30:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000082",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "什么不能入库？", derivation: "inferred", anchors: [{ quote: originalContent }] },
+        claim: { content: "没有最终凭证的认知不能入库。", anchors: [{ quote: "没有最终凭证的认知不能入库" }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  analysis.nodes[0]!.reviewStatus = "human_confirmed";
+
+  assert.throws(() => addIPOriginalSource({
+    sourceId,
+    ipId: "ip-shuimuran",
+    title: "无最终凭证",
+    sourceKind: "课程内容",
+    originalContent,
+    sourceName: "",
+    sourceUrl: "",
+    analysis,
+  }), /V2认知必须经过服务端最终校验后才能入库/);
+  const baseKnowledgeInput = {
+    category: "IP原始内容" as const,
+    title: "无最终凭证",
+    rawContent: originalContent,
+    sourceKind: "课程内容" as const,
+    sourceName: "",
+    sourceAnalysis: analysis,
+    sourceFinalProof: null,
+    tags: [],
+    keywords: [],
+    ipId: "ip-shuimuran",
+    sourceTier: "中" as const,
+    sourceTierReason: "测试",
+    contentDirection: [],
+    sourcePlatform: "课程内容",
+    sourceUrl: "",
+    note: "",
+    extractedAt: analysis.analyzedAt,
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用" as const,
+    trustStatus: null,
+    sourceReference: null,
+    executionTemplate: null,
+    dna: null,
+  };
+  assert.throws(
+    () => addKnowledgeEntry(baseKnowledgeInput),
+    /V2认知只能通过最终凭证验证入口保存/,
+  );
+  assert.throws(
+    () => addKnowledgeEntryWithId({ id: `${sourceId}-direct`, ...baseKnowledgeInput }),
+    /V2认知只能通过最终凭证验证入口保存/,
+  );
+  assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), null);
 });
 
 test("知识库存储拒绝挂在错误知识记录下的合法V2解析数据", async () => {

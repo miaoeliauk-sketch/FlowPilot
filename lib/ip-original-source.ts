@@ -1,33 +1,50 @@
 "use client";
 
 import {
+  getLegacyIPSourceAnalysisItems,
+  parseStoredIPSourceAnalysis,
+} from "./ip-source-analysis-v2";
+import {
   addKnowledgeEntryWithId,
+  addFinalizedIPOriginalSourceWithId,
   getKnowledgeEntries,
-  updateKnowledgeEntry,
+  replaceLegacyIPSourceAnalysis,
 } from "./ip-store";
 import type {
   IPOriginalSourceKind,
   IPSourceAnalysis,
   IPSourceAnalysisItem,
+  IPSourceAnalysisSnapshot,
   KnowledgeEntry,
 } from "./types";
 
 export interface AddIPOriginalSourceInput {
+  sourceId?: string;
   ipId: string;
   title: string;
   sourceKind: IPOriginalSourceKind;
   originalContent: string;
   sourceName: string;
   sourceUrl: string;
-  analysis: IPSourceAnalysis;
+  analysis: IPSourceAnalysisSnapshot;
+}
+
+export interface AddVerifiedIPOriginalSourceInput extends AddIPOriginalSourceInput {
+  finalProof: string;
+  isStillCurrent?: () => boolean;
+}
+
+export function createIPOriginalSourceId(): string {
+  return `source-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function deriveIPOriginalSourceTitle(
   originalContent: string,
-  analysis: IPSourceAnalysis,
+  analysis: IPSourceAnalysisSnapshot,
 ): string {
-  const candidate = analysis.items.find(item => item.kind === "claim")?.content
-    ?? analysis.items[0]?.content
+  const items = getLegacyIPSourceAnalysisItems(analysis);
+  const candidate = items.find(item => item.kind === "claim")?.content
+    ?? items[0]?.content
     ?? originalContent.split(/\r?\n/).find(line => line.trim())
     ?? "";
   const normalized = candidate.replace(/\s+/g, " ").trim().replace(/[。！？；，、：]+$/u, "");
@@ -44,8 +61,14 @@ function assertSourceInput(input: AddIPOriginalSourceInput) {
 function normalizeAnalysis(
   sourceId: string,
   originalContent: string,
-  analysis: IPSourceAnalysis,
-): IPSourceAnalysis {
+  analysis: IPSourceAnalysisSnapshot,
+): IPSourceAnalysisSnapshot {
+  if (analysis.parserVersion === 2) {
+    const parsed = parseStoredIPSourceAnalysis(analysis, originalContent, sourceId);
+    if (!parsed.ok) throw new Error(parsed.error);
+    if (parsed.version !== 2) throw new Error("V2认知解析保存版本错误");
+    return parsed.analysis;
+  }
   const items = analysis.items.map((item, index): IPSourceAnalysisItem => {
     const start = item.startPosition;
     const end = item.endPosition;
@@ -68,15 +91,30 @@ function normalizeAnalysis(
   };
 }
 
-export function addIPOriginalSource(input: AddIPOriginalSourceInput): KnowledgeEntry {
+function buildIPOriginalSourceEntry(
+  input: AddIPOriginalSourceInput,
+  finalProof: string | null,
+): Omit<KnowledgeEntry, "createdAt"> {
   assertSourceInput(input);
-  const sourceId = `source-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const sourceId = input.sourceId?.trim() || createIPOriginalSourceId();
+  if (input.analysis.parserVersion === 2 && !input.sourceId?.trim()) {
+    throw new Error("V2认知解析必须在分析前生成正式Source编号");
+  }
   const sourceAnalysis = normalizeAnalysis(sourceId, input.originalContent, input.analysis);
-  const allConfirmed = sourceAnalysis.items.length > 0 && sourceAnalysis.items.every(
-    item => item.extractionStatus === "人工确认",
-  );
+  const allConfirmed = sourceAnalysis.parserVersion === 1
+    ? sourceAnalysis.items.length > 0 && sourceAnalysis.items.every(
+        item => item.extractionStatus === "人工确认",
+      )
+    : sourceAnalysis.nodes.length > 0 && sourceAnalysis.nodes.every(
+        node => node.reviewStatus !== "ai_extracted",
+      );
+  const allRejected = sourceAnalysis.parserVersion === 2
+    && sourceAnalysis.nodes.length > 0
+    && sourceAnalysis.nodes.every(node => node.reviewStatus === "rejected");
+  const analysisStatus = allRejected ? "reviewed_none" : allConfirmed ? "人工确认" : "AI提取";
+  const compatibleItems = getLegacyIPSourceAnalysisItems(sourceAnalysis);
   // Source编号、完整原文和解析层一次写入，避免先保存原文、后补解析造成半成品。
-  return addKnowledgeEntryWithId({
+  return {
     id: sourceId,
     category: "IP原始内容",
     title: input.title.trim(),
@@ -84,26 +122,52 @@ export function addIPOriginalSource(input: AddIPOriginalSourceInput): KnowledgeE
     sourceKind: input.sourceKind,
     sourceName: input.sourceName.trim(),
     sourceAnalysis,
+    sourceFinalProof: finalProof,
     tags: [input.sourceKind],
-    keywords: input.analysis.items
+    keywords: compatibleItems
       .filter(item => item.kind === "claim" || item.kind === "concept" || item.kind === "topic")
       .map(item => item.content.slice(0, 60)),
     ipId: input.ipId.trim(),
     sourceTier: "中",
     sourceTierReason: "原文已保存；AI解析可回溯，尚未代表外部事实已核实",
-    contentDirection: input.analysis.items
+    contentDirection: compatibleItems
       .filter(item => item.kind === "topic")
       .map(item => item.content),
     sourcePlatform: input.sourceKind,
     sourceUrl: input.sourceUrl.trim(),
-    note: JSON.stringify({ sourceRecord: true, analysisStatus: allConfirmed ? "人工确认" : "AI提取" }),
+    note: JSON.stringify({ sourceRecord: true, analysisStatus }),
     extractedAt: input.analysis.analyzedAt,
     metrics: null,
     viralEvaluation: null,
     usageRecords: [],
     status: "未使用",
     dna: null,
-  });
+  };
+}
+
+export function addIPOriginalSource(input: AddIPOriginalSourceInput): KnowledgeEntry {
+  if (input.analysis.parserVersion === 2) {
+    throw new Error("V2认知必须经过服务端最终校验后才能入库");
+  }
+  return addKnowledgeEntryWithId(buildIPOriginalSourceEntry(input, null));
+}
+
+export async function addVerifiedIPOriginalSource(
+  input: AddVerifiedIPOriginalSourceInput,
+): Promise<KnowledgeEntry> {
+  if (input.analysis.parserVersion !== 2) {
+    throw new Error("旧版解析请使用原有保存入口");
+  }
+  if (!input.finalProof.trim()) throw new Error("缺少最终入库凭证");
+  return addFinalizedIPOriginalSourceWithId(
+    buildIPOriginalSourceEntry(input, input.finalProof.trim()),
+    {
+      activeIPId: input.ipId,
+      rawContent: input.originalContent,
+      finalProof: input.finalProof.trim(),
+      isStillCurrent: input.isStillCurrent,
+    },
+  );
 }
 
 export function getIPOriginalSource(id: string): KnowledgeEntry | null {
@@ -114,11 +178,7 @@ export function replaceIPOriginalSourceAnalysis(id: string, analysis: IPSourceAn
   const source = getIPOriginalSource(id);
   if (!source) throw new Error("找不到要重新解析的IP原始内容");
   const sourceAnalysis = normalizeAnalysis(source.id, source.rawContent, analysis);
-  updateKnowledgeEntry(id, {
-    sourceAnalysis,
-    extractedAt: analysis.analyzedAt,
-    // 不允许在重新解析时写入rawContent。
-  });
+  replaceLegacyIPSourceAnalysis(id, sourceAnalysis);
   const persisted = getIPOriginalSource(id);
   if (persisted?.sourceAnalysis?.analyzedAt !== analysis.analyzedAt) {
     throw new Error("解析结果更新失败，Source原文未受影响");

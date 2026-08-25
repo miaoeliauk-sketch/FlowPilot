@@ -312,6 +312,15 @@ export type CognitionEvidenceType = "case" | "data" | "external_fact" | "analogy
 export type CognitionReviewStatus = "ai_extracted" | "human_confirmed" | "rejected";
 export type CognitionReasoningStatus = "complete" | "partial" | "not_provided";
 
+export interface CognitionHumanRevision {
+  claim?: string;
+  reasoningSteps?: Array<{
+    order: number;
+    content: string;
+  }>;
+  updatedAt: string;
+}
+
 export interface CognitionNodeV2 {
   id: string;
   question: IPSourceBackedStatement & {
@@ -332,6 +341,7 @@ export interface CognitionNodeV2 {
     anchors: IPSourceAnchor[];
   }>;
   reviewStatus: CognitionReviewStatus;
+  humanRevision?: CognitionHumanRevision;
 }
 
 export interface CognitionAISuggestion {
@@ -342,6 +352,7 @@ export interface CognitionAISuggestion {
 export interface IPSourceAnalysisV2 {
   analyzedAt: string;
   parserVersion: 2;
+  nonce: number;
   sourceId: string;
   sourceHash: string;
   nodes: CognitionNodeV2[];
@@ -412,6 +423,8 @@ export interface KnowledgeEntry {
   sourceKind?: IPOriginalSourceKind | null;
   sourceName?: string;
   sourceAnalysis?: IPSourceAnalysisSnapshot | null;
+  sourceFinalProof?: string | null;
+  sourceLegacyProof?: string | null;
   tags: string[];
   keywords: string[];
   ipId: string | null; // 所属IP，方法论/通用评论可能不属于任何IP，允许为空

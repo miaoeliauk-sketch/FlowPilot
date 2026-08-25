@@ -1,9 +1,11 @@
 import type {
   CognitionAISuggestion,
   CognitionEvidenceType,
+  CognitionHumanRevision,
   CognitionNodeV2,
   CognitionReasoningStatus,
   IPSourceAnalysis,
+  IPSourceAnalysisKind,
   IPSourceAnalysisItem,
   IPSourceAnalysisSnapshot,
   IPSourceAnalysisV2,
@@ -258,6 +260,7 @@ export function buildIPSourceAnalysisV2(input: BuildIPSourceAnalysisV2Input): IP
   return {
     analyzedAt: input.analyzedAt,
     parserVersion: 2,
+    nonce: 1,
     sourceId: input.sourceId.trim(),
     sourceHash: calculateSHA256(input.sourceContent),
     nodes: built.map(item => item.node),
@@ -295,6 +298,33 @@ function isStoredStatement(value: unknown, sourceContent: string): value is IPSo
     && value.anchors.every(anchor => isStoredAnchor(anchor, sourceContent));
 }
 
+function isStoredHumanRevision(
+  value: unknown,
+  reasoningStepOrders: ReadonlySet<number>,
+): value is CognitionHumanRevision {
+  if (!isRecord(value)) return false;
+  const allowedKeys = new Set(["claim", "reasoningSteps", "updatedAt"]);
+  const actualKeys = Object.keys(value);
+  if (actualKeys.some(key => !allowedKeys.has(key)) || !isISOTime(value.updatedAt)) return false;
+  const hasClaim = value.claim !== undefined;
+  const hasReasoningSteps = value.reasoningSteps !== undefined;
+  if (!hasClaim && !hasReasoningSteps) return false;
+  if (hasClaim && (!isNonEmptyString(value.claim) || value.claim.length > 1_000)) return false;
+  if (hasReasoningSteps) {
+    if (!Array.isArray(value.reasoningSteps) || value.reasoningSteps.length === 0
+      || value.reasoningSteps.length > reasoningStepOrders.size) return false;
+    const seenOrders = new Set<number>();
+    for (const step of value.reasoningSteps) {
+      if (!isRecord(step) || !hasExactKeys(step, ["order", "content"])
+        || !Number.isInteger(step.order) || !reasoningStepOrders.has(step.order as number)
+        || seenOrders.has(step.order as number)
+        || !isNonEmptyString(step.content) || step.content.length > 1_000) return false;
+      seenOrders.add(step.order as number);
+    }
+  }
+  return true;
+}
+
 function isStoredV1(
   value: unknown,
   sourceContent: string,
@@ -323,15 +353,19 @@ function isStoredV1(
 
 function isStoredV2(value: unknown, sourceContent: string): value is IPSourceAnalysisV2 {
   if (!isRecord(value) || value.parserVersion !== 2 || !isISOTime(value.analyzedAt)
-    || !hasExactKeys(value, ["analyzedAt", "parserVersion", "sourceId", "sourceHash", "nodes", "aiSuggestions"])
+    || !hasExactKeys(value, ["analyzedAt", "parserVersion", "nonce", "sourceId", "sourceHash", "nodes", "aiSuggestions"])
+    || !Number.isInteger(value.nonce) || (value.nonce as number) < 1
     || !isNonEmptyString(value.sourceId) || !/^[a-f0-9]{64}$/.test(String(value.sourceHash))
     || !Array.isArray(value.nodes) || !isRecord(value.aiSuggestions)
     || !hasExactKeys(value.aiSuggestions, ["potentialPrinciples", "topicPotential"])) return false;
   const ids = new Set<string>();
   for (const node of value.nodes) {
-    if (!isRecord(node) || !hasExactKeys(node, [
+    const nodeKeys = [
       "id", "question", "claim", "reasoning", "evidence", "concepts", "reviewStatus",
-    ]) || !UUID_PATTERN.test(String(node.id)) || ids.has(String(node.id))
+      ...(isRecord(node) && node.humanRevision !== undefined ? ["humanRevision"] : []),
+    ];
+    if (!isRecord(node) || !hasExactKeys(node, nodeKeys)
+      || !UUID_PATTERN.test(String(node.id)) || ids.has(String(node.id))
       || !isRecord(node.question)
       || !hasExactKeys(node.question, ["content", "anchors", "derivation"])
       || (node.question.derivation !== "explicit" && node.question.derivation !== "inferred")
@@ -351,6 +385,13 @@ function isStoredV2(value: unknown, sourceContent: string): value is IPSourceAna
     if (!node.reasoning.steps.every((step, index) => isRecord(step)
       && hasExactKeys(step, ["order", "content", "anchors"])
       && step.order === index + 1 && isStoredStatement(step, sourceContent))) return false;
+    if (node.humanRevision !== undefined && (
+      node.reviewStatus !== "human_confirmed"
+      || !isStoredHumanRevision(
+        node.humanRevision,
+        new Set(node.reasoning.steps.map(step => (step as { order: number }).order)),
+      )
+    )) return false;
     if (!node.evidence.every(item => isRecord(item)
       && hasExactKeys(item, ["type", "content", "anchors", "verificationStatus"])
       && EVIDENCE_TYPES.has(item.type as CognitionEvidenceType)
@@ -417,5 +458,62 @@ export function isIPSourceAnalysisSnapshot(
 export function getLegacyIPSourceAnalysisItems(
   analysis: IPSourceAnalysisSnapshot | null | undefined,
 ): IPSourceAnalysisItem[] {
-  return analysis?.parserVersion === 1 ? analysis.items : [];
+  return toV1CompatibleItems(analysis);
+}
+
+export function toV1CompatibleItems(
+  analysis: IPSourceAnalysisSnapshot | null | undefined,
+): IPSourceAnalysisItem[] {
+  if (!analysis) return [];
+  if (analysis.parserVersion === 1) return analysis.items;
+  const items: IPSourceAnalysisItem[] = [];
+  for (const node of analysis.nodes) {
+    if (node.reviewStatus === "rejected") continue;
+    const extractionStatus = node.reviewStatus === "human_confirmed" ? "人工确认" : "AI提取";
+    const revision = node.reviewStatus === "human_confirmed" ? node.humanRevision : undefined;
+    const pushItem = (
+      idSuffix: string,
+      kind: IPSourceAnalysisKind,
+      content: string,
+      anchors: IPSourceAnchor[],
+    ) => {
+      const anchor = anchors[0];
+      if (!anchor) return;
+      items.push({
+        id: `${node.id}:${idSuffix}`,
+        kind,
+        content,
+        sourceId: analysis.sourceId,
+        startPosition: anchor.startPosition,
+        endPosition: anchor.endPosition,
+        originalExcerpt: anchor.quote,
+        extractionStatus,
+      });
+    };
+    pushItem("question", "question", node.question.content, node.question.anchors);
+    pushItem("claim", "claim", revision?.claim ?? node.claim.content, node.claim.anchors);
+    const revisedSteps = new Map(
+      revision?.reasoningSteps?.map(step => [step.order, step.content]) ?? [],
+    );
+    for (const step of node.reasoning.steps) {
+      pushItem(
+        `reasoning:${step.order}`,
+        "reasoning",
+        revisedSteps.get(step.order) ?? step.content,
+        step.anchors,
+      );
+    }
+    node.evidence.forEach((evidence, index) => {
+      pushItem(`evidence:${index + 1}`, "evidence", evidence.content, evidence.anchors);
+    });
+    node.concepts.forEach((concept, index) => {
+      pushItem(
+        `concept:${index + 1}`,
+        "concept",
+        `${concept.term}：${concept.definition}`,
+        concept.anchors,
+      );
+    });
+  }
+  return items;
 }

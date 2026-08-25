@@ -10,6 +10,7 @@ import {
   getHookEntries, getUnanalyzedHookEntries, addHookEntry, addHookEntriesBatch, deleteHookEntry, applyHookAnalysisResults,
   getCoverRefs, getGlobalCoverRefs, addCoverRef, deleteCoverRef,
   getScriptAssets, getVideoReviewsReadOnly,
+  saveIPSourceLegacyProof,
   type CoverRef,
 } from "@/lib/ip-store";
 import { Icon } from "@/components/ui/icon";
@@ -1210,6 +1211,8 @@ export default function KnowledgeHubPage() {
   const [xlsxImportResult, setXlsxImportResult] = useState<{ count: number; skipped: number; catDist?: Record<string, number> } | null>(null);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState<KnowledgeEntry | null>(null);
+  const [registeringLegacyId, setRegisteringLegacyId] = useState<string | null>(null);
+  const [legacyRegistrationError, setLegacyRegistrationError] = useState<string | null>(null);
 
   useEffect(() => {
     const scope = new URLSearchParams(window.location.search).get("scope");
@@ -1438,6 +1441,37 @@ export default function KnowledgeHubPage() {
     setEntries(getKnowledgeEntries());
     setVoiceSamples(getAllVoiceSamples());
     setHookEntries(getHookEntries());
+  }
+
+  async function registerLegacySource(entry: KnowledgeEntry) {
+    if (registeringLegacyId || !activeIP || entry.ipId !== activeIP.id
+      || entry.sourceAnalysis?.parserVersion !== 1) return;
+    setRegisteringLegacyId(entry.id);
+    setLegacyRegistrationError(null);
+    try {
+      const response = await apiFetch("/api/ip-source-analysis/legacy/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId: activeIP.id,
+          sourceIPId: entry.ipId,
+          sourceId: entry.id,
+          rawContent: entry.rawContent,
+          analysis: entry.sourceAnalysis,
+        }),
+      });
+      const result = await response.json() as { legacyProof?: string; error?: string };
+      if (!response.ok || !result.legacyProof?.trim()) {
+        throw new Error(result.error ?? "V1认知登记失败");
+      }
+      const updated = saveIPSourceLegacyProof(entry.id, result.legacyProof);
+      setDetail(updated);
+      refresh();
+    } catch (error) {
+      setLegacyRegistrationError(error instanceof Error ? error.message : "V1认知登记失败");
+    } finally {
+      setRegisteringLegacyId(null);
+    }
   }
   useEffect(() => {
     if (viewMode !== "legacy") {
@@ -2373,6 +2407,22 @@ export default function KnowledgeHubPage() {
                   <div className="mb-3">
                     <div className="text-[12.5px] font-bold text-[#3B6D11]">可追溯解析</div>
                     <p className="mt-0.5 text-[11px] text-[#777]">这些内容可以回到原文，但不等于其中的外部事实已经核实。</p>
+                    {detail.sourceAnalysis.parserVersion === 1 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full px-2 py-1 text-[10.5px] font-semibold ${detail.sourceLegacyProof ? "bg-[#EAF3DE] text-[#3B6D11]" : "bg-[#FEF3C7] text-[#92400E]"}`}>
+                          {detail.sourceLegacyProof ? "已合规登记" : "待合规登记"}
+                        </span>
+                        {!detail.sourceLegacyProof && (
+                          <button
+                            type="button"
+                            disabled={registeringLegacyId === detail.id}
+                            onClick={() => void registerLegacySource(detail)}
+                            className="rounded-[8px] bg-[#1C1C1B] px-3 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50"
+                          >{registeringLegacyId === detail.id ? "登记中…" : "登记V1认知"}</button>
+                        )}
+                        {legacyRegistrationError && <span className="text-[11px] text-[#A32D2D]">{legacyRegistrationError}</span>}
+                      </div>
+                    )}
                   </div>
                   <div className="flex max-h-[320px] flex-col gap-2 overflow-y-auto pr-1">
                     {getLegacyIPSourceAnalysisItems(detail.sourceAnalysis).map(item => (

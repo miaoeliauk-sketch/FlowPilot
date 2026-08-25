@@ -12,6 +12,9 @@ const VALID_KINDS: IPSourceAnalysisKind[] = [
 const VALID_EXTRACTION_STATUSES: IPSourceExtractionStatus[] = ["AI提取", "人工确认"];
 
 export interface ScriptFactoryIPSourceContextItem {
+  parserVersion: 1 | 2;
+  finalProof?: string;
+  legacyProof?: string;
   ipId: string;
   sourceId: string;
   sourceTitle: string;
@@ -54,8 +57,18 @@ export function parseIPSourceContext(
       return { ok: false, error: "请求格式错误：IP原始内容上下文条目不完整。" };
     }
     const item = rawItem as Record<string, unknown>;
+    const parserVersion = item.parserVersion === undefined ? 1 : item.parserVersion;
+    if (parserVersion !== 1 && parserVersion !== 2) {
+      return { ok: false, error: "请求格式错误：IP原始内容解析版本无效。" };
+    }
     if (!isNonEmptyString(item.ipId) || item.ipId.trim() !== currentIPId) {
       return { ok: false, error: "IP原始内容不属于当前IP，已拒绝生成。" };
+    }
+    if (parserVersion === 2 && !isNonEmptyString(item.finalProof)) {
+      return { ok: false, error: "V2认知缺少最终凭证，已拒绝生成。" };
+    }
+    if (parserVersion === 1 && !isNonEmptyString(item.legacyProof)) {
+      return { ok: false, error: "历史V1认知尚未完成合规登记，已拒绝生成。" };
     }
     if (
       !isNonEmptyString(item.sourceId) ||
@@ -69,6 +82,9 @@ export function parseIPSourceContext(
       return { ok: false, error: "请求格式错误：IP原始内容上下文条目不完整。" };
     }
     items.push({
+      parserVersion,
+      ...(parserVersion === 2 ? { finalProof: (item.finalProof as string).trim() } : {}),
+      ...(parserVersion === 1 ? { legacyProof: (item.legacyProof as string).trim() } : {}),
       ipId: item.ipId.trim(),
       sourceId: item.sourceId.trim(),
       sourceTitle: item.sourceTitle.trim(),

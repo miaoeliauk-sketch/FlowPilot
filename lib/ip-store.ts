@@ -1,4 +1,5 @@
 "use client";
+import { apiFetch } from "./api-fetch";
 import { IPProfile, VoiceSample, IPStyleProfile, TopicAsset, CommentAsset, ScriptAsset, KnowledgeEntry, KnowledgeCategory, HookEntry, LikesSnapshot, KnowledgeUsageRecord, KnowledgeStatus, ConsumerModule, HotMaterialAnalysis, UserProfile, VideoReview, NewScriptAssetInput, ScriptKnowledgeTracking } from "./types";
 import type { HotAnalysisKnowledgeSourceReference, TopicAssetStatus } from "./types";
 import {
@@ -887,6 +888,8 @@ function migrateKnowledgeEntry(e: Omit<KnowledgeEntry, "category"> & { category:
     sourceKind: e.sourceKind ?? null,
     sourceName: e.sourceName ?? "",
     sourceAnalysis: e.sourceAnalysis ?? null,
+    sourceFinalProof: e.sourceFinalProof ?? null,
+    sourceLegacyProof: e.sourceLegacyProof ?? null,
   };
 }
 
@@ -910,6 +913,9 @@ export function getKnowledgeEntriesForFullLibraryComparison(): KnowledgeEntry[] 
 }
 
 export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt">): KnowledgeEntry {
+  if (input.sourceAnalysis?.parserVersion === 2) {
+    throw new Error("V2认知只能通过最终凭证验证入口保存");
+  }
   const all = readKnowledgeEntriesStrict();
   const entry: KnowledgeEntry = {
     ...input,
@@ -922,6 +928,49 @@ export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt"
 }
 
 export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">): KnowledgeEntry {
+  if (input.sourceAnalysis?.parserVersion === 2) {
+    throw new Error("V2认知只能通过最终凭证验证入口保存");
+  }
+  return persistKnowledgeEntryWithId(input);
+}
+
+export async function addFinalizedIPOriginalSourceWithId(
+  input: Omit<KnowledgeEntry, "createdAt">,
+  verification: {
+    activeIPId: string;
+    rawContent: string;
+    finalProof: string;
+    isStillCurrent?: () => boolean;
+  },
+): Promise<KnowledgeEntry> {
+  if (input.category !== "IP原始内容"
+    || input.sourceAnalysis?.parserVersion !== 2
+    || !input.sourceFinalProof?.trim()
+    || input.sourceFinalProof.trim() !== verification.finalProof.trim()) {
+    throw new Error("V2认知缺少已验证的最终凭证");
+  }
+  const response = await apiFetch("/api/ip-source-analysis/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      activeIPId: verification.activeIPId,
+      sourceId: input.id,
+      rawContent: verification.rawContent,
+      analysis: input.sourceAnalysis,
+      finalProof: verification.finalProof,
+    }),
+  });
+  const result = await response.json() as { verified?: boolean; error?: string };
+  if (!response.ok || result.verified !== true) {
+    throw new Error(result.error ?? "最终入库凭证验证失败");
+  }
+  if (verification.isStillCurrent && !verification.isStillCurrent()) {
+    throw new Error("当前IP或保存流程已变化，本次保存已取消");
+  }
+  return persistKnowledgeEntryWithId(input);
+}
+
+function persistKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">): KnowledgeEntry {
   const all = readKnowledgeEntriesStrict();
   if (all.some(entry => entry.id === input.id)) {
     throw new Error("知识条目编号重复，未保存任何内容");
@@ -1277,14 +1326,17 @@ export function getHotAnalysisKnowledgeGroupsByAnalysisId(
 
 export type KnowledgeEntryEditablePatch = Omit<
   Partial<KnowledgeEntry>,
-  "trustStatus" | "sourceReference" | "executionTemplate"
+  "trustStatus" | "sourceReference" | "executionTemplate" | "sourceAnalysis" | "sourceFinalProof" | "sourceLegacyProof"
 >;
 
 export function updateKnowledgeEntry(id: string, patch: KnowledgeEntryEditablePatch): void {
   if (
     Object.prototype.hasOwnProperty.call(patch, "trustStatus") ||
     Object.prototype.hasOwnProperty.call(patch, "sourceReference") ||
-    Object.prototype.hasOwnProperty.call(patch, "executionTemplate")
+    Object.prototype.hasOwnProperty.call(patch, "executionTemplate") ||
+    Object.prototype.hasOwnProperty.call(patch, "sourceAnalysis") ||
+    Object.prototype.hasOwnProperty.call(patch, "sourceFinalProof") ||
+    Object.prototype.hasOwnProperty.call(patch, "sourceLegacyProof")
   ) {
     throw new Error("系统维护字段不能通过通用编辑入口修改");
   }
@@ -1294,6 +1346,36 @@ export function updateKnowledgeEntry(id: string, patch: KnowledgeEntryEditablePa
     throw new Error("保真执行模板保存后不能编辑；如需更新，请使用新版本号另存");
   }
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+}
+
+export function replaceLegacyIPSourceAnalysis(
+  id: string,
+  sourceAnalysis: NonNullable<KnowledgeEntry["sourceAnalysis"]>,
+): void {
+  if (sourceAnalysis.parserVersion !== 1) {
+    throw new Error("V2认知不能通过旧版解析替换入口保存");
+  }
+  const all = readKnowledgeEntriesStrict();
+  const target = all.find(entry => entry.id === id);
+  if (!target || target.category !== "IP原始内容") {
+    throw new Error("找不到要重新解析的IP原始内容");
+  }
+  writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map(entry => entry.id === id
+    ? { ...entry, sourceAnalysis, extractedAt: sourceAnalysis.analyzedAt }
+    : entry));
+}
+
+export function saveIPSourceLegacyProof(id: string, legacyProof: string): KnowledgeEntry {
+  if (!legacyProof.trim()) throw new Error("缺少V1迁移凭证");
+  const all = readKnowledgeEntriesStrict();
+  const target = all.find(entry => entry.id === id);
+  if (!target || target.category !== "IP原始内容"
+    || target.sourceAnalysis?.parserVersion !== 1) {
+    throw new Error("只有历史V1认知可以登记迁移凭证");
+  }
+  const updated = { ...target, sourceLegacyProof: legacyProof.trim() };
+  writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map(entry => entry.id === id ? updated : entry));
+  return migrateKnowledgeEntry(updated);
 }
 
 export interface ExactKnowledgeTemplateStorageInput {
@@ -1657,6 +1739,13 @@ function isKnowledgeEntryAuditSnapshot(value: unknown): value is KnowledgeEntry 
   if (!(value.sourceName === undefined || typeof value.sourceName === "string")) return false;
   if (!(value.sourceAnalysis === undefined || value.sourceAnalysis === null
     || isIPSourceAnalysisSnapshot(value.sourceAnalysis, value.rawContent as string, value.id as string))) return false;
+  if (!(value.sourceFinalProof === undefined || value.sourceFinalProof === null
+    || typeof value.sourceFinalProof === "string")) return false;
+  if (!(value.sourceLegacyProof === undefined || value.sourceLegacyProof === null
+    || typeof value.sourceLegacyProof === "string")) return false;
+  if (isPlainRecord(value.sourceAnalysis)
+    && value.sourceAnalysis.parserVersion === 2
+    && (typeof value.sourceFinalProof !== "string" || !value.sourceFinalProof.trim())) return false;
   if (!(value.trustStatus === undefined || value.trustStatus === null
     || [
       "ai_derived_unverified", "adopted_awaiting_effect", "effect_evidence_awaiting_judgment",

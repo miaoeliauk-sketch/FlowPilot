@@ -160,6 +160,51 @@ test("切换IP时关闭已打开的旧IP知识详情", async () => {
   assert.ok(view.getByText("IP B私有详情"));
 });
 
+test("历史V1认知在详情页明确提示待登记并可完成登记", async () => {
+  const sourceId = "legacy-source-register-ui";
+  const rawContent = "老师明确说：判断来自真实矛盾。";
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    ...knowledgeEntry(sourceId, "历史V1认知", ipA.id),
+    category: "IP原始内容",
+    rawContent,
+    sourceAnalysis: {
+      analyzedAt: "2026-08-25T12:00:00.000Z",
+      parserVersion: 1,
+      items: [{
+        id: "legacy-ui-claim",
+        kind: "claim",
+        content: "判断来自真实矛盾。",
+        sourceId,
+        startPosition: 6,
+        endPosition: 14,
+        originalExcerpt: "判断来自真实矛盾",
+        extractionStatus: "人工确认",
+      }],
+    },
+  }]));
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ legacyProof: "signed-legacy-proof" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+    const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+    const user = userEvent.setup({ document });
+
+    await user.click(await view.findByRole("button", { name: /IP原始内容/ }));
+    await user.click(await view.findByText("历史V1认知"));
+    assert.ok(view.getByText("待合规登记"));
+    await user.click(view.getByRole("button", { name: "登记V1认知" }));
+    assert.ok(await view.findByText("已合规登记"));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("知识卡片按真实采用和发布复盘拆分统计且历史未验证记录单列", async () => {
   const ip = createTopicBoardIPProfile();
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));

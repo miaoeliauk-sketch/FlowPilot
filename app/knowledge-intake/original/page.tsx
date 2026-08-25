@@ -1,10 +1,19 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { useIP } from "@/lib/ip-context";
-import { addIPOriginalSource, deriveIPOriginalSourceTitle } from "@/lib/ip-original-source";
+import {
+  addIPOriginalSource,
+  addVerifiedIPOriginalSource,
+  createIPOriginalSourceId,
+  deriveIPOriginalSourceTitle,
+} from "@/lib/ip-original-source";
 import { getKnowledgeEntriesForFullLibraryComparison } from "@/lib/ip-store";
+import { getLegacyIPSourceAnalysisItems, parseStoredIPSourceAnalysis } from "@/lib/ip-source-analysis-v2";
+import type { CognitionReviewAction } from "@/lib/ip-source-analysis-review";
+import { CognitionNodeCard } from "@/components/ip-brain/CognitionNodeCard";
+import { SourceViewer } from "@/components/ip-brain/SourceViewer";
 import {
   runIPOriginalSourcePrecheck,
   type IPOriginalSourcePrecheckResult,
@@ -12,8 +21,9 @@ import {
 } from "@/lib/knowledge-intake-precheck";
 import type {
   IPOriginalSourceKind,
-  IPSourceAnalysis,
   IPSourceAnalysisKind,
+  IPSourceAnalysisSnapshot,
+  IPSourceAnchor,
 } from "@/lib/types";
 
 const SOURCE_KINDS: IPOriginalSourceKind[] = ["直播逐字稿", "课程内容", "文章", "语音整理", "其他"];
@@ -69,10 +79,6 @@ function SimilarityResults({
   );
 }
 
-function draftSourceId() {
-  return `source-draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export default function IPOriginalContentIntakePage() {
   const { activeIP, ips } = useIP();
   const [title, setTitle] = useState("");
@@ -80,18 +86,74 @@ export default function IPOriginalContentIntakePage() {
   const [sourceName, setSourceName] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [rawContent, setRawContent] = useState("");
-  const [analysis, setAnalysis] = useState<IPSourceAnalysis | null>(null);
+  const [analysis, setAnalysis] = useState<IPSourceAnalysisSnapshot | null>(null);
+  const [analysisToken, setAnalysisToken] = useState("");
   const [analysisIPId, setAnalysisIPId] = useState<string | null>(null);
+  const [activeAnchor, setActiveAnchor] = useState<IPSourceAnchor | null>(null);
   const [precheck, setPrecheck] = useState<IPOriginalSourcePrecheckResult | null>(null);
   const [saveDecision, setSaveDecision] = useState<"continue" | "skip" | null>(null);
   const [loading, setLoading] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedId, setSavedId] = useState("");
   const [error, setError] = useState("");
-  const draftId = useMemo(() => draftSourceId(), []);
-  const confirmedCount = analysis?.items.filter(item => item.extractionStatus === "人工确认").length ?? 0;
+  const activeRequestSeq = useRef(0);
+  const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
+  const analysisInFlight = useRef(false);
+  const reviewInFlight = useRef(false);
+  const saveInFlight = useRef(false);
+  const [sourceId, setSourceId] = useState(() => createIPOriginalSourceId());
+  const confirmedCount = analysis?.parserVersion === 1
+    ? analysis.items.filter(item => item.extractionStatus === "人工确认").length
+    : analysis?.nodes.filter(node => node.reviewStatus === "human_confirmed").length ?? 0;
+  const analysisCount = analysis?.parserVersion === 1
+    ? analysis.items.length
+    : analysis?.nodes.length ?? 0;
+  const reviewedCount = analysis?.parserVersion === 1
+    ? confirmedCount
+    : analysis?.nodes.filter(node => node.reviewStatus !== "ai_extracted").length ?? 0;
+  const isGlobalLocked = loading || reviewing || saving;
+
+  useEffect(() => {
+    activeIPIdRef.current = activeIP?.id ?? null;
+    activeRequestSeq.current += 1;
+    analysisInFlight.current = false;
+    reviewInFlight.current = false;
+    saveInFlight.current = false;
+    setLoading(false);
+    setReviewing(false);
+    setAnalysis(null);
+    setAnalysisToken("");
+    setAnalysisIPId(null);
+    setActiveAnchor(null);
+    setPrecheck(null);
+    setSaveDecision(null);
+    setError("");
+  }, [activeIP?.id]);
+
+  function buildPrecheck(
+    nextAnalysis: IPSourceAnalysisSnapshot,
+    nextTitle: string,
+    candidateSourceId = sourceId,
+  ) {
+    const compatibleItems = getLegacyIPSourceAnalysisItems(nextAnalysis);
+    return runIPOriginalSourcePrecheck({
+      candidateId: candidateSourceId,
+      title: nextTitle,
+      originalContent: rawContent,
+      keywords: compatibleItems
+        .filter(item => item.kind === "claim" || item.kind === "concept" || item.kind === "topic")
+        .map(item => item.content.slice(0, 60)),
+      viewpointSummaries: compatibleItems
+        .filter(item => item.kind === "claim" || item.kind === "reasoning" || item.kind === "concept" || item.kind === "topic")
+        .map(item => item.content),
+      existingEntries: getKnowledgeEntriesForFullLibraryComparison(),
+      ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
+    });
+  }
 
   async function handleFile(file: File) {
+    if (analysisInFlight.current || reviewInFlight.current || saveInFlight.current) return;
     setError("");
     if (!file.name.match(/\.(txt|md|srt)$/i) && !["text/plain", "text/markdown", "application/x-subrip"].includes(file.type)) {
       setError("第一版支持txt、md、srt格式");
@@ -102,12 +164,15 @@ export default function IPOriginalContentIntakePage() {
     setRawContent(text);
     if (!title.trim()) setTitle(file.name.replace(/\.[^.]+$/, ""));
     setAnalysis(null);
+    setAnalysisToken("");
     setAnalysisIPId(null);
+    setActiveAnchor(null);
     setPrecheck(null);
     setSaveDecision(null);
   }
 
   async function handleAnalyze() {
+    if (analysisInFlight.current || reviewInFlight.current || saveInFlight.current) return;
     if (!activeIP) {
       setError("请先在身份中心选择当前IP");
       return;
@@ -117,57 +182,79 @@ export default function IPOriginalContentIntakePage() {
       return;
     }
     const requestedIPId = activeIP.id;
+    const requestedSourceId = createIPOriginalSourceId();
+    setSourceId(requestedSourceId);
+    const requestSeq = activeRequestSeq.current + 1;
+    activeRequestSeq.current = requestSeq;
+    analysisInFlight.current = true;
     setLoading(true);
     setError("");
     setAnalysis(null);
+    setAnalysisToken("");
     setAnalysisIPId(null);
     try {
       const response = await apiFetch("/api/ip-source-analysis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sourceId: draftId,
+          sourceId: requestedSourceId,
           activeIPId: requestedIPId,
           rawContent,
+          parserVersion: 2,
+          requestSeq,
         }),
       });
       const data = await response.json();
+      if (requestSeq !== activeRequestSeq.current
+        || activeIPIdRef.current !== requestedIPId) return;
       if (!response.ok) {
         setError(data.error ?? "原始内容解析失败");
         return;
       }
-      const nextAnalysis = data.analysis as IPSourceAnalysis;
+      const parsed = parseStoredIPSourceAnalysis(data.analysis, rawContent, requestedSourceId);
+      if (!parsed.ok) {
+        setError(parsed.error);
+        return;
+      }
+      const nextAnalysis = parsed.analysis;
+      if (nextAnalysis.parserVersion === 2
+        && (typeof data.analysisToken !== "string" || !data.analysisToken.trim())) {
+        setError("解析结果缺少服务端凭证，请重新分析");
+        return;
+      }
+      if (nextAnalysis.parserVersion === 2
+        && (data.requestSeq !== requestSeq || data.activeIPId !== requestedIPId)) {
+        setError("解析响应与当前IP不一致，请重新分析");
+        return;
+      }
       const nextTitle = title.trim()
         ? title.trim()
         : deriveIPOriginalSourceTitle(rawContent, nextAnalysis);
-      const keywords = nextAnalysis.items
-        .filter(item => item.kind === "claim" || item.kind === "concept" || item.kind === "topic")
-        .map(item => item.content.slice(0, 60));
-      const viewpointSummaries = nextAnalysis.items
-        .filter(item => item.kind === "claim" || item.kind === "reasoning" || item.kind === "concept" || item.kind === "topic")
-        .map(item => item.content);
-      const nextPrecheck = runIPOriginalSourcePrecheck({
-        candidateId: draftId,
-        title: nextTitle,
-        originalContent: rawContent,
-        keywords,
-        viewpointSummaries,
-        existingEntries: getKnowledgeEntriesForFullLibraryComparison(),
-        ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
-      });
+      const nextPrecheck = buildPrecheck(nextAnalysis, nextTitle, requestedSourceId);
       setAnalysis(nextAnalysis);
+      setAnalysisToken(nextAnalysis.parserVersion === 2 ? data.analysisToken : "");
       setAnalysisIPId(requestedIPId);
+      setActiveAnchor(nextAnalysis.parserVersion === 2
+        ? nextAnalysis.nodes[0]?.claim.anchors[0] ?? null
+        : null);
       setTitle(nextTitle);
       setPrecheck(nextPrecheck);
       setSaveDecision(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "网络错误");
+      if (requestSeq === activeRequestSeq.current
+        && activeIPIdRef.current === requestedIPId) {
+        setError(cause instanceof Error ? cause.message : "网络错误");
+      }
     } finally {
-      setLoading(false);
+      if (requestSeq === activeRequestSeq.current) {
+        analysisInFlight.current = false;
+        setLoading(false);
+      }
     }
   }
 
-  function handleSave() {
+  async function handleSave() {
+    if (saveInFlight.current || analysisInFlight.current || reviewInFlight.current) return;
     if (!activeIP || !analysis) return;
     if (analysisIPId !== activeIP.id) {
       setError("当前IP已切换，请重新理解内容后再保存");
@@ -181,41 +268,171 @@ export default function IPOriginalContentIntakePage() {
       setError("请先查看入库前检查结果，并确认是否继续保存");
       return;
     }
+    if (analysis.parserVersion === 2 && analysis.nodes.some(node => node.reviewStatus === "ai_extracted")) {
+      setError("请先逐条确认、拒绝或修订所有认知节点");
+      return;
+    }
+    const requestedIPId = activeIP.id;
+    const requestSeq = activeRequestSeq.current + 1;
+    activeRequestSeq.current = requestSeq;
+    saveInFlight.current = true;
     setSaving(true);
     setError("");
     try {
-      const saved = addIPOriginalSource({
-        ipId: activeIP.id,
+      const sourceInput = {
+        sourceId,
+        ipId: requestedIPId,
         title,
         sourceKind,
         originalContent: rawContent,
         sourceName,
         sourceUrl,
         analysis,
-      });
+      };
+      const saved = analysis.parserVersion === 2
+        ? await (async () => {
+            if (!analysisToken) throw new Error("解析凭证已失效，请重新分析");
+            const response = await apiFetch("/api/ip-source-analysis/finalize", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                activeIPId: requestedIPId,
+                sourceId,
+                rawContent,
+                analysis,
+                analysisToken,
+                requestSeq,
+              }),
+            });
+            const result = await response.json() as {
+              finalProof?: string;
+              activeIPId?: string;
+              sourceId?: string;
+              nonce?: number;
+              requestSeq?: number | null;
+              error?: string;
+            };
+            if (requestSeq !== activeRequestSeq.current
+              || activeIPIdRef.current !== requestedIPId) {
+              throw new Error("当前IP或保存流程已变化，本次保存已取消");
+            }
+            if (!response.ok || typeof result.finalProof !== "string" || !result.finalProof.trim()) {
+              throw new Error(result.error ?? "最终入库校验失败");
+            }
+            if (result.activeIPId !== requestedIPId
+              || result.sourceId !== sourceId
+              || result.nonce !== analysis.nonce
+              || result.requestSeq !== requestSeq) {
+              throw new Error("最终入库响应与当前内容不一致");
+            }
+            return addVerifiedIPOriginalSource({
+              ...sourceInput,
+              analysis,
+              finalProof: result.finalProof,
+              isStillCurrent: () => requestSeq === activeRequestSeq.current
+                && activeIPIdRef.current === requestedIPId,
+            });
+          })()
+        : addIPOriginalSource({ ...sourceInput, analysis });
+      if (requestSeq !== activeRequestSeq.current
+        || activeIPIdRef.current !== requestedIPId) return;
       setSavedId(saved.id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "保存失败");
+      if (requestSeq === activeRequestSeq.current
+        && activeIPIdRef.current === requestedIPId) {
+        setError(cause instanceof Error ? cause.message : "保存失败");
+      }
     } finally {
-      setSaving(false);
+      if (requestSeq === activeRequestSeq.current) {
+        saveInFlight.current = false;
+        setSaving(false);
+      }
     }
   }
 
   function toggleConfirmed(itemId: string) {
-    setAnalysis(current => current ? {
+    setAnalysis(current => current?.parserVersion === 1 ? {
       ...current,
       items: current.items.map(item => item.id === itemId ? {
         ...item,
         extractionStatus: item.extractionStatus === "人工确认" ? "AI提取" : "人工确认",
       } : item),
-    } : null);
+    } : current);
   }
 
   function confirmAll() {
-    setAnalysis(current => current ? {
+    setAnalysis(current => current?.parserVersion === 1 ? {
       ...current,
       items: current.items.map(item => ({ ...item, extractionStatus: "人工确认" })),
-    } : null);
+    } : current);
+  }
+
+  async function reviewNode(action: CognitionReviewAction) {
+    if (!activeIP || analysis?.parserVersion !== 2) return;
+    if (reviewInFlight.current || analysisInFlight.current || saveInFlight.current) return;
+    if (!analysisToken) {
+      setError("解析凭证已失效，请重新分析");
+      return;
+    }
+    if (analysisIPId !== activeIP.id) {
+      setError("当前IP已切换，请重新理解内容后再审核");
+      return;
+    }
+    const requestedIPId = activeIP.id;
+    const requestSeq = activeRequestSeq.current + 1;
+    activeRequestSeq.current = requestSeq;
+    reviewInFlight.current = true;
+    setReviewing(true);
+    setError("");
+    try {
+      const response = await apiFetch("/api/ip-source-analysis/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId: activeIP.id,
+          sourceId,
+          rawContent,
+          analysis,
+          analysisToken,
+          requestSeq,
+          action,
+        }),
+      });
+      const data = await response.json();
+      if (requestSeq !== activeRequestSeq.current
+        || activeIPIdRef.current !== requestedIPId) return;
+      if (!response.ok) {
+        setError(data.error ?? "认知审核失败");
+        return;
+      }
+      if (data.requestSeq !== requestSeq || data.activeIPId !== requestedIPId) {
+        setError("审核响应与当前IP不一致，请重新操作");
+        return;
+      }
+      if (typeof data.analysisToken !== "string" || !data.analysisToken.trim()) {
+        setError("审核响应缺少服务端凭证，请重新分析");
+        return;
+      }
+      const parsed = parseStoredIPSourceAnalysis(data.analysis, rawContent, sourceId);
+      if (!parsed.ok || parsed.version !== 2) {
+        setError(parsed.ok ? "认知审核返回了错误版本" : parsed.error);
+        return;
+      }
+      setAnalysis(parsed.analysis);
+      setAnalysisToken(data.analysisToken);
+      setPrecheck(buildPrecheck(parsed.analysis, title.trim()));
+      setSaveDecision(null);
+    } catch (cause) {
+      if (requestSeq === activeRequestSeq.current
+        && activeIPIdRef.current === requestedIPId) {
+        setError(cause instanceof Error ? cause.message : "认知审核失败");
+      }
+    } finally {
+      if (requestSeq === activeRequestSeq.current) {
+        reviewInFlight.current = false;
+        setReviewing(false);
+      }
+    }
   }
 
   if (savedId) {
@@ -245,35 +462,42 @@ export default function IPOriginalContentIntakePage() {
       </header>
 
       <main className="mx-auto flex max-w-[980px] flex-col gap-4">
+        {isGlobalLocked && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/55 backdrop-blur-[1px]" role="status" aria-live="polite">
+            <div className="rounded-[12px] border border-[#D8E9C0] bg-white px-5 py-3 text-[13px] font-semibold text-[#3B6D11] shadow-lg">
+              处理中，请勿修改原始内容
+            </div>
+          </div>
+        )}
         <section className="rounded-[16px] border border-[#E5E4DE] bg-white p-5">
           <div className="mb-4 rounded-[10px] bg-[#EFF6FF] px-3 py-2.5 text-[12.5px] text-[#1D4ED8]">
             当前IP：<b>{activeIP?.name ?? "尚未选择"}</b>。这份内容只会归入当前IP，不会作为通用方法使用。
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-[12.5px] font-semibold text-[#555]">标题（保存必填）
-              <input value={title} onChange={event => { setTitle(event.target.value); setPrecheck(null); setSaveDecision(null); }} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
+              <input value={title} disabled={isGlobalLocked} onChange={event => { setTitle(event.target.value); setPrecheck(null); setSaveDecision(null); }} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
             </label>
             <label className="text-[12.5px] font-semibold text-[#555]">资料类型
-              <select value={sourceKind} onChange={event => setSourceKind(event.target.value as IPOriginalSourceKind)} className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none">
+              <select value={sourceKind} disabled={isGlobalLocked} onChange={event => setSourceKind(event.target.value as IPOriginalSourceKind)} className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none">
                 {SOURCE_KINDS.map(kind => <option key={kind}>{kind}</option>)}
               </select>
             </label>
           </div>
           <label className="mt-3 block text-[12.5px] font-semibold text-[#555]">来源链接（可选）
-            <input value={sourceUrl} onChange={event => setSourceUrl(event.target.value)} placeholder="用于记录资料出处，不代表系统已核实外部事实" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
+            <input value={sourceUrl} disabled={isGlobalLocked} onChange={event => setSourceUrl(event.target.value)} placeholder="用于记录资料出处，不代表系统已核实外部事实" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
           </label>
           <label className="mt-4 flex cursor-pointer items-center justify-center rounded-[10px] border border-dashed border-[#CFCFC7] bg-[#FAFAF8] px-4 py-4 text-[12.5px] text-[#666]">
             {sourceName ? `已读取：${sourceName}` : "上传txt、md或srt，或者直接在下方粘贴"}
-            <input type="file" accept={ACCEPT} className="hidden" onChange={event => {
+            <input type="file" accept={ACCEPT} disabled={isGlobalLocked} className="hidden" onChange={event => {
               const file = event.target.files?.[0];
               if (file) void handleFile(file);
               event.target.value = "";
             }} />
           </label>
-          <textarea value={rawContent} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisIPId(null); setPrecheck(null); setSaveDecision(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
+          <textarea value={rawContent} disabled={isGlobalLocked} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisToken(""); setAnalysisIPId(null); setActiveAnchor(null); setPrecheck(null); setSaveDecision(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
           <div className="mt-3 flex items-center justify-between gap-3">
             <span className="text-[11.5px] text-[#AAA]">{rawContent.length}字。原文将在确认保存时完整写入，不会被AI改写。</span>
-            <button onClick={handleAnalyze} disabled={loading || !rawContent.trim() || !activeIP} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">{loading ? "正在理解原始内容……" : "开始理解内容"}</button>
+            <button onClick={handleAnalyze} disabled={isGlobalLocked || !rawContent.trim() || !activeIP} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">{loading ? "正在理解原始内容……" : "开始理解内容"}</button>
           </div>
         </section>
 
@@ -284,12 +508,18 @@ export default function IPOriginalContentIntakePage() {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-[16px] font-bold text-[#1C1C1B]">内容理解结果</h2>
-                <p className="mt-1 text-[12px] text-[#888]">当前全部标记为“AI提取”。它表示可以回到原文，不表示外部事实已经核实。</p>
+                <p className="mt-1 text-[12px] text-[#888]">
+                  {analysis.parserVersion === 1
+                    ? "当前全部标记为“AI提取”。它表示可以回到原文，不表示外部事实已经核实。"
+                    : "逐条核对观点、推理和原文证据。人工修订不会覆盖AI原始提取和原文锚点。"}
+                </p>
               </div>
-              <span className={`rounded-full px-3 py-1 text-[11px] font-semibold ${analysis.items.length > 0 && confirmedCount === analysis.items.length ? "bg-[#EAF3DE] text-[#3B6D11]" : "bg-[#FEF3C7] text-[#92400E]"}`}>
-                已确认{confirmedCount}／{analysis.items.length}条
+              <span className={`rounded-full px-3 py-1 text-[11px] font-semibold ${analysisCount > 0 && reviewedCount === analysisCount ? "bg-[#EAF3DE] text-[#3B6D11]" : "bg-[#FEF3C7] text-[#92400E]"}`}>
+                {analysis.parserVersion === 1 ? "已确认" : "已审核"}{reviewedCount}／{analysisCount}条
               </span>
-              <button onClick={confirmAll} className="rounded-[9px] bg-[#EAF3DE] px-3 py-2 text-[11.5px] font-semibold text-[#3B6D11]">全部确认原意</button>
+              {analysis.parserVersion === 1 && (
+                <button onClick={confirmAll} className="rounded-[9px] bg-[#EAF3DE] px-3 py-2 text-[11.5px] font-semibold text-[#3B6D11]">全部确认原意</button>
+              )}
             </div>
             {precheck ? (
               <div className="mb-4 space-y-3 rounded-[12px] border border-[#D8E9C0] bg-[#F9FCF5] p-4">
@@ -342,25 +572,69 @@ export default function IPOriginalContentIntakePage() {
                 标题或内容已变化，请重新点击“开始理解内容”后再保存。
               </div>
             )}
-            <div className="flex flex-col gap-3">
-              {analysis.items.map(item => (
-                <article key={item.id} className="rounded-[12px] border border-[#E5E4DE] p-4">
-                  <div className="mb-2 flex items-center gap-2">
-                    <span className="rounded-full bg-[#EFF6FF] px-2.5 py-0.5 text-[11px] font-semibold text-[#1D4ED8]">{KIND_LABEL[item.kind]}</span>
-                    <span className="text-[10.5px] text-[#AAA]">原文第{item.startPosition + 1}—{item.endPosition}字</span>
-                    <button onClick={() => toggleConfirmed(item.id)} className={`ml-auto rounded-full px-2.5 py-1 text-[10.5px] font-semibold ${item.extractionStatus === "人工确认" ? "bg-[#EAF3DE] text-[#3B6D11]" : "bg-[#FEF3C7] text-[#92400E]"}`}>
-                      {item.extractionStatus === "人工确认" ? "已确认原意" : "确认原意"}
-                    </button>
+            {analysis.parserVersion === 1 ? (
+              <div className="flex flex-col gap-3">
+                {analysis.items.map(item => (
+                  <article key={item.id} className="rounded-[12px] border border-[#E5E4DE] p-4">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="rounded-full bg-[#EFF6FF] px-2.5 py-0.5 text-[11px] font-semibold text-[#1D4ED8]">{KIND_LABEL[item.kind]}</span>
+                      <span className="text-[10.5px] text-[#AAA]">原文第{item.startPosition + 1}—{item.endPosition}字</span>
+                      <button onClick={() => toggleConfirmed(item.id)} className={`ml-auto rounded-full px-2.5 py-1 text-[10.5px] font-semibold ${item.extractionStatus === "人工确认" ? "bg-[#EAF3DE] text-[#3B6D11]" : "bg-[#FEF3C7] text-[#92400E]"}`}>
+                        {item.extractionStatus === "人工确认" ? "已确认原意" : "确认原意"}
+                      </button>
+                    </div>
+                    <p className="text-[13px] font-semibold leading-6 text-[#333]">{item.content}</p>
+                    <blockquote className="mt-2 rounded-[8px] bg-[#F7F6F2] px-3 py-2 text-[12px] leading-5 text-[#666]">原文：“{item.originalExcerpt}”</blockquote>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
+                  <div className="rounded-[12px] border border-[#E5E4DE] bg-[#FCFCFA] p-4">
+                    <h3 className="mb-3 text-[13px] font-bold text-[#333]">原始内容证据</h3>
+                    <SourceViewer sourceContent={rawContent} activeAnchor={activeAnchor} />
                   </div>
-                  <p className="text-[13px] font-semibold leading-6 text-[#333]">{item.content}</p>
-                  <blockquote className="mt-2 rounded-[8px] bg-[#F7F6F2] px-3 py-2 text-[12px] leading-5 text-[#666]">原文：“{item.originalExcerpt}”</blockquote>
-                </article>
-              ))}
-            </div>
+                  <div className="flex flex-col gap-3">
+                    {analysis.nodes.map(node => (
+                      <CognitionNodeCard
+                        key={node.id}
+                        node={node}
+                        onActivateAnchor={setActiveAnchor}
+                        onReview={action => { void reviewNode(action); }}
+                        reviewDisabled={reviewing}
+                      />
+                    ))}
+                  </div>
+                </div>
+                {(analysis.aiSuggestions.potentialPrinciples.length > 0 || analysis.aiSuggestions.topicPotential.length > 0) && (
+                  <aside className="mt-4 rounded-[12px] border border-[#DED8EF] bg-[#F7F4FC] p-4">
+                    <h3 className="text-[13px] font-bold text-[#5B4B7A]">AI建议（只读）</h3>
+                    <p className="mt-1 text-[11.5px] text-[#746987]">以下内容为AI建议，不是老师原意</p>
+                    {analysis.aiSuggestions.potentialPrinciples.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-[11.5px] font-bold text-[#65597A]">潜在判断原则</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5 text-[12px] leading-5 text-[#65597A]">
+                          {analysis.aiSuggestions.potentialPrinciples.map((item, index) => <li key={`${item.content}:${index}`}>{item.content}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {analysis.aiSuggestions.topicPotential.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-[11.5px] font-bold text-[#65597A]">可延展选题</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5 text-[12px] leading-5 text-[#65597A]">
+                          {analysis.aiSuggestions.topicPotential.map((item, index) => <li key={`${item.content}:${index}`}>{item.content}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </aside>
+                )}
+              </>
+            )}
             <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setAnalysis(null)} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555]">返回修改原文</button>
+              <button disabled={reviewing} onClick={() => { setAnalysis(null); setAnalysisToken(""); setActiveAnchor(null); }} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555] disabled:opacity-40">返回修改原文</button>
               {!title.trim() && <span className="self-center text-[11.5px] text-[#A32D2D]">请先填写标题</span>}
-              <button onClick={handleSave} disabled={saving || !precheck || saveDecision === "skip"} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
+              <button onClick={() => { void handleSave(); }} disabled={saving || reviewing || !precheck || saveDecision === "skip" || (analysis.parserVersion === 2 && analysis.nodes.some(node => node.reviewStatus === "ai_extracted"))} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
             </div>
           </section>
         )}

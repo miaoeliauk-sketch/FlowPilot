@@ -351,12 +351,74 @@ function scriptFactoryRequest(
       videoType: "口播",
       needsStoryboard: true,
       needsShootingTips: true,
-      ipSourceContext: [
-        { ipId: ipProfile.id, sourceId: "source-1", sourceTitle: "课程原文", itemId: "claim-1", kind: "claim", content: "趋势会改变普通人的选择。", originalExcerpt: "趋势最终会落到普通人的现实选择。", extractionStatus: "人工确认" },
-        { ipId: ipProfile.id, sourceId: "source-1", sourceTitle: "课程原文", itemId: "reasoning-1", kind: "reasoning", content: "判断趋势要观察需求和行为。", originalExcerpt: "判断趋势要同时观察需求、成本和普通人的真实行为。", extractionStatus: "人工确认" },
-      ],
+      ipSourceContext: [],
     }),
   });
+}
+
+async function registeredDiagnosticLegacyContext(ipId: string) {
+  const sourceId = `source-style-trace-${Date.now()}-${Math.random()}`;
+  const claimExcerpt = "趋势最终会落到个人选择。";
+  const reasoningExcerpt = "判断趋势不能只看热闹，要同时观察需求、成本和普通人的真实行为。";
+  const rawContent = `${claimExcerpt}\n${reasoningExcerpt}`;
+  const analysis = {
+    analyzedAt: "2026-08-25T12:00:00.000Z",
+    parserVersion: 1 as const,
+    items: [
+      {
+        id: "claim-1",
+        kind: "claim" as const,
+        content: "趋势最终会落到个人选择。",
+        sourceId,
+        startPosition: rawContent.indexOf(claimExcerpt),
+        endPosition: rawContent.indexOf(claimExcerpt) + claimExcerpt.length,
+        originalExcerpt: claimExcerpt,
+        extractionStatus: "人工确认" as const,
+      },
+      {
+        id: "reasoning-1",
+        kind: "reasoning" as const,
+        content: "判断趋势要同时观察需求、成本和普通人的真实行为。",
+        sourceId,
+        startPosition: rawContent.indexOf(reasoningExcerpt),
+        endPosition: rawContent.indexOf(reasoningExcerpt) + reasoningExcerpt.length,
+        originalExcerpt: reasoningExcerpt,
+        extractionStatus: "人工确认" as const,
+      },
+    ],
+  };
+  const { buildIPSourceLegacyProofClaims } = await import("./ip-source-analysis-proof");
+  const { trustLegacyMigrationForTests } = await import("./ip-source-ledger");
+  await trustLegacyMigrationForTests(buildIPSourceLegacyProofClaims({
+    ipId,
+    sourceId,
+    rawContent,
+    contextItems: analysis.items,
+  }));
+  const { POST: registerPOST } = await import("../app/api/ip-source-analysis/legacy/register/route");
+  const response = await registerPOST(new NextRequest(
+    "http://localhost/api/ip-source-analysis/legacy/register",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ activeIPId: ipId, sourceIPId: ipId, sourceId, rawContent, analysis }),
+    },
+  ));
+  const result = await response.json() as { legacyProof?: string; error?: string };
+  assert.equal(response.status, 200, result.error);
+  assert.equal(typeof result.legacyProof, "string");
+  return analysis.items.map(item => ({
+    parserVersion: 1 as const,
+    legacyProof: result.legacyProof,
+    ipId,
+    sourceId,
+    sourceTitle: "水木然趋势判断",
+    itemId: item.id,
+    kind: item.kind,
+    content: item.content,
+    originalExcerpt: item.originalExcerpt,
+    extractionStatus: item.extractionStatus,
+  }));
 }
 
 test("固定脚本生成不要求观点覆盖度，也不启用IP专属编导规则", async () => {
@@ -1348,6 +1410,7 @@ test("水木然专属生成只在本机记录完整AI调用链，不通过接口
     const requestBody = await request.clone().json();
     requestBody.needsStoryboard = false;
     requestBody.needsShootingTips = false;
+    requestBody.ipSourceContext = await registeredDiagnosticLegacyContext(SHUIMURAN.id);
     requestBody.knowledgeRefs = [{
       id: "knowledge-trace-1",
       ipId: SHUIMURAN.id,

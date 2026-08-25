@@ -1,8 +1,28 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import test from "node:test";
+import test, { after, before } from "node:test";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/ip-source-analysis/route";
+import {
+  buildIPSourceAnalysisProofClaims,
+  verifyIPSourceAnalysisToken,
+} from "./ip-source-analysis-proof";
+import type { IPSourceAnalysisV2 } from "./types";
+
+const PROOF_SECRET = "test-only-ip-source-analysis-proof-secret-32-bytes";
+const originalProofSecret = process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET;
+
+before(() => {
+  process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET = PROOF_SECRET;
+});
+
+after(() => {
+  if (originalProofSecret === undefined) {
+    delete process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET;
+  } else {
+    process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET = originalProofSecret;
+  }
+});
 
 function deepSeekResponse(content: string, finishReason = "stop") {
   return new Response(JSON.stringify({
@@ -280,6 +300,7 @@ test("V2成功结果由服务端生成UUID、全文哈希和绝对锚点位置",
       sourceId: "source-v2-success",
       activeIPId: "ip-shuimuran",
       rawContent,
+      requestSeq: 37,
     }));
     const body = await response.json();
     const node = body.analysis.nodes[0];
@@ -287,6 +308,16 @@ test("V2成功结果由服务端生成UUID、全文哈希和绝对锚点位置",
     assert.equal(response.status, 200);
     assert.equal(body.analysis.parserVersion, 2);
     assert.equal(body.analysis.sourceId, "source-v2-success");
+    assert.equal(body.activeIPId, "ip-shuimuran");
+    assert.equal(body.requestSeq, 37);
+    assert.equal(verifyIPSourceAnalysisToken(
+      body.analysisToken,
+      buildIPSourceAnalysisProofClaims({
+        ipId: "ip-shuimuran",
+        analysis: body.analysis as IPSourceAnalysisV2,
+      }),
+      PROOF_SECRET,
+    ), true);
     assert.equal(
       body.analysis.sourceHash,
       createHash("sha256").update(rawContent, "utf8").digest("hex"),

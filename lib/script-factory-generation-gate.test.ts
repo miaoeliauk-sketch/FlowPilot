@@ -74,6 +74,62 @@ async function withSuccessfulModel<T>(run: (prompts: string[]) => Promise<T>): P
   finally { globalThis.fetch = originalFetch; }
 }
 
+async function registeredLegacyContext() {
+  const sourceId = `source-legacy-gate-${Date.now()}-${Math.random()}`;
+  const originalExcerpt = "不要只看结果，要看结果背后的判断方式。";
+  const analysis = {
+    analyzedAt: "2026-08-25T12:00:00.000Z",
+    parserVersion: 1 as const,
+    items: [{
+      id: "claim-1",
+      kind: "claim" as const,
+      content: "结果变化之前，判断方式已经变化。",
+      sourceId,
+      startPosition: 0,
+      endPosition: originalExcerpt.length,
+      originalExcerpt,
+      extractionStatus: "人工确认" as const,
+    }],
+  };
+  const { buildIPSourceLegacyProofClaims } = await import("./ip-source-analysis-proof");
+  const { trustLegacyMigrationForTests } = await import("./ip-source-ledger");
+  await trustLegacyMigrationForTests(buildIPSourceLegacyProofClaims({
+    ipId: IP.id,
+    sourceId,
+    rawContent: originalExcerpt,
+    contextItems: analysis.items,
+  }));
+  const { POST: registerPOST } = await import("../app/api/ip-source-analysis/legacy/register/route");
+  const response = await registerPOST(new NextRequest(
+    "http://localhost/api/ip-source-analysis/legacy/register",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        activeIPId: IP.id,
+        sourceIPId: IP.id,
+        sourceId,
+        rawContent: originalExcerpt,
+        analysis,
+      }),
+    },
+  ));
+  const result = await response.json() as { legacyProof?: string; error?: string };
+  assert.equal(response.status, 200, result.error);
+  return {
+    parserVersion: 1 as const,
+    legacyProof: result.legacyProof,
+    ipId: IP.id,
+    sourceId,
+    sourceTitle: "老师直播原文",
+    itemId: "claim-1",
+    kind: "claim" as const,
+    content: "结果变化之前，判断方式已经变化。",
+    originalExcerpt,
+    extractionStatus: "人工确认" as const,
+  };
+}
+
 test("IP专属生成没有覆盖度结果也能直接生成正文", async () => {
   await withSuccessfulModel(async prompts => {
     const response = await POST(requestFor());
@@ -98,18 +154,46 @@ test("没有IP原始内容也能生成，但提示词禁止冒充老师已确认
 });
 
 test("当前IP原始内容只作为生成上下文，不作为生成授权", async () => {
+  const context = await registeredLegacyContext();
   await withSuccessfulModel(async prompts => {
     const response = await POST(requestFor({
-      ipSourceContext: [{
-        ipId: IP.id, sourceId: "source-1", sourceTitle: "老师直播原文", itemId: "claim-1", kind: "claim",
-        content: "结果变化之前，判断方式已经变化。", originalExcerpt: "不要只看结果，要看结果背后的判断方式。", extractionStatus: "人工确认",
-      }],
+      ipSourceContext: [context],
     }));
     assert.equal(response.status, 200);
     assert.match(prompts[0], /IP原始内容上下文/);
     assert.match(prompts[0], /不要只看结果，要看结果背后的判断方式/);
     assert.doesNotMatch(prompts[0], /已经确认的观点依据/);
   });
+});
+
+test("V2认知缺少最终凭证时不能进入脚本生成提示词", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return deepSeekResponse("{}", "unexpected");
+  };
+  try {
+    const response = await POST(requestFor({
+      ipSourceContext: [{
+        parserVersion: 2,
+        ipId: IP.id,
+        sourceId: "source-v2-unverified",
+        sourceTitle: "未经终审的认知",
+        itemId: "claim-v2-unverified",
+        kind: "claim",
+        content: "这条内容还没有最终凭证。",
+        originalExcerpt: "这条内容还没有最终凭证。",
+        extractionStatus: "人工确认",
+      }],
+    }));
+    const body = await response.json();
+    assert.equal(response.status, 400);
+    assert.match(body.error, /最终凭证/);
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("其他IP的原始内容不能进入当前IP生成请求", async () => {

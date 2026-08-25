@@ -72,12 +72,17 @@ afterEach(async () => {
 
 after(() => restoreBrowser?.());
 
-test("IP A发起的旧分析在切换到IP B后不能保存", async () => {
+test("IP A发起的旧分析在切换到IP B后不会展示也不能保存", async () => {
   const originalContent = "老师原话：真正重要的是判断力。";
   let resolveAnalysis: ((response: Response) => void) | null = null;
-  globalThis.fetch = async () => await new Promise<Response>(resolve => {
-    resolveAnalysis = resolve;
-  });
+  let requestedSourceId = "";
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { sourceId?: string };
+    requestedSourceId = body.sourceId ?? "";
+    return await new Promise<Response>(resolve => {
+      resolveAnalysis = resolve;
+    });
+  };
 
   const { act, render, waitFor } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
@@ -111,7 +116,7 @@ test("IP A发起的旧分析在切换到IP B后不能保存", async () => {
           id: "A01",
           kind: "claim",
           content: "真正重要的是判断力。",
-          sourceId: "source-draft-test",
+          sourceId: requestedSourceId,
           startPosition: 0,
           endPosition: originalContent.length,
           originalExcerpt: originalContent,
@@ -121,10 +126,8 @@ test("IP A发起的旧分析在切换到IP B后不能保存", async () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
   });
 
-  await view.findByText("内容理解结果");
-  await user.click(view.getByRole("button", { name: "确认保存为IP原始内容" }));
-
-  assert.ok(view.getByRole("alert").textContent?.includes("当前IP已切换"));
+  assert.equal(view.queryByText("内容理解结果"), null);
+  assert.equal(view.queryByText("真正重要的是判断力。"), null);
   assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), null);
 });
 
@@ -182,22 +185,25 @@ test("粘贴逐字稿后分两层展示全库比较并由人工决定是否保�
       dna: null,
     },
   ]));
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    analysis: {
-      analyzedAt: "2026-08-22T12:00:00.000Z",
-      parserVersion: 1,
-      items: [{
-        id: "A01",
-        kind: "claim",
-        content: "先写出大众默认判断，再用真实案例推翻它",
-        sourceId: "source-draft-test",
-        startPosition: 0,
-        endPosition: originalContent.length,
-        originalExcerpt: originalContent,
-        extractionStatus: "AI提取",
-      }],
-    },
-  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { sourceId?: string };
+    return new Response(JSON.stringify({
+      analysis: {
+        analyzedAt: "2026-08-22T12:00:00.000Z",
+        parserVersion: 1,
+        items: [{
+          id: "A01",
+          kind: "claim",
+          content: "先写出大众默认判断，再用真实案例推翻它",
+          sourceId: body.sourceId ?? "",
+          startPosition: 0,
+          endPosition: originalContent.length,
+          originalExcerpt: originalContent,
+          extractionStatus: "AI提取",
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
 
   const { render, waitFor } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
@@ -239,8 +245,8 @@ test("粘贴逐字稿后分两层展示全库比较并由人工决定是否保�
 });
 
 test("txt、md和srt文件上传后都能进入同一套两层检查", async () => {
-  globalThis.fetch = async request => {
-    const body = JSON.parse(String((request as Request).body ?? "{}")) as { rawContent?: string };
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { rawContent?: string; sourceId?: string };
     const originalContent = body.rawContent ?? "";
     return new Response(JSON.stringify({
       analysis: {
@@ -250,7 +256,7 @@ test("txt、md和srt文件上传后都能进入同一套两层检查", async () 
           id: "A01",
           kind: "claim",
           content: "文件中的观点摘要",
-          sourceId: "source-draft-test",
+          sourceId: body.sourceId ?? "",
           startPosition: 0,
           endPosition: originalContent.length,
           originalExcerpt: originalContent,
