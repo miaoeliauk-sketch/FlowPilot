@@ -1,5 +1,64 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callDeepSeek, parseDeepSeekJSON as parseJSON, parseDeepSeekJSONArray, splitSentences, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import { parseDeepSeekJSON as parseJSON, DEEPSEEK_MODEL as MODEL } from "@/lib/deepseek";
+import {
+  callStructuredDeepSeek,
+  StructuredDeepSeekError,
+} from "@/lib/structured-deepseek";
+
+interface TranscriptCleanResult {
+  cleaned: string;
+  segmented: string;
+  summary: {
+    theme: string;
+    keyPoints: string[];
+    cases: string[];
+    quotables: string[];
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
+function parseTranscriptCleanResult(content: string): TranscriptCleanResult {
+  const parsed = parseJSON<unknown>(content, null);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("逐字稿整理结果不是有效对象");
+  }
+  const record = parsed as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    throw new Error("逐字稿整理结果缺少摘要");
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  if (
+    !isNonEmptyString(record.cleaned)
+    || !isNonEmptyString(record.segmented)
+    || !isNonEmptyString(summaryRecord.theme)
+    || !isStringArray(summaryRecord.keyPoints)
+    || summaryRecord.keyPoints.length < 3
+    || summaryRecord.keyPoints.length > 5
+    || !isStringArray(summaryRecord.cases)
+    || summaryRecord.cases.length > 3
+    || !isStringArray(summaryRecord.quotables)
+  ) {
+    throw new Error("逐字稿整理结果字段不完整");
+  }
+  return {
+    cleaned: record.cleaned,
+    segmented: record.segmented,
+    summary: {
+      theme: summaryRecord.theme,
+      keyPoints: summaryRecord.keyPoints,
+      cases: summaryRecord.cases,
+      quotables: summaryRecord.quotables,
+    },
+  };
+}
 
 const SYSTEM = `你是逐字稿整理专家。任务是对用户提供的原始口语转写文本做三件事：
 
@@ -50,13 +109,47 @@ export async function POST(req: NextRequest) {
   const apiMeta = { apiCalled: true, calledAt, model: MODEL };
 
   try {
-    const raw = await callDeepSeek(SYSTEM, PROMPT(rawText), 4000, 0.3, apiKey);
-    const parsed = parseJSON<{ cleaned: string; segmented: string; summary: { theme: string; keyPoints: string[]; cases: string[]; quotables: string[] } }>(raw, {
-      cleaned: "", segmented: "", summary: { theme: "", keyPoints: [], cases: [], quotables: [] },
+    const result = await callStructuredDeepSeek({
+      systemPrompt: SYSTEM,
+      userPrompt: PROMPT(rawText),
+      apiKey,
+      maxTokens: 8_000,
+      temperature: 0.3,
+      maxRetries: 1,
+      rejectTruncatedOutput: true,
+      parse: parseTranscriptCleanResult,
+      buildParseRetryInstruction: () => (
+        "上一次返回的JSON不完整。请重新输出完整JSON，必须包含cleaned、segmented，以及summary中的theme、keyPoints、cases、quotables；不要输出JSON以外的文字。"
+      ),
     });
-    return NextResponse.json({ ...parsed, apiMeta });
+    return NextResponse.json({ ...result.data, apiMeta });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "整理失败，请重试";
-    return NextResponse.json({ error: message, apiMeta: { ...apiMeta, error: message } }, { status: 500 });
+    const structuredError = err instanceof StructuredDeepSeekError ? err : null;
+    const causeMessage = structuredError?.cause instanceof Error
+      ? structuredError.cause.message
+      : "";
+    const missingApiKey = causeMessage.includes("未配置 DeepSeek API Key");
+    if (structuredError && !missingApiKey) {
+      console.error("[transcribe-clean]", JSON.stringify({
+        inputChars: rawText.length,
+        stage: structuredError.stage,
+        attempts: structuredError.attempts,
+        attemptDiagnostics: structuredError.attemptDiagnostics,
+      }));
+    }
+    const failureCodes = structuredError?.attemptDiagnostics
+      .map(item => item.failureCode)
+      .filter((code): code is string => Boolean(code)) ?? [];
+    const message = missingApiKey
+      ? causeMessage
+      : structuredError?.stage === "timeout"
+        ? "AI整理超时，已自动重试，请稍后再试。"
+        : failureCodes.some(code => code === "REQUEST_FAILED" || code === "INSUFFICIENT_SYSTEM_RESOURCE")
+          ? "AI服务请求失败，已自动重试，请稍后再试。"
+          : "AI返回格式不完整，已自动重试，请稍后再试。";
+    return NextResponse.json(
+      { error: message, apiMeta: { ...apiMeta, error: message } },
+      { status: missingApiKey ? 500 : 502 },
+    );
   }
 }

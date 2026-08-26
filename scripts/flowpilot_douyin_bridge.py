@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,7 +134,10 @@ def process(payload: dict) -> dict:
 
 def main() -> None:
     try:
-        response = health() if "--health" in sys.argv else process(json.load(sys.stdin))
+        # yt-dlp、Whisper等底层工具会把进度写到stdout；stdout是与Next.js通信的
+        # JSON专用通道，任何额外文本都会让接口无法解析，因此统一把工具输出导向stderr。
+        with redirect_stdout(sys.stderr):
+            response = health() if "--health" in sys.argv else process(json.load(sys.stdin))
         print(json.dumps(response, ensure_ascii=False))
     except Exception:
         print(json.dumps({"error": "本机逐字稿工具处理失败。"}, ensure_ascii=False))
