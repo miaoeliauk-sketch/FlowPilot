@@ -59,11 +59,24 @@ export class DeepSeekResponseError extends Error {
   }
 }
 
+export class DeepSeekRequestPayloadTooLargeError extends Error {
+  readonly actualBytes: number;
+  readonly maxBytes: number;
+
+  constructor(actualBytes: number, maxBytes: number) {
+    super(`DeepSeek API请求体为${actualBytes}字节，超过${maxBytes}字节上限`);
+    this.name = "DeepSeekRequestPayloadTooLargeError";
+    this.actualBytes = actualBytes;
+    this.maxBytes = maxBytes;
+  }
+}
+
 export interface DeepSeekCallOptions {
   thinking?: { type: "disabled" };
   responseFormat?: { type: "json_object" };
   onResponseMeta?: (meta: DeepSeekResponseMeta) => void;
   signal?: AbortSignal;
+  maxRequestBytes?: number;
 }
 
 /**
@@ -90,6 +103,22 @@ export async function callDeepSeek(
     throw new Error("未配置 DeepSeek API Key。请在「设置 / API配置」页面填写你的 API Key。");
   }
 
+  const requestBody = JSON.stringify({
+    model: DEEPSEEK_MODEL,
+    max_tokens: maxTokens,
+    temperature,
+    ...(options.thinking ? { thinking: options.thinking } : {}),
+    ...(options.responseFormat ? { response_format: options.responseFormat } : {}),
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
+  const requestBytes = new TextEncoder().encode(requestBody).byteLength;
+  if (options.maxRequestBytes !== undefined && requestBytes > options.maxRequestBytes) {
+    throw new DeepSeekRequestPayloadTooLargeError(requestBytes, options.maxRequestBytes);
+  }
+
   const res = await fetch(DEEPSEEK_API, {
     method: "POST",
     signal: options.signal,
@@ -97,17 +126,7 @@ export async function callDeepSeek(
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
     },
-    body: JSON.stringify({
-      model: DEEPSEEK_MODEL,
-      max_tokens: maxTokens,
-      temperature,
-      ...(options.thinking ? { thinking: options.thinking } : {}),
-      ...(options.responseFormat ? { response_format: options.responseFormat } : {}),
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    }),
+    body: requestBody,
   });
 
   if (!res.ok) {

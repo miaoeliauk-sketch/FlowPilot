@@ -1,5 +1,6 @@
 import {
   callDeepSeek,
+  DeepSeekRequestPayloadTooLargeError,
   DeepSeekResponseError,
   type DeepSeekResponseMeta,
 } from "./deepseek";
@@ -16,6 +17,7 @@ export interface StructuredDeepSeekOptions<T> {
   maxRetries?: number;
   rejectTruncatedOutput?: boolean;
   preserveParserErrorCode?: boolean;
+  maxRequestBytes?: number;
   onAttemptPrompt?: (prompt: {
     attempt: number;
     systemPrompt: string;
@@ -230,10 +232,33 @@ export async function callStructuredDeepSeek<T>(
             responseMeta = meta;
           },
           signal: controller.signal,
+          maxRequestBytes: options.maxRequestBytes,
         },
       );
       content = await Promise.race([request, timeout]);
     } catch (error) {
+      if (error instanceof DeepSeekRequestPayloadTooLargeError) {
+        attemptDiagnostics.push({
+          attempt,
+          stage: "request",
+          failureCode: "REQUEST_PAYLOAD_TOO_LARGE",
+          responseChars: null,
+          finishReason: null,
+          completionTokens: null,
+        });
+        await notifyAttemptResult({
+          attempt,
+          rawResponse: null,
+          responseMeta,
+          failureCode: "REQUEST_PAYLOAD_TOO_LARGE",
+        });
+        throw new StructuredDeepSeekError(
+          "request",
+          attempt,
+          error,
+          attemptDiagnostics,
+        );
+      }
       if (
         error instanceof Error &&
         error.message.includes("未配置 DeepSeek API Key")
