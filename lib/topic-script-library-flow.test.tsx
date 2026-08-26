@@ -230,6 +230,7 @@ before(() => {
 beforeEach(() => {
   document.body.innerHTML = "";
   localStorage.clear();
+  window.sessionStorage.clear();
   window.history.replaceState({}, "", "/topic-board");
 });
 
@@ -238,6 +239,7 @@ afterEach(async () => {
   cleanup();
   document.body.innerHTML = "";
   localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 after(() => {
@@ -910,6 +912,103 @@ test("生成失败后也拒绝恢复外层IP与内部结果IP不一致的损坏�
       true,
       "生成失败后仍不应展示跨IP损坏草稿的旧脚本内容",
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("脚本工厂从会话存储读取当前选题临时认知并贯穿审计与生成请求", async () => {
+  const originalFetch = globalThis.fetch;
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "为什么聪明人反而越来越焦虑",
+    source: "manual",
+  }, { ...boardResult, topic: "为什么聪明人反而越来越焦虑" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
+  const sourceId = "interview-source-script-page-ephemeral";
+  const rawContent = "老师补充：信息摄入过量会挤压思考时间。";
+  const extracted = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: rawContent,
+    analyzedAt: "2026-08-26T15:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000399",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "焦虑为什么增加？", derivation: "inferred", anchors: [{ quote: rawContent }] },
+        claim: { content: "信息摄入过量会挤压思考时间。", anchors: [{ quote: "信息摄入过量会挤压思考时间" }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const temporaryContext = {
+    activeIPId: ip.id,
+    topicId: topic.id,
+    sourceId,
+    rawContent,
+    analysis: {
+      ...extracted,
+      nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+    },
+    temporaryProof: "page-test-ephemeral-proof",
+    expiresAt: Date.now() + 60_000,
+  };
+  window.sessionStorage.setItem(
+    `FP_EPHEMERAL_COGNITION_V1:${encodeURIComponent(ip.id)}:${encodeURIComponent(topic.id)}`,
+    JSON.stringify(temporaryContext),
+  );
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+  let boundaryRequest: Record<string, unknown> = {};
+  let generationRequest: Record<string, unknown> = {};
+
+  globalThis.fetch = async (input, init) => {
+    const requestBody: unknown = JSON.parse(String(init?.body ?? "{}"));
+    if (String(input) === "/api/ip-boundary/check") {
+      if (!isRecord(requestBody)) throw new Error("边界审计请求体不是对象");
+      boundaryRequest = requestBody;
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
+    if (String(input) === "/api/script-factory") {
+      if (!isRecord(requestBody)) throw new Error("脚本生成请求体不是对象");
+      generationRequest = requestBody;
+      return new Response(JSON.stringify(createCompleteScriptResponse(ip.id, ip.name, topic.title)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [], debug: null }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(
+      <IPProvider>
+        <ScriptFactoryPage />
+      </IPProvider>,
+    );
+
+    await view.findByDisplayValue(topic.title);
+    await user.click(await unlockGeneration(view, user));
+    await waitFor(() => assert.ok(generationRequest.topic));
+    assert.deepEqual(boundaryRequest?.temporaryContext, temporaryContext);
+    assert.equal(boundaryRequest?.topicId, topic.id);
+    assert.deepEqual(generationRequest?.temporaryCognition, temporaryContext);
+    assert.equal(generationRequest?.topicId, topic.id);
   } finally {
     globalThis.fetch = originalFetch;
   }

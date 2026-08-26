@@ -6,11 +6,20 @@ import {
   InterviewExtractionAudit,
   type ExistingClaim,
 } from "@/components/ip-boundary/InterviewExtractionAudit";
-import type {
-  InterviewCandidateNode,
-  InterviewPanelState,
-  InterviewQuestion,
+import {
+  ephemeralCognitionStorageKey,
+  type EphemeralCognitionContext,
+  type InterviewCandidateNode,
+  type InterviewSource,
+  type InterviewPanelState,
+  type InterviewQuestion,
 } from "@/lib/ip-boundary-interview";
+import { parseStoredIPSourceAnalysis } from "@/lib/ip-source-analysis-v2";
+import {
+  addVerifiedIPOriginalSource,
+  deriveIPOriginalSourceTitle,
+} from "@/lib/ip-original-source";
+import type { IPSourceAnalysisV2 } from "@/lib/types";
 
 interface InterviewPanelProps {
   activeIPId: string;
@@ -20,6 +29,16 @@ interface InterviewPanelProps {
   existingClaims?: ExistingClaim[];
   state?: InterviewPanelState;
   errorMessage?: string | null;
+  topicContent?: string;
+  onLongTermConfirmed?: () => Promise<void> | void;
+  onTemporaryConfirmed?: (context: EphemeralCognitionContext) => Promise<void> | void;
+}
+
+interface InterviewExtractionEnvelope {
+  source: InterviewSource;
+  analysis: IPSourceAnalysisV2;
+  analysisToken: string;
+  candidates: InterviewCandidateNode[];
 }
 
 function draftKey(activeIPId: string, topicId: string, interviewId: string) {
@@ -49,16 +68,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function candidatesForSession(
+function extractionForSession(
   value: unknown,
   activeIPId: string,
   topicId: string,
   interviewId: string,
-): InterviewCandidateNode[] | null {
-  if (!isRecord(value) || !isRecord(value.source) || !Array.isArray(value.candidates)) return null;
+): InterviewExtractionEnvelope | null {
+  if (!isRecord(value) || !isRecord(value.source) || !Array.isArray(value.candidates)
+    || typeof value.analysisToken !== "string" || !value.analysisToken.trim()) return null;
   if (value.source.ipId !== activeIPId || value.source.topicId !== topicId
     || value.source.interviewId !== interviewId || typeof value.source.id !== "string"
-    || !value.source.id.trim() || value.candidates.length === 0) return null;
+    || !value.source.id.trim() || !Array.isArray(value.source.rawInteraction)
+    || typeof value.source.timestamp !== "string" || value.candidates.length === 0) return null;
+  const rawInteraction = value.source.rawInteraction;
+  if (!rawInteraction.every(item => isRecord(item)
+    && typeof item.questionId === "string"
+    && typeof item.question === "string"
+    && typeof item.answer === "string")) return null;
+  const source: InterviewSource = {
+    id: value.source.id,
+    ipId: activeIPId,
+    topicId,
+    interviewId,
+    rawInteraction: rawInteraction.map(item => ({
+      questionId: item.questionId as string,
+      question: item.question as string,
+      answer: item.answer as string,
+    })),
+    timestamp: value.source.timestamp,
+  };
+  const rawContent = source.rawInteraction.map(item => item.answer).join("\n\n");
+  const parsedAnalysis = parseStoredIPSourceAnalysis(value.analysis, rawContent, source.id);
+  if (!parsedAnalysis.ok || parsedAnalysis.version !== 2) return null;
   const candidates: InterviewCandidateNode[] = [];
   for (const candidate of value.candidates) {
     if (!isRecord(candidate) || candidate.sourceId !== value.source.id || !isRecord(candidate.node)
@@ -78,7 +119,14 @@ function candidatesForSession(
       node: candidate.node as unknown as InterviewCandidateNode["node"],
     });
   }
-  return candidates;
+  const analysisNodeIds = new Set(parsedAnalysis.analysis.nodes.map(node => node.id));
+  if (candidates.some(candidate => !analysisNodeIds.has(candidate.node.id))) return null;
+  return {
+    source,
+    analysis: parsedAnalysis.analysis,
+    analysisToken: value.analysisToken.trim(),
+    candidates,
+  };
 }
 
 export function InterviewPanel({
@@ -89,6 +137,9 @@ export function InterviewPanel({
   existingClaims = [],
   state = "answering",
   errorMessage = null,
+  topicContent = "",
+  onLongTermConfirmed,
+  onTemporaryConfirmed,
 }: InterviewPanelProps) {
   const storageKey = useMemo(
     () => draftKey(activeIPId, topicId, interviewId),
@@ -98,7 +149,9 @@ export function InterviewPanel({
   const [currentState, setCurrentState] = useState<InterviewPanelState>(state);
   const [extracting, setExtracting] = useState(false);
   const [candidates, setCandidates] = useState<InterviewCandidateNode[]>([]);
-  const [auditConfirmed, setAuditConfirmed] = useState(false);
+  const [extraction, setExtraction] = useState<InterviewExtractionEnvelope | null>(null);
+  const [confirmingMode, setConfirmingMode] = useState<"long_term" | "temporary" | null>(null);
+  const [completedMode, setCompletedMode] = useState<"long_term" | "temporary" | null>(null);
   const [extractionMessage, setExtractionMessage] = useState<string | null>(null);
   const extractionRequestSeqRef = useRef(0);
   const extractionControllerRef = useRef<AbortController | null>(null);
@@ -111,7 +164,9 @@ export function InterviewPanel({
     setCurrentState(state);
     setExtracting(false);
     setCandidates([]);
-    setAuditConfirmed(false);
+    setExtraction(null);
+    setConfirmingMode(null);
+    setCompletedMode(null);
     setExtractionMessage(null);
     return () => {
       extractionRequestSeqRef.current += 1;
@@ -141,7 +196,9 @@ export function InterviewPanel({
     setCurrentState(answer.trim() ? "draft_saved" : "answering");
     setExtracting(false);
     setCandidates([]);
-    setAuditConfirmed(false);
+    setExtraction(null);
+    setConfirmingMode(null);
+    setCompletedMode(null);
     setExtractionMessage(null);
     if (typeof window === "undefined") return;
     window.localStorage.setItem(storageKey, JSON.stringify(next));
@@ -166,7 +223,8 @@ export function InterviewPanel({
     extractionControllerRef.current = controller;
     setExtracting(true);
     setCandidates([]);
-    setAuditConfirmed(false);
+    setExtraction(null);
+    setCompletedMode(null);
     setExtractionMessage(null);
     try {
       const response = await apiFetch("/api/ip-boundary/interview/extract", {
@@ -183,10 +241,10 @@ export function InterviewPanel({
           : "访谈认知提取失败，请补充后重试。";
         throw new Error(message);
       }
-      const extractedCandidates = candidatesForSession(raw, activeIPId, topicId, interviewId);
-      if (extractedCandidates === null) throw new Error("访谈提取结果归属不一致，请重新提交。");
-      setCandidates(extractedCandidates);
-      setAuditConfirmed(false);
+      const extracted = extractionForSession(raw, activeIPId, topicId, interviewId);
+      if (extracted === null) throw new Error("访谈提取结果归属不一致，请重新提交。");
+      setExtraction(extracted);
+      setCandidates(extracted.candidates);
       setCurrentState("ready_for_next_step");
     } catch (error) {
       if (extractionRequestSeqRef.current !== requestSeq
@@ -197,6 +255,165 @@ export function InterviewPanel({
         setExtracting(false);
         extractionControllerRef.current = null;
       }
+    }
+  }
+
+  async function confirmLongTerm(nextCandidates: InterviewCandidateNode[]) {
+    if (!extraction || confirmingMode !== null || nextCandidates.length === 0) return;
+    const requestSeq = extractionRequestSeqRef.current;
+    const retainedById = new Map(nextCandidates.map(candidate => [candidate.node.id, candidate]));
+    const actions = extraction.analysis.nodes.map(node => {
+      const retained = retainedById.get(node.id);
+      if (!retained) return { type: "reject" as const, nodeId: node.id };
+      const revisedClaim = retained.node.humanRevision?.claim?.trim();
+      if (revisedClaim && revisedClaim !== node.claim.content) {
+        return {
+          type: "revise" as const,
+          nodeId: node.id,
+          humanRevision: { claim: revisedClaim },
+        };
+      }
+      return { type: "confirm" as const, nodeId: node.id };
+    });
+    setConfirmingMode("long_term");
+    setExtractionMessage(null);
+    try {
+      const response = await apiFetch("/api/ip-boundary/interview/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "long_term",
+          activeIPId,
+          topicId,
+          interviewId,
+          source: extraction.source,
+          analysis: extraction.analysis,
+          analysisToken: extraction.analysisToken,
+          actions,
+        }),
+      });
+      const raw: unknown = await response.json();
+      if (extractionRequestSeqRef.current !== requestSeq) return;
+      if (!response.ok || !isRecord(raw)) {
+        throw new Error(isRecord(raw) && typeof raw.error === "string"
+          ? raw.error
+          : "访谈认知终审失败，请重试。");
+      }
+      if (raw.mode !== "long_term" || !isRecord(raw.source)
+        || raw.source.id !== extraction.source.id || raw.source.ipId !== activeIPId
+        || raw.source.topicId !== topicId || raw.source.interviewId !== interviewId
+        || typeof raw.finalProof !== "string" || !raw.finalProof.trim()) {
+        throw new Error("访谈终审结果归属不一致，已停止保存。");
+      }
+      const originalContent = extraction.source.rawInteraction.map(item => item.answer).join("\n\n");
+      const parsed = parseStoredIPSourceAnalysis(raw.analysis, originalContent, extraction.source.id);
+      if (!parsed.ok || parsed.version !== 2
+        || parsed.analysis.nodes.some(node => node.reviewStatus === "ai_extracted")) {
+        throw new Error(parsed.ok ? "访谈终审结果尚未完成全部审核。" : parsed.error);
+      }
+      await addVerifiedIPOriginalSource({
+        sourceId: extraction.source.id,
+        ipId: activeIPId,
+        title: deriveIPOriginalSourceTitle(originalContent, parsed.analysis),
+        sourceKind: "其他",
+        originalContent,
+        sourceName: `认知访谈：${topicId}`,
+        sourceUrl: "",
+        analysis: parsed.analysis,
+        finalProof: raw.finalProof.trim(),
+        isStillCurrent: () => extractionRequestSeqRef.current === requestSeq,
+      });
+      if (extractionRequestSeqRef.current !== requestSeq) return;
+      setCandidates(nextCandidates);
+      setCompletedMode("long_term");
+      await onLongTermConfirmed?.();
+    } catch (error) {
+      if (extractionRequestSeqRef.current !== requestSeq) return;
+      setExtractionMessage(error instanceof Error
+        ? error.message
+        : "访谈认知长期入库失败，请重试。");
+    } finally {
+      if (extractionRequestSeqRef.current === requestSeq) setConfirmingMode(null);
+    }
+  }
+
+  async function confirmTemporary(nextCandidates: InterviewCandidateNode[]) {
+    if (!extraction || confirmingMode !== null || nextCandidates.length === 0) return;
+    const requestSeq = extractionRequestSeqRef.current;
+    const retainedById = new Map(nextCandidates.map(candidate => [candidate.node.id, candidate]));
+    const actions = extraction.analysis.nodes.map(node => {
+      const retained = retainedById.get(node.id);
+      if (!retained) return { type: "reject" as const, nodeId: node.id };
+      const revisedClaim = retained.node.humanRevision?.claim?.trim();
+      if (revisedClaim && revisedClaim !== node.claim.content) {
+        return {
+          type: "revise" as const,
+          nodeId: node.id,
+          humanRevision: { claim: revisedClaim },
+        };
+      }
+      return { type: "confirm" as const, nodeId: node.id };
+    });
+    setConfirmingMode("temporary");
+    setExtractionMessage(null);
+    try {
+      const response = await apiFetch("/api/ip-boundary/interview/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "temporary",
+          activeIPId,
+          topicId,
+          interviewId,
+          topic: topicContent,
+          source: extraction.source,
+          analysis: extraction.analysis,
+          analysisToken: extraction.analysisToken,
+          actions,
+        }),
+      });
+      const raw: unknown = await response.json();
+      if (extractionRequestSeqRef.current !== requestSeq) return;
+      if (!response.ok || !isRecord(raw)) {
+        throw new Error(isRecord(raw) && typeof raw.error === "string"
+          ? raw.error
+          : "临时认知凭证建立失败，请重试。");
+      }
+      const rawContent = extraction.source.rawInteraction.map(item => item.answer).join("\n\n");
+      if (raw.mode !== "temporary" || raw.activeIPId !== activeIPId
+        || raw.topicId !== topicId || raw.interviewId !== interviewId
+        || raw.sourceId !== extraction.source.id || raw.rawContent !== rawContent
+        || typeof raw.temporaryProof !== "string" || !raw.temporaryProof.trim()
+        || typeof raw.expiresAt !== "number" || raw.expiresAt <= Date.now()) {
+        throw new Error("临时认知凭证归属不一致，已停止使用。");
+      }
+      const parsed = parseStoredIPSourceAnalysis(raw.analysis, rawContent, extraction.source.id);
+      if (!parsed.ok || parsed.version !== 2
+        || parsed.analysis.nodes.some(node => node.reviewStatus === "ai_extracted")) {
+        throw new Error(parsed.ok ? "临时认知尚未完成全部审核。" : parsed.error);
+      }
+      const context: EphemeralCognitionContext = {
+        activeIPId,
+        topicId,
+        sourceId: extraction.source.id,
+        rawContent,
+        analysis: parsed.analysis,
+        temporaryProof: raw.temporaryProof.trim(),
+        expiresAt: raw.expiresAt,
+      };
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem(ephemeralCognitionStorageKey(activeIPId, topicId), JSON.stringify(context));
+      }
+      setCandidates(nextCandidates);
+      setCompletedMode("temporary");
+      await onTemporaryConfirmed?.(context);
+    } catch (error) {
+      if (extractionRequestSeqRef.current !== requestSeq) return;
+      setExtractionMessage(error instanceof Error
+        ? error.message
+        : "临时认知凭证建立失败，请重试。");
+    } finally {
+      if (extractionRequestSeqRef.current === requestSeq) setConfirmingMode(null);
     }
   }
 
@@ -236,16 +453,18 @@ export function InterviewPanel({
           existingClaims={existingClaims}
           onChange={next => {
             setCandidates(next);
-            setAuditConfirmed(false);
+            setCompletedMode(null);
           }}
-          onConfirm={next => {
-            setCandidates(next);
-            setAuditConfirmed(true);
-          }}
+          onLongTermConfirm={next => void confirmLongTerm(next)}
+          onTemporaryConfirm={next => void confirmTemporary(next)}
+          confirmingMode={confirmingMode}
         />
       )}
-      {auditConfirmed && (
-        <p className="mt-2 text-[12px] text-[#4F6F32]">候选内容已确认；本步骤尚未写入长期认知库。</p>
+      {completedMode === "long_term" && (
+        <p className="mt-2 text-[12px] text-[#4F6F32]">访谈认知已长期保存，正在使用最新认知重审当前选题。</p>
+      )}
+      {completedMode === "temporary" && (
+        <p className="mt-2 text-[12px] text-[#4F6F32]">临时认知仅用于当前IP和当前选题，不会写入长期认知库。</p>
       )}
       <button
         type="button"

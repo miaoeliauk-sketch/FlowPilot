@@ -50,6 +50,7 @@ export type BoundaryAction = "allow" | "confirm" | "intercept";
 export interface BoundaryEvidenceNode {
   nodeId: string;
   relation: "matched" | "conflicting";
+  source?: "persistent" | "ephemeral";
   verificationStatus: "human_confirmed";
   question: string;
   claim: string;
@@ -115,6 +116,7 @@ export function parseBoundaryCheckUIResponse(
     evidenceNodes.push({
       nodeId: item.nodeId,
       relation: item.relation,
+      source: item.source === "ephemeral" ? "ephemeral" : "persistent",
       verificationStatus: item.verificationStatus,
       question: item.question.trim(),
       claim: item.claim.trim(),

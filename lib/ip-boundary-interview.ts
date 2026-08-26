@@ -1,6 +1,6 @@
 import type { MissingElement } from "./ip-boundary-engine";
-import type { CognitionNodeV2 } from "./types";
-import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
+import type { CognitionNodeV2, IPSourceAnalysisV2 } from "./types";
+import { buildIPSourceAnalysisV2, parseStoredIPSourceAnalysis } from "./ip-source-analysis-v2";
 
 export type InterviewCoverage = "NONE" | "PARTIAL";
 export type InterviewPanelState =
@@ -89,7 +89,56 @@ export interface ExtractInterviewSourceInput {
 
 export interface InterviewExtractionResult {
   source: InterviewSource;
+  analysis: IPSourceAnalysisV2;
   candidates: InterviewCandidateNode[];
+}
+
+export interface EphemeralCognitionContext {
+  activeIPId: string;
+  topicId: string;
+  sourceId: string;
+  rawContent: string;
+  analysis: IPSourceAnalysisV2;
+  temporaryProof: string;
+  expiresAt: number;
+}
+
+export function ephemeralCognitionStorageKey(activeIPId: string, topicId: string): string {
+  return `FP_EPHEMERAL_COGNITION_V1:${encodeURIComponent(activeIPId)}:${encodeURIComponent(topicId)}`;
+}
+
+export function readEphemeralCognitionContext(
+  storage: Pick<Storage, "getItem">,
+  activeIPId: string,
+  topicId: string,
+  now = Date.now(),
+): EphemeralCognitionContext | null {
+  try {
+    const raw = storage.getItem(ephemeralCognitionStorageKey(activeIPId, topicId));
+    if (!raw) return null;
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const context = value as Record<string, unknown>;
+    if (context.activeIPId !== activeIPId
+      || context.topicId !== topicId
+      || typeof context.sourceId !== "string" || !context.sourceId.trim()
+      || typeof context.rawContent !== "string" || !context.rawContent.trim()
+      || typeof context.temporaryProof !== "string" || !context.temporaryProof.trim()
+      || typeof context.expiresAt !== "number" || context.expiresAt <= now) return null;
+    const parsed = parseStoredIPSourceAnalysis(context.analysis, context.rawContent, context.sourceId);
+    if (!parsed.ok || parsed.version !== 2) return null;
+    return {
+      activeIPId,
+      topicId,
+      sourceId: context.sourceId,
+      rawContent: context.rawContent,
+      analysis: parsed.analysis,
+      temporaryProof: context.temporaryProof,
+      expiresAt: context.expiresAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export class InterviewExtractionError extends Error {
@@ -230,6 +279,7 @@ export async function extractInterviewSource(
     });
     return {
       source,
+      analysis,
       candidates: analysis.nodes.map(node => ({ sourceId: analysis.sourceId, node })),
     };
   } catch (error) {

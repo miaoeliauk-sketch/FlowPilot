@@ -4,6 +4,10 @@ import { NextRequest } from "next/server";
 
 import type { BoundaryReport } from "./ip-boundary-engine";
 import {
+  buildEphemeralCognitionProofClaims,
+  createEphemeralCognitionProof,
+} from "./ip-boundary-interview-proof";
+import {
   buildIPSourceAnalysisProofClaims,
   buildIPSourceFinalProofClaims,
   createIPSourceFinalProof,
@@ -154,10 +158,70 @@ async function postBoundaryCheck(input: {
   activeIPId: string;
   topic: string;
   sources: ConfirmedSourceInput[];
+  topicId?: string;
+  temporaryContext?: unknown;
+  includeEvidence?: boolean;
 }) {
   const { POST } = await import("../app/api/ip-boundary/check/route");
   return POST(boundaryRequest(input));
 }
+
+test("合法临时凭证在没有长期来源时只为绑定选题完成边界审计", async () => {
+  const activeIPId = "ip-boundary-ephemeral";
+  const topicId = "topic-boundary-ephemeral";
+  const topic = "为什么知识越学越多，行动力反而越差？";
+  const source = await createConfirmedSource({
+    ipId: activeIPId,
+    sourceId: "source-boundary-ephemeral",
+    claim: "知识淤积会导致行动瘫痪。",
+    reasoningSteps: ["停止继续输入，才能开始消化。"],
+  });
+  const nodeId = source.analysis.nodes[0]!.id;
+  const claims = buildEphemeralCognitionProofClaims({
+    ipId: activeIPId,
+    topicId,
+    topic,
+    sourceId: source.sourceId,
+    analysis: source.analysis,
+    issuedAt: Date.now() - 1_000,
+  });
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => deepSeekResponse({
+      coverage: "FULL",
+      stance: "ALIGNED",
+      explanation: "本次访谈补充了观点和推理。",
+      matchedNodeIds: [nodeId],
+      conflictingNodeIds: [],
+      supportedParts: ["知识淤积导致行动瘫痪"],
+      missingElements: [],
+    });
+    const response = await postBoundaryCheck({
+      activeIPId,
+      topicId,
+      topic,
+      sources: [],
+      temporaryContext: {
+        activeIPId,
+        topicId,
+        sourceId: source.sourceId,
+        rawContent: source.rawContent,
+        analysis: source.analysis,
+        temporaryProof: createEphemeralCognitionProof(claims, PROOF_SECRET),
+        expiresAt: claims.expiresAt,
+      },
+      includeEvidence: true,
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.report.coverage, "FULL");
+    assert.equal(body.evidenceNodes[0].nodeId, nodeId);
+    assert.equal(body.evidenceNodes[0].source, "ephemeral");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("明确反对选题但缺少完整反驳推理时判为部分覆盖且立场冲突", async () => {
   const source = await createConfirmedSource({

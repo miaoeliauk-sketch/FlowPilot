@@ -45,6 +45,10 @@ import {
   parseBoundaryCheckUIResponse,
   type BoundaryEvidenceNode,
 } from "@/lib/ip-boundary-ui";
+import {
+  readEphemeralCognitionContext,
+  type EphemeralCognitionContext,
+} from "@/lib/ip-boundary-interview";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -850,7 +854,10 @@ export default function ScriptFactoryPage() {
 
     const sourceEntries = cognitionData.entries.filter(entry => getNormalizedCategory(entry) === "IP原始内容");
     const bundle = buildBoundarySourceBundle(sourceEntries, requestIP.id);
-    if (bundle.sources.length === 0) {
+    const temporaryContext = typeof window === "undefined"
+      ? null
+      : readEphemeralCognitionContext(window.sessionStorage, requestIP.id, asset.id);
+    if (bundle.sources.length === 0 && !temporaryContext) {
       if (bundle.unregisteredV1) {
         setBoundaryStatus("upgrade_required");
         setBoundaryMessage("当前IP的历史认知尚未完成合规登记，已停止脚本生成。");
@@ -873,8 +880,10 @@ export default function ScriptFactoryPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           activeIPId: requestIP.id,
+          topicId: asset.id,
           topic: topicContent,
           sources: bundle.sources,
+          temporaryContext,
           includeEvidence: true,
         }),
         },
@@ -882,7 +891,11 @@ export default function ScriptFactoryPage() {
       const raw: unknown = await response.json();
       if (boundaryRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== requestIP.id) return;
       if (!response.ok) throw new Error("认知边界审计失败，请返回选题董事会重试。");
-      const parsed = parseBoundaryCheckUIResponse(raw, bundle.nodeIds);
+      const allowedNodeIds = new Set([
+        ...bundle.nodeIds,
+        ...(temporaryContext?.analysis.nodes.map(node => node.id) ?? []),
+      ]);
+      const parsed = parseBoundaryCheckUIResponse(raw, allowedNodeIds);
       if (!parsed) throw new Error("认知边界审计返回的数据不完整，已停止脚本生成。");
       setBoundaryReport(parsed.report);
       setBoundaryEvidence(parsed.evidenceNodes);
@@ -1155,6 +1168,8 @@ export default function ScriptFactoryPage() {
     requestMode: GenerationMode,
     ipSourceContext: ReturnType<typeof getIPSourceContext>,
     caseEvidence: GenerationCaseEvidence | null,
+    temporaryCognition: EphemeralCognitionContext | null,
+    linkedTopicId: string | null,
   ) {
     let res: Response;
     try {
@@ -1164,6 +1179,8 @@ export default function ScriptFactoryPage() {
           generationMode: requestMode,
           directorRule: requestMode === "ip" ? activeDirectorRule : undefined,
           ipProfile: ip, topic: t,
+          topicId: linkedTopicId ?? undefined,
+          temporaryCognition: temporaryCognition ?? undefined,
           styleProfile: getStyleProfile(ip.id) ?? null,
           platform: ip.platforms.includes(platform) ? platform : (ip.platforms[0] || "抖音"),
           formatCategory, durationSeconds: duration, goal, videoType,
@@ -1321,6 +1338,9 @@ export default function ScriptFactoryPage() {
     generationSequenceRef.current = requestSequence;
     const sourceContext = requestMode === "ip" ? getIPSourceContext(requestIP.id) : [];
     const caseEvidence = requestMode === "ip" ? getGenerationCaseEvidence() : null;
+    const temporaryCognition = requestMode === "ip" && linkedTopic && typeof window !== "undefined"
+      ? readEphemeralCognitionContext(window.sessionStorage, requestIP.id, linkedTopic.id)
+      : null;
     let linkedTopicAtRequest: TopicAsset | null = null;
     try {
       if (activeIPIdRef.current !== requestIP.id) {
@@ -1335,7 +1355,15 @@ export default function ScriptFactoryPage() {
     }
     setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setLoading(true);
     try {
-      const generatedData = await generateFor(requestIP, requestedTopic, requestMode, sourceContext, caseEvidence);
+      const generatedData = await generateFor(
+        requestIP,
+        requestedTopic,
+        requestMode,
+        sourceContext,
+        caseEvidence,
+        temporaryCognition,
+        linkedTopicAtRequest?.id ?? null,
+      );
       const data: ScriptResult = {
         ...generatedData,
         generationMode: requestMode,

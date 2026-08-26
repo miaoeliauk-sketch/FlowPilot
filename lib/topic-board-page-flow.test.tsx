@@ -741,14 +741,21 @@ async function renderBoundaryAuditScenario(report: {
   conflictingNodeIds: string[];
   supportedParts: string[];
   missingElements: Array<"CLAIM" | "REASONING" | "CASE" | "DATA" | "DETAIL">;
-}, boundaryFetcher?: (init?: RequestInit) => Promise<Response>, interviewFetcher?: (init?: RequestInit) => Promise<Response>) {
+}, boundaryFetcher?: (init?: RequestInit) => Promise<Response>, interviewFetcher?: (init?: RequestInit) => Promise<Response>, interviewCompletionFetchers?: {
+  extract?: (init?: RequestInit) => Promise<Response>;
+  confirm?: (init?: RequestInit) => Promise<Response>;
+  verify?: (init?: RequestInit) => Promise<Response>;
+}, options?: {
+  ips?: IPProfile[];
+  withLayout?: boolean;
+}) {
   const restoreBrowser = installBrowserEnvironment();
   const originalFetch = globalThis.fetch;
   let cleanupPage: (() => void) | undefined;
 
   try {
     localStorage.clear();
-    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify(options?.ips ?? [SHUIMURAN]));
     localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
     localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
     const sourceId = "boundary-source-v2";
@@ -844,6 +851,15 @@ async function renderBoundaryAuditScenario(report: {
       if (String(input) === "/api/ip-boundary/interview/questions" && interviewFetcher) {
         return interviewFetcher(init);
       }
+      if (String(input) === "/api/ip-boundary/interview/extract" && interviewCompletionFetchers?.extract) {
+        return interviewCompletionFetchers.extract(init);
+      }
+      if (String(input) === "/api/ip-boundary/interview/confirm" && interviewCompletionFetchers?.confirm) {
+        return interviewCompletionFetchers.confirm(init);
+      }
+      if (String(input) === "/api/ip-source-analysis/verify" && interviewCompletionFetchers?.verify) {
+        return interviewCompletionFetchers.verify(init);
+      }
       return new Response(JSON.stringify({ results: [], debug: null }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -854,11 +870,13 @@ async function renderBoundaryAuditScenario(report: {
     cleanupPage = cleanup;
     const userEvent = (await import("@testing-library/user-event")).default;
     const { IPProvider } = await import("./ip-context");
+    const AppLayout = (await import("../components/layout/AppLayout")).default;
     const TopicBoardPage = (await import("../app/topic-board/page")).default;
     const user = userEvent.setup({ document });
+    const content = <TopicBoardPage />;
     const page = render(
       <IPProvider>
-        <TopicBoardPage />
+        {options?.withLayout ? <AppLayout>{content}</AppLayout> : content}
       </IPProvider>,
     );
 
@@ -876,6 +894,340 @@ async function renderBoundaryAuditScenario(report: {
     throw error;
   }
 }
+
+test("长期确认访谈认知后持久保存并自动重审解锁当前选题", async () => {
+  const answer = "我认为停止继续输入，是为了消化已有知识，因为知识淤积会让行动停滞。";
+  const sourceId = "interview-source-long-term";
+  const extracted = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: answer,
+    analyzedAt: "2026-08-26T14:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000301",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "为什么要停止继续输入？", derivation: "inferred", anchors: [{ quote: answer }] },
+        claim: { content: "停止继续输入，是为了消化已有知识。", anchors: [{ quote: "停止继续输入，是为了消化已有知识" }] },
+        reasoning: {
+          status: "complete",
+          steps: [{ order: 1, content: "知识淤积会让行动停滞。", anchors: [{ quote: "知识淤积会让行动停滞" }] }],
+        },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const reviewed = {
+    ...extracted,
+    nonce: extracted.nonce + 1,
+    nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+  };
+  let boundaryCalls = 0;
+  let interviewContext: { topicId: string; interviewId: string } | null = null;
+  const scenario = await renderBoundaryAuditScenario({
+    coverage: "NONE",
+    stance: "UNDETERMINED",
+    explanation: "当前认知库没有涉及该主题。",
+    matchedNodeIds: [],
+    conflictingNodeIds: [],
+    supportedParts: [],
+    missingElements: ["CLAIM"],
+  }, async init => {
+    boundaryCalls += 1;
+    const requestBody = JSON.parse(String(init?.body)) as {
+      sources: Array<{ analysis: { nodes: Array<{ id: string }> } }>;
+    };
+    const nodeId = requestBody.sources[0]!.analysis.nodes[0]!.id;
+    const unlocked = boundaryCalls > 1;
+    return new Response(JSON.stringify({
+      report: unlocked ? {
+        coverage: "FULL",
+        stance: "ALIGNED",
+        explanation: "新确认的访谈认知已完整支持该选题。",
+        matchedNodeIds: [nodeId],
+        conflictingNodeIds: [],
+        supportedParts: ["停止输入与知识消化"],
+        missingElements: [],
+      } : {
+        coverage: "NONE",
+        stance: "UNDETERMINED",
+        explanation: "当前认知库没有涉及该主题。",
+        matchedNodeIds: [],
+        conflictingNodeIds: [],
+        supportedParts: [],
+        missingElements: ["CLAIM"],
+      },
+      evidenceNodes: unlocked ? [{
+        nodeId,
+        relation: "matched",
+        verificationStatus: "human_confirmed",
+        question: "为什么要停止继续输入？",
+        claim: "停止继续输入，是为了消化已有知识。",
+        reasoningSteps: ["知识淤积会让行动停滞。"],
+      }] : [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }, async init => {
+    const body = JSON.parse(String(init?.body)) as { topicId: string; interviewId: string };
+    interviewContext = { topicId: body.topicId, interviewId: body.interviewId };
+    return new Response(JSON.stringify({
+      activeIPId: SHUIMURAN.id,
+      topicId: body.topicId,
+      interviewId: body.interviewId,
+      questions: [{
+        id: "question-long-term",
+        missingElement: "CLAIM",
+        content: "关于这个话题，您的核心主张和理由是什么？",
+        basedOnNodeIds: [],
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }, {
+    extract: async () => new Response(JSON.stringify({
+      source: {
+        id: sourceId,
+        ipId: SHUIMURAN.id,
+        topicId: interviewContext?.topicId,
+        interviewId: interviewContext?.interviewId,
+        rawInteraction: [{
+          questionId: "question-long-term",
+          question: "关于这个话题，您的核心主张和理由是什么？",
+          answer,
+        }],
+        timestamp: extracted.analyzedAt,
+      },
+      analysis: extracted,
+      analysisToken: "analysis-token-long-term",
+      candidates: extracted.nodes.map(node => ({ sourceId, node })),
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    confirm: async () => new Response(JSON.stringify({
+      mode: "long_term",
+      source: {
+        id: sourceId,
+        ipId: SHUIMURAN.id,
+        topicId: interviewContext?.topicId,
+        interviewId: interviewContext?.interviewId,
+        rawInteraction: [{
+          questionId: "question-long-term",
+          question: "关于这个话题，您的核心主张和理由是什么？",
+          answer,
+        }],
+        timestamp: reviewed.analyzedAt,
+      },
+      analysis: reviewed,
+      finalProof: "final-proof-long-term",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    verify: async () => new Response(JSON.stringify({ verified: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  });
+
+  try {
+    await scenario.user.click(scenario.page.getByRole("button", { name: "开启认知访谈" }));
+    const answerInput = await scenario.page.findByRole("textbox", { name: "访谈回答" });
+    await scenario.user.type(answerInput, answer);
+    await scenario.user.click(scenario.page.getByRole("button", { name: "提交回答并提取认知" }));
+    await scenario.page.findByRole("textbox", { name: "候选观点" });
+    await scenario.user.click(scenario.page.getByRole("button", { name: "长期入库并重新审计" }));
+
+    const { waitFor } = await import("@testing-library/react");
+    await waitFor(() => assert.equal(boundaryCalls, 2));
+    assert.equal(
+      (scenario.page.getByRole("button", { name: /生成脚本/ }) as HTMLButtonElement).disabled,
+      false,
+    );
+    assert.equal(
+      getKnowledgeEntries("IP原始内容").some(entry => entry.id === sourceId),
+      true,
+      "长期出口必须保存为刷新后仍可读取的IP原始内容",
+    );
+  } finally {
+    scenario.restore();
+  }
+});
+
+test("仅本次使用的访谈认知只解锁当前选题且不会跟随到新选题", async () => {
+  const answer = "我对这个选题的临时判断是先停止继续输入，因为知识淤积会让行动停滞。";
+  const sourceId = "interview-source-temporary-topic-a";
+  const extracted = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: answer,
+    analyzedAt: "2026-08-26T15:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000302",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "当前选题为什么需要停止继续输入？", derivation: "inferred", anchors: [{ quote: answer }] },
+        claim: { content: "当前选题应该先停止继续输入。", anchors: [{ quote: "先停止继续输入" }] },
+        reasoning: {
+          status: "complete",
+          steps: [{ order: 1, content: "知识淤积会让行动停滞。", anchors: [{ quote: "知识淤积会让行动停滞" }] }],
+        },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const temporaryAnalysis = {
+    ...extracted,
+    nonce: extracted.nonce + 1,
+    nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+  };
+  let topicAId = "";
+  let topicAText = "";
+  let interviewId = "";
+  let boundaryCalls = 0;
+  const scenario = await renderBoundaryAuditScenario({
+    coverage: "NONE",
+    stance: "UNDETERMINED",
+    explanation: "当前认知库没有涉及该主题。",
+    matchedNodeIds: [],
+    conflictingNodeIds: [],
+    supportedParts: [],
+    missingElements: ["CLAIM"],
+  }, async init => {
+    boundaryCalls += 1;
+    const body = JSON.parse(String(init?.body)) as {
+      topic?: string;
+      temporaryContext?: {
+        topicId?: string;
+        temporaryProof?: string;
+        analysis?: { nodes?: Array<{ id?: string }> };
+      };
+    };
+    if (!topicAText && body.topic) topicAText = body.topic;
+    const temporaryApplies = body.temporaryContext?.topicId === topicAId
+      && body.temporaryContext.temporaryProof === "temporary-proof-topic-a"
+      && body.topic === topicAText;
+    return new Response(JSON.stringify({
+      report: temporaryApplies ? {
+        coverage: "FULL",
+        stance: "ALIGNED",
+        explanation: "当前会话的临时访谈认知支持该选题。",
+        matchedNodeIds: [temporaryAnalysis.nodes[0]!.id],
+        conflictingNodeIds: [],
+        supportedParts: ["停止输入与知识消化"],
+        missingElements: [],
+      } : {
+        coverage: "NONE",
+        stance: "UNDETERMINED",
+        explanation: "当前选题没有可用的长期或临时认知。",
+        matchedNodeIds: [],
+        conflictingNodeIds: [],
+        supportedParts: [],
+        missingElements: ["CLAIM"],
+      },
+      evidenceNodes: temporaryApplies ? [{
+        nodeId: temporaryAnalysis.nodes[0]!.id,
+        relation: "matched",
+        verificationStatus: "human_confirmed",
+        question: "当前选题为什么需要停止继续输入？",
+        claim: "当前选题应该先停止继续输入。",
+        reasoningSteps: ["知识淤积会让行动停滞。"],
+      }] : [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }, async init => {
+    const body = JSON.parse(String(init?.body)) as { topicId: string; interviewId: string };
+    topicAId = body.topicId;
+    interviewId = body.interviewId;
+    return new Response(JSON.stringify({
+      activeIPId: SHUIMURAN.id,
+      topicId: body.topicId,
+      interviewId: body.interviewId,
+      questions: [{
+        id: "question-temporary",
+        missingElement: "CLAIM",
+        content: "关于当前选题，您仅用于本次生成的判断是什么？",
+        basedOnNodeIds: [],
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }, {
+    extract: async () => new Response(JSON.stringify({
+      source: {
+        id: sourceId,
+        ipId: SHUIMURAN.id,
+        topicId: topicAId,
+        interviewId,
+        rawInteraction: [{
+          questionId: "question-temporary",
+          question: "关于当前选题，您仅用于本次生成的判断是什么？",
+          answer,
+        }],
+        timestamp: extracted.analyzedAt,
+      },
+      analysis: extracted,
+      analysisToken: "analysis-token-temporary-topic-a",
+      candidates: extracted.nodes.map(node => ({ sourceId, node })),
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    confirm: async () => new Response(JSON.stringify({
+      mode: "temporary",
+      activeIPId: SHUIMURAN.id,
+      topicId: topicAId,
+      interviewId,
+      sourceId,
+      rawContent: answer,
+      analysis: temporaryAnalysis,
+      temporaryProof: "temporary-proof-topic-a",
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+  }, { ips: [SHUIMURAN, SHIKONG], withLayout: true });
+
+  try {
+    await scenario.user.click(scenario.page.getByRole("button", { name: "开启认知访谈" }));
+    const answerInput = await scenario.page.findByRole("textbox", { name: "访谈回答" });
+    await scenario.user.type(answerInput, answer);
+    await scenario.user.click(scenario.page.getByRole("button", { name: "提交回答并提取认知" }));
+    await scenario.page.findByRole("textbox", { name: "候选观点" });
+    await scenario.user.click(scenario.page.getByRole("button", { name: "仅本次使用并重新审计" }));
+
+    const { waitFor } = await import("@testing-library/react");
+    await waitFor(() => assert.equal(boundaryCalls, 2));
+    assert.equal(
+      (scenario.page.getByRole("button", { name: /生成脚本/ }) as HTMLButtonElement).disabled,
+      false,
+      "临时凭证应只解锁当前选题",
+    );
+    assert.equal(
+      getKnowledgeEntries("IP原始内容").some(entry => entry.id === sourceId),
+      false,
+      "临时出口不得写入长期认知库",
+    );
+
+    const currentIPButton = (await scenario.page.findByText("当前操盘IP")).closest("button");
+    assert.ok(currentIPButton);
+    await scenario.user.click(currentIPButton);
+    await scenario.user.click(scenario.page.getByRole("button", { name: /设计师石空/ }));
+    await scenario.page.findByText(/评估背景：当前操盘IP为设计师石空/);
+    await scenario.user.click(currentIPButton);
+    await scenario.user.click(scenario.page.getByRole("button", { name: /水木然/ }));
+    await scenario.page.findByText(/评估背景：当前操盘IP为水木然/);
+    await scenario.user.click(scenario.page.getByRole("button", {
+      name: "查看选题“普通人如何判断一个机会是否适合自己？”完整评估",
+    }));
+    await waitFor(() => assert.equal(boundaryCalls, 3));
+    assert.equal(
+      (scenario.page.getByRole("button", { name: /生成脚本/ }) as HTMLButtonElement).disabled,
+      true,
+      "切换IP后再切回也不得恢复旧的临时凭证",
+    );
+
+    const topicInput = scenario.page.getByPlaceholderText(/例如：/);
+    await scenario.user.clear(topicInput);
+    await scenario.user.type(topicInput, "相似但不同的第二个选题");
+    await scenario.user.click(scenario.page.getByRole("button", { name: "召开董事会" }));
+    await waitFor(() => assert.equal(boundaryCalls, 4), { timeout: 7000 });
+    assert.ok(scenario.page.getByText("认知真空"));
+    assert.equal(
+      scenario.page.getAllByRole("button", { name: /生成脚本/ })
+        .some(button => (button as HTMLButtonElement).disabled),
+      true,
+      "切换选题后当前审计对象不得继承上一选题的临时凭证",
+    );
+  } finally {
+    scenario.restore();
+  }
+});
 
 test("认知真空可开启访谈且切换选题会重置当前会话", async () => {
   let resolveQuestions: ((response: Response) => void) | undefined;

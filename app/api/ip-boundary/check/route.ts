@@ -23,6 +23,7 @@ import {
 import { StructuredDeepSeekError } from "@/lib/structured-deepseek";
 import { DeepSeekRequestPayloadTooLargeError } from "@/lib/deepseek";
 import type { BoundaryEvidenceNode } from "@/lib/ip-boundary-ui";
+import { verifyEphemeralCognitionProof } from "@/lib/ip-boundary-interview-proof";
 
 const MAX_SOURCES = 50;
 
@@ -82,9 +83,13 @@ export async function POST(request: NextRequest) {
 
   const activeIPId = typeof body.activeIPId === "string" ? body.activeIPId.trim() : "";
   const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+  const topicId = typeof body.topicId === "string" ? body.topicId.trim() : "";
   const includeEvidence = body.includeEvidence === true;
+  const sources = Array.isArray(body.sources) ? body.sources : null;
+  const hasTemporaryContext = body.temporaryContext !== undefined;
   if (!activeIPId || !topic || topic.length > 500
-    || !Array.isArray(body.sources) || body.sources.length === 0 || body.sources.length > MAX_SOURCES) {
+    || !sources || sources.length > MAX_SOURCES
+    || (sources.length === 0 && !hasTemporaryContext)) {
     return NextResponse.json({ error: "边界判断请求不完整或超出限制" }, { status: 400 });
   }
 
@@ -92,8 +97,9 @@ export async function POST(request: NextRequest) {
     const secret = await getIPSourceAnalysisProofSecret();
     const confirmedNodes: BoundaryNodeContext[] = [];
     const seenNodeIds = new Set<string>();
+    const ephemeralNodeIds = new Set<string>();
 
-    for (const rawSource of body.sources) {
+    for (const rawSource of sources) {
       if (!isRecord(rawSource)) return securityFailure();
       const sourceId = typeof rawSource.sourceId === "string" ? rawSource.sourceId.trim() : "";
       const rawContent = typeof rawSource.rawContent === "string" ? rawSource.rawContent : "";
@@ -129,6 +135,41 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (hasTemporaryContext) {
+      const temporary = body.temporaryContext;
+      if (!isRecord(temporary)
+        || !topicId
+        || typeof temporary.activeIPId !== "string" || temporary.activeIPId.trim() !== activeIPId
+        || typeof temporary.topicId !== "string" || temporary.topicId.trim() !== topicId) {
+        return securityFailure();
+      }
+      const sourceId = typeof temporary.sourceId === "string" ? temporary.sourceId.trim() : "";
+      const rawContent = typeof temporary.rawContent === "string" ? temporary.rawContent : "";
+      const temporaryProof = typeof temporary.temporaryProof === "string"
+        ? temporary.temporaryProof.trim()
+        : "";
+      if (!sourceId || !rawContent.trim() || !temporaryProof) return securityFailure();
+      const parsed = parseStoredIPSourceAnalysis(temporary.analysis, rawContent, sourceId);
+      if (!parsed.ok || parsed.version !== 2) return securityFailure();
+      if (!verifyEphemeralCognitionProof({
+        token: temporaryProof,
+        ipId: activeIPId,
+        topicId,
+        topic,
+        sourceId,
+        analysis: parsed.analysis,
+        secret,
+      })) return securityFailure();
+
+      for (const node of parsed.analysis.nodes) {
+        if (node.reviewStatus !== "human_confirmed") continue;
+        if (seenNodeIds.has(node.id)) return securityFailure();
+        seenNodeIds.add(node.id);
+        ephemeralNodeIds.add(node.id);
+        confirmedNodes.push(toBoundaryNode(node));
+      }
+    }
+
     if (confirmedNodes.length === 0) {
       return NextResponse.json({ error: "没有可用于判断的人工确认认知" }, { status: 400 });
     }
@@ -148,6 +189,7 @@ export async function POST(request: NextRequest) {
       if (!node) throw new BoundaryResponseValidationError("边界判断结果引用了不存在的认知节点");
       return {
         ...reference,
+        source: ephemeralNodeIds.has(reference.nodeId) ? "ephemeral" as const : "persistent" as const,
         verificationStatus: "human_confirmed" as const,
         question: node.question,
         claim: node.claim,

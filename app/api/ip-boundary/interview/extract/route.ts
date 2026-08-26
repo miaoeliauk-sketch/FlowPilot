@@ -5,6 +5,13 @@ import {
   InterviewExtractionError,
   type InterviewRawInteraction,
 } from "@/lib/ip-boundary-interview";
+import {
+  buildIPSourceAnalysisProofClaims,
+  createIPSourceAnalysisToken,
+  digestIPSourceAnalysisProofClaims,
+  getIPSourceAnalysisProofSecret,
+} from "@/lib/ip-source-analysis-proof";
+import { initializeIPSourceLedger } from "@/lib/ip-source-ledger";
 
 const EXTRACTION_TIMEOUT_MS = 10_000;
 const MAX_INTERACTIONS = 3;
@@ -88,7 +95,24 @@ export async function POST(request: NextRequest) {
         return parseDeepSeekJSON<unknown>(raw, null);
       },
     });
-    return NextResponse.json(result);
+    const secret = await getIPSourceAnalysisProofSecret();
+    const claims = buildIPSourceAnalysisProofClaims({
+      ipId: activeIPId,
+      analysis: result.analysis,
+    });
+    const initialized = await initializeIPSourceLedger({
+      sourceId: result.analysis.sourceId,
+      ipId: activeIPId,
+      nonce: result.analysis.nonce,
+      digest: digestIPSourceAnalysisProofClaims(claims),
+    });
+    if (!initialized) {
+      return NextResponse.json({ code: "SOURCE_CONFLICT", error: "访谈存证编号冲突，请重新提交" }, { status: 409 });
+    }
+    return NextResponse.json({
+      ...result,
+      analysisToken: createIPSourceAnalysisToken(claims, secret),
+    });
   } catch (error) {
     if (error instanceof InterviewExtractionError) {
       const status = error.code === "EMPTY_LOGIC_WARNING" ? 422 : 502;

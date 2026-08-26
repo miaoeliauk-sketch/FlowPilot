@@ -3,6 +3,7 @@ import test, { after, before } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 import type { InterviewCandidateNode } from "./ip-boundary-interview";
+import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 
 const interviewPanelModulePath = "../components/ip-boundary/InterviewPanel";
 const extractionAuditModulePath = "../components/ip-boundary/InterviewExtractionAudit";
@@ -95,7 +96,7 @@ test("人工微调候选观点时同步修订内容但保留AI原文与锚点", 
       candidates: [original],
       existingClaims: [],
       onChange: (next: InterviewCandidateNode[]) => changes.push(next),
-      onConfirm: () => undefined,
+      onLongTermConfirm: () => undefined,
     }));
     const textarea = view.getByRole("textbox", { name: "候选观点" });
     await user.clear(textarea);
@@ -111,7 +112,7 @@ test("人工微调候选观点时同步修订内容但保留AI原文与锚点", 
   }
 });
 
-test("删除全部候选后物理禁用确认入库", async () => {
+test("删除全部候选后物理禁用长期入库", async () => {
   const { InterviewExtractionAudit } = await import(extractionAuditModulePath);
   const { cleanup, render } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
@@ -123,14 +124,14 @@ test("删除全部候选后物理禁用确认入库", async () => {
       candidates: [candidateNode()],
       existingClaims: [],
       onChange: (next: InterviewCandidateNode[]) => changes.push(next),
-      onConfirm: () => undefined,
+      onLongTermConfirm: () => undefined,
     }));
 
     await user.click(view.getByRole("button", { name: "删除候选" }));
 
     assert.deepEqual(changes.at(-1), []);
     assert.equal(
-      (view.getByRole("button", { name: "确认入库" }) as HTMLButtonElement).disabled,
+      (view.getByRole("button", { name: "长期入库并重新审计" }) as HTMLButtonElement).disabled,
       true,
     );
   } finally {
@@ -147,7 +148,7 @@ test("候选观点与存量认知高度相似时显示黄色疑似重复预警",
       candidates: [candidateNode("持续输出不等于机械日更。")],
       existingClaims: [{ nodeId: "existing-node-1", content: "持续输出不等于机械日更" }],
       onChange: () => undefined,
-      onConfirm: () => undefined,
+      onLongTermConfirm: () => undefined,
     }));
 
     const warning = view.getByText("与已有认知高度相似，请核对是否重复。");
@@ -203,6 +204,38 @@ test("IP切换只隐藏当前访谈并按IP和选题恢复各自草稿", async (
 test("提交访谈回答后保留完整问答并进入候选认知待预审状态", async () => {
   const originalFetch = globalThis.fetch;
   const capturedRequest: { current: unknown } = { current: null };
+  const answer = "我认为停止学习能消化知识，因为大脑需要空白期。";
+  const analysis = buildIPSourceAnalysisV2({
+    sourceId: "interview-source-1",
+    sourceContent: answer,
+    analyzedAt: "2026-08-26T12:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000401",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: {
+          content: "为什么停止学习能帮助消化知识？",
+          derivation: "inferred",
+          anchors: [{ quote: answer }],
+        },
+        claim: {
+          content: "停止学习能消化知识。",
+          anchors: [{ quote: "停止学习能消化知识" }],
+        },
+        reasoning: {
+          status: "complete",
+          steps: [{
+            order: 1,
+            content: "大脑需要空白期。",
+            anchors: [{ quote: "大脑需要空白期" }],
+          }],
+        },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
   try {
     globalThis.fetch = async (input, init) => {
       assert.equal(String(input), "/api/ip-boundary/interview/extract");
@@ -216,14 +249,13 @@ test("提交访谈回答后保留完整问答并进入候选认知待预审状�
           rawInteraction: [{
             questionId: "question-claim",
             question: "老师，关于这个话题，您的核心主张是什么？",
-            answer: "我认为停止学习能消化知识，因为大脑需要空白期。",
+            answer,
           }],
           timestamp: "2026-08-26T12:00:00.000Z",
         },
-        candidates: [{
-          sourceId: "interview-source-1",
-          node: candidateNode().node,
-        }],
+        analysis,
+        analysisToken: "valid-mock-analysis-token-v1",
+        candidates: analysis.nodes.map(node => ({ sourceId: analysis.sourceId, node })),
       }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -248,14 +280,14 @@ test("提交访谈回答后保留完整问答并进入候选认知待预审状�
 
     await user.type(
       view.getByRole("textbox", { name: "访谈回答" }),
-      "我认为停止学习能消化知识，因为大脑需要空白期。",
+      answer,
     );
     await user.click(view.getByRole("button", { name: "提交回答并提取认知" }));
 
     assert.ok(await view.findByText("已提取1个候选认知节点，等待人工预审。"));
     assert.equal(
       (view.getByRole("textbox", { name: "候选观点" }) as HTMLTextAreaElement).value,
-      candidateNode().node.claim.content,
+      analysis.nodes[0]?.claim.content,
     );
     assert.ok(isRecord(capturedRequest.current));
     assert.equal(capturedRequest.current.activeIPId, "ip-submit");
@@ -264,7 +296,7 @@ test("提交访谈回答后保留完整问答并进入候选认知待预审状�
     assert.deepEqual(capturedRequest.current.rawInteraction, [{
       questionId: "question-claim",
       question: "老师，关于这个话题，您的核心主张是什么？",
-      answer: "我认为停止学习能消化知识，因为大脑需要空白期。",
+      answer,
     }]);
     cleanup();
   } finally {

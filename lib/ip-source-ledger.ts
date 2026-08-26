@@ -301,6 +301,32 @@ export async function finalizeIPSourceLedger(input: {
   });
 }
 
+export async function confirmAndFinalizeIPSourceLedger(input: {
+  sourceId: string;
+  ipId: string;
+  expectedNonce: number;
+  expectedDigest: string;
+  nextNonce: number;
+  nextDigest: string;
+  finalDigest: string;
+}): Promise<boolean> {
+  return withLedgerQueue(async ledger => {
+    const current = ledger[input.sourceId];
+    if (!current || current.kind !== "v2" || current.ipId !== input.ipId
+      || current.currentNonce !== input.expectedNonce
+      || current.lastDigest !== input.expectedDigest
+      || current.finalizedDigest !== null) return false;
+    ledger[input.sourceId] = {
+      ...current,
+      currentNonce: input.nextNonce,
+      lastDigest: input.nextDigest,
+      finalizedDigest: input.finalDigest,
+    };
+    await writeLedger(ledger);
+    return true;
+  });
+}
+
 export async function verifyFinalizedIPSourceLedger(input: {
   sourceId: string;
   ipId: string;

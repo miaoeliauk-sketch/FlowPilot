@@ -221,3 +221,58 @@ test("访谈候选节点强引用保留完整问答原文的InterviewSource", as
   assert.ok(isRecord(payload.candidates[0]));
   assert.equal(payload.candidates[0].sourceId, payload.source.id);
 });
+
+test("访谈长期终审只接受一次原始凭证并返回可持久化的最终凭证", async () => {
+  const proofSecret = "test-only-interview-confirm-proof-secret-32-bytes";
+  const originalProofSecret = process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET;
+  process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET = proofSecret;
+  try {
+    const { resetIPSourceLedgerForTests } = await import("./ip-source-ledger");
+    await resetIPSourceLedgerForTests();
+    const extractedResponse = await requestInterviewExtraction();
+    assert.equal(extractedResponse.status, 200);
+    const extracted: unknown = await extractedResponse.json();
+    assert.ok(isRecord(extracted));
+    assert.ok(isRecord(extracted.source));
+    assert.ok(isRecord(extracted.analysis));
+    assert.ok(typeof extracted.analysisToken === "string" && extracted.analysisToken.length > 20);
+    assert.ok(Array.isArray(extracted.candidates) && extracted.candidates.length === 1);
+    const candidate = extracted.candidates[0];
+    assert.ok(isRecord(candidate) && isRecord(candidate.node) && typeof candidate.node.id === "string");
+
+    const body = {
+      mode: "long_term",
+      activeIPId: "ip-interview-extract",
+      topicId: "topic-interview-extract",
+      interviewId: "interview-extract-v1",
+      source: extracted.source,
+      analysis: extracted.analysis,
+      analysisToken: extracted.analysisToken,
+      actions: [{ type: "confirm", nodeId: candidate.node.id }],
+    };
+    const { POST } = await import("../app/api/ip-boundary/interview/confirm/route");
+    const request = () => new NextRequest("http://localhost/api/ip-boundary/interview/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const first = await POST(request());
+    assert.equal(first.status, 200);
+    const confirmed: unknown = await first.json();
+    assert.ok(isRecord(confirmed));
+    assert.equal(confirmed.mode, "long_term");
+    assert.ok(typeof confirmed.finalProof === "string" && confirmed.finalProof.length > 20);
+    assert.ok(isRecord(confirmed.analysis));
+    assert.ok(Array.isArray(confirmed.analysis.nodes));
+    assert.ok(confirmed.analysis.nodes.every(node => isRecord(node) && node.reviewStatus !== "ai_extracted"));
+
+    const replay = await POST(request());
+    assert.equal(replay.status, 409, "原始访谈凭证不得重复确认入库");
+  } finally {
+    if (originalProofSecret === undefined) {
+      delete process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET;
+    } else {
+      process.env.FLOWPILOT_IP_SOURCE_ANALYSIS_PROOF_SECRET = originalProofSecret;
+    }
+  }
+});

@@ -12,7 +12,9 @@ interface InterviewExtractionAuditProps {
   candidates: InterviewCandidateNode[];
   existingClaims: ExistingClaim[];
   onChange: (candidates: InterviewCandidateNode[]) => void;
-  onConfirm: (candidates: InterviewCandidateNode[]) => void;
+  onLongTermConfirm: (candidates: InterviewCandidateNode[]) => void;
+  onTemporaryConfirm?: (candidates: InterviewCandidateNode[]) => void;
+  confirmingMode?: "long_term" | "temporary" | null;
 }
 
 function normalizedText(value: string) {
@@ -48,7 +50,9 @@ export function InterviewExtractionAudit({
   candidates,
   existingClaims,
   onChange,
-  onConfirm,
+  onLongTermConfirm,
+  onTemporaryConfirm,
+  confirmingMode = null,
 }: InterviewExtractionAuditProps) {
   const [drafts, setDrafts] = useState(candidates);
 
@@ -121,12 +125,22 @@ export function InterviewExtractionAudit({
       ))}
       <button
         type="button"
-        disabled={drafts.length === 0}
-        onClick={() => onConfirm(drafts)}
+        disabled={drafts.length === 0 || confirmingMode !== null}
+        onClick={() => onLongTermConfirm(drafts)}
         className="rounded-full bg-[#5D45A7] px-4 py-2 text-[12px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-40"
       >
-        确认入库
+        {confirmingMode === "long_term" ? "正在长期入库…" : "长期入库并重新审计"}
       </button>
+      {onTemporaryConfirm && (
+        <button
+          type="button"
+          disabled={drafts.length === 0 || confirmingMode !== null}
+          onClick={() => onTemporaryConfirm(drafts)}
+          className="ml-2 rounded-full border border-[#5D45A7] bg-white px-4 py-2 text-[12px] font-bold text-[#5D45A7] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {confirmingMode === "temporary" ? "正在建立临时凭证…" : "仅本次使用并重新审计"}
+        </button>
+      )}
     </section>
   );
 }

@@ -3,6 +3,13 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { POST } from "../app/api/script-factory/route";
 import type { IPProfile } from "./types";
+import {
+  buildEphemeralCognitionProofClaims,
+  createEphemeralCognitionProof,
+  verifyEphemeralCognitionProof,
+} from "./ip-boundary-interview-proof";
+import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
+import { getIPSourceAnalysisProofSecret } from "./ip-source-analysis-proof";
 
 const IP: IPProfile = {
   id: "ip-1", name: "测试IP", avatar: "测", positioning: "商业观察",
@@ -194,6 +201,152 @@ test("V2认知缺少最终凭证时不能进入脚本生成提示词", async () 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("临时认知凭证的选题归属被篡改时返回403并停止生成", async () => {
+  const originalFetch = globalThis.fetch;
+  let modelCalled = false;
+  globalThis.fetch = async () => {
+    modelCalled = true;
+    return deepSeekResponse("{}", "unexpected-temporary-scope");
+  };
+  try {
+    const response = await POST(requestFor({
+      topicId: "topic-b-tampered",
+      temporaryCognition: {
+        activeIPId: IP.id,
+        topicId: "topic-a-authorized",
+        sourceId: "interview-source-temporary-a",
+        analysis: {
+          parserVersion: 2,
+          sourceId: "interview-source-temporary-a",
+          sourceHash: "a".repeat(64),
+          nonce: 2,
+          analyzedAt: "2026-08-26T15:00:00.000Z",
+          nodes: [],
+          aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+        },
+        temporaryProof: "signed-temporary-proof-for-topic-a",
+      },
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 403);
+    assert.equal(body.code, "INVALID_TOKEN_SCOPE");
+    assert.equal(modelCalled, false, "选题归属不匹配时不得调用脚本生成模型");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("临时认知作用域一致但签名伪造时仍返回403并停止生成", async () => {
+  const originalFetch = globalThis.fetch;
+  let modelCalled = false;
+  globalThis.fetch = async () => {
+    modelCalled = true;
+    return deepSeekResponse("{}", "unexpected-forged-temporary-proof");
+  };
+  try {
+    const response = await POST(requestFor({
+      topicId: "topic-a-authorized",
+      temporaryCognition: {
+        activeIPId: IP.id,
+        topicId: "topic-a-authorized",
+        sourceId: "interview-source-temporary-a",
+        analysis: {
+          parserVersion: 2,
+          sourceId: "interview-source-temporary-a",
+          sourceHash: "a".repeat(64),
+          nonce: 2,
+          analyzedAt: "2026-08-26T15:00:00.000Z",
+          nodes: [],
+          aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+        },
+        temporaryProof: "forged-temporary-proof",
+      },
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 403);
+    assert.equal(body.code, "INVALID_TOKEN_SCOPE");
+    assert.equal(modelCalled, false, "签名无效时不得调用脚本生成模型");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("合法临时认知只为绑定选题进入脚本生成上下文", async () => {
+  const proofSecret = await getIPSourceAnalysisProofSecret();
+  const topicId = "topic-ephemeral-generation";
+  const topic = "变化背后的原因";
+  const sourceId = "interview-source-ephemeral-generation";
+  const claim = "真正的变化来自需求和决策方式的重新组合。";
+  const reasoning = "先观察真实需求，再判断变化是否持续。";
+  const rawContent = `${claim}\n${reasoning}`;
+  const analysis = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: rawContent,
+    analyzedAt: "2026-08-26T15:00:00.000Z",
+    createId: (() => {
+      let index = 0;
+      return () => `00000000-0000-4000-8000-${String(++index).padStart(12, "0")}`;
+    })(),
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "变化为什么发生？", derivation: "inferred", anchors: [{ quote: claim }] },
+        claim: { content: claim, anchors: [{ quote: claim }] },
+        reasoning: {
+          status: "complete",
+          steps: [{ order: 1, content: reasoning, anchors: [{ quote: reasoning }] }],
+        },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  analysis.nodes[0]!.reviewStatus = "human_confirmed";
+  const claims = buildEphemeralCognitionProofClaims({
+    ipId: IP.id,
+    topicId,
+    topic,
+    sourceId,
+    analysis,
+    issuedAt: Date.now() - 1_000,
+  });
+  const temporaryProof = createEphemeralCognitionProof(claims, proofSecret);
+  assert.equal(verifyEphemeralCognitionProof({
+    token: temporaryProof,
+    ipId: IP.id,
+    topicId,
+    topic,
+    sourceId,
+    analysis,
+    secret: proofSecret,
+    now: claims.expiresAt + 1,
+  }), false, "临时认知凭证超过30分钟后必须失效");
+
+  await withSuccessfulModel(async prompts => {
+      const response = await POST(requestFor({
+        topicId,
+        topic,
+        temporaryCognition: {
+          activeIPId: IP.id,
+          topicId,
+          sourceId,
+          rawContent,
+          analysis,
+          temporaryProof,
+          expiresAt: claims.expiresAt,
+        },
+      }));
+
+      assert.equal(response.status, 200);
+      assert.match(prompts[0], /本次访谈临时认知/);
+      assert.match(prompts[0], new RegExp(claim));
+      assert.match(prompts[0], new RegExp(reasoning));
+  });
 });
 
 test("其他IP的原始内容不能进入当前IP生成请求", async () => {

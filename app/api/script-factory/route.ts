@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import type { IPProfile, IPStyleProfile } from "@/lib/types";
+import type { IPProfile, IPSourceAnalysisV2, IPStyleProfile } from "@/lib/types";
 import { buildIPContextBlock } from "@/lib/ip-prompt";
 import { getActiveScriptDirectorRuleOnServer } from "@/lib/script-director-rule-activation-registry";
 import { resolveScriptDirectorRuleForGeneration } from "@/lib/script-director-rule-resolver";
@@ -37,6 +37,7 @@ import {
   buildIPSourceContextBlock,
   parseIPSourceContext,
   parseScriptFactoryCaseEvidence,
+  type ScriptFactoryIPSourceContextItem,
 } from "@/lib/script-factory-source-context";
 import { verifyScriptFactoryIPSourceContext } from "@/lib/script-factory-source-context-proof";
 import {
@@ -58,6 +59,12 @@ import {
   type ScriptFactoryPromptTraceStage,
 } from "@/lib/script-factory-prompt-trace";
 import { SPOKEN_PUNCTUATION_GENERATION_RULES } from "@/lib/script-spoken-punctuation-policy";
+import { verifyEphemeralCognitionProof } from "@/lib/ip-boundary-interview-proof";
+import { getIPSourceAnalysisProofSecret } from "@/lib/ip-source-analysis-proof";
+import {
+  parseStoredIPSourceAnalysis,
+  toV1CompatibleItems,
+} from "@/lib/ip-source-analysis-v2";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -132,6 +139,8 @@ interface RequestBody {
   ipProfile?: IPProfile;
   styleProfile?: IPStyleProfile | null;
   topic?: string;
+  topicId?: string;
+  temporaryCognition?: unknown;
   platform?: string;
   formatCategory?: string;
   durationSeconds?: number;
@@ -523,6 +532,69 @@ export async function POST(req: NextRequest) {
 
   const topic = (body.topic ?? "").trim();
   if (!topic) return NextResponse.json({ error: "请输入视频选题", apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: null, mockHit: false } }, { status: 400 });
+  let temporarySourceReferences: ScriptFactoryIPSourceContextItem[] = [];
+  if (body.temporaryCognition !== undefined) {
+    const temporary = body.temporaryCognition;
+    const topicId = typeof body.topicId === "string" ? body.topicId.trim() : "";
+    if (!isRecord(temporary)
+      || typeof temporary.activeIPId !== "string" || temporary.activeIPId.trim() !== ip.id
+      || typeof temporary.topicId !== "string" || !topicId
+      || temporary.topicId.trim() !== topicId) {
+      return NextResponse.json({
+        error: "临时认知凭证不属于当前IP或选题，已拒绝生成。",
+        code: "INVALID_TOKEN_SCOPE",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 403 });
+    }
+    const sourceId = typeof temporary.sourceId === "string" ? temporary.sourceId.trim() : "";
+    const rawContent = typeof temporary.rawContent === "string" ? temporary.rawContent : "";
+    const temporaryProof = typeof temporary.temporaryProof === "string"
+      ? temporary.temporaryProof.trim()
+      : "";
+    const analysis = isRecord(temporary.analysis)
+      ? temporary.analysis as unknown as IPSourceAnalysisV2
+      : null;
+    let verified = false;
+    if (sourceId && rawContent.trim() && temporaryProof && analysis) {
+      try {
+        const parsed = parseStoredIPSourceAnalysis(analysis, rawContent, sourceId);
+        verified = parsed.ok && parsed.version === 2 && verifyEphemeralCognitionProof({
+          token: temporaryProof,
+          ipId: ip.id,
+          topicId,
+          topic,
+          sourceId,
+          analysis: parsed.ok && parsed.version === 2 ? parsed.analysis : analysis,
+          secret: await getIPSourceAnalysisProofSecret(),
+        });
+        if (verified && parsed.ok && parsed.version === 2) {
+          temporarySourceReferences = toV1CompatibleItems(parsed.analysis)
+            .filter(item => item.extractionStatus === "人工确认")
+            .map(item => ({
+              parserVersion: 2 as const,
+              ipId: ip.id,
+              sourceId,
+              sourceTitle: "本次访谈临时认知",
+              itemId: item.id,
+              kind: item.kind,
+              content: item.content,
+              originalExcerpt: item.originalExcerpt,
+              extractionStatus: item.extractionStatus,
+            }));
+          if (temporarySourceReferences.length === 0) verified = false;
+        }
+      } catch {
+        verified = false;
+      }
+    }
+    if (!verified) {
+      return NextResponse.json({
+        error: "临时认知凭证无效、已过期或不属于当前选题，已拒绝生成。",
+        code: "INVALID_TOKEN_SCOPE",
+        apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+      }, { status: 403 });
+    }
+  }
   if (body.generationMode !== undefined && body.generationMode !== "standard" && body.generationMode !== "ip") {
     return NextResponse.json({
       error: "脚本生成模式无效，请重新选择。",
@@ -660,14 +732,15 @@ export async function POST(req: NextRequest) {
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  const sourceReferences = sourceContextResult.items;
-  const sourceProofResult = await verifyScriptFactoryIPSourceContext(sourceReferences, ip.id);
+  const persistentSourceReferences = sourceContextResult.items;
+  const sourceProofResult = await verifyScriptFactoryIPSourceContext(persistentSourceReferences, ip.id);
   if (!sourceProofResult.ok) {
     return NextResponse.json({
       error: sourceProofResult.error,
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
+  const sourceReferences = [...persistentSourceReferences, ...temporarySourceReferences];
   const caseEvidenceResult = parseScriptFactoryCaseEvidence(
     isIPSpecificGeneration ? body.caseEvidence : undefined,
     ip.id,

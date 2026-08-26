@@ -35,7 +35,12 @@ import {
 } from "@/lib/ip-boundary-ui";
 import { InterviewPanel } from "@/components/ip-boundary/InterviewPanel";
 import type { ExistingClaim } from "@/components/ip-boundary/InterviewExtractionAudit";
-import type { InterviewPanelState, InterviewQuestion } from "@/lib/ip-boundary-interview";
+import type {
+  EphemeralCognitionContext,
+  InterviewPanelState,
+  InterviewQuestion,
+} from "@/lib/ip-boundary-interview";
+import { ephemeralCognitionStorageKey } from "@/lib/ip-boundary-interview";
 
 // ── Constants ──
 const PHASES = [
@@ -501,6 +506,8 @@ export default function TopicBoardPage() {
   const [pendingGenerateAsset, setPendingGenerateAsset] = useState<TopicAsset | null>(null);
   const [interviewSession, setInterviewSession] = useState<InterviewSession | null>(null);
   const [interviewExistingClaims, setInterviewExistingClaims] = useState<ExistingClaim[]>([]);
+  const [, setTemporaryCognition] = useState<EphemeralCognitionContext | null>(null);
+  const temporaryCognitionRef = useRef<EphemeralCognitionContext | null>(null);
 
   // 参考知识：选题输入停止变化800ms后自动检索，不是实时每个按键都查
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
@@ -509,6 +516,17 @@ export default function TopicBoardPage() {
   const [knowledgeDataError, setKnowledgeDataError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knowledgeRequestSeqRef = useRef(0);
+
+  function replaceTemporaryCognition(next: EphemeralCognitionContext | null) {
+    const previous = temporaryCognitionRef.current;
+    if (previous && typeof window !== "undefined") {
+      window.sessionStorage.removeItem(
+        ephemeralCognitionStorageKey(previous.activeIPId, previous.topicId),
+      );
+    }
+    temporaryCognitionRef.current = next;
+    setTemporaryCognition(next);
+  }
 
   useEffect(() => {
     boundaryRequestSeqRef.current += 1;
@@ -525,6 +543,7 @@ export default function TopicBoardPage() {
     setPendingGenerateAsset(null);
     setInterviewSession(null);
     setInterviewExistingClaims([]);
+    replaceTemporaryCognition(null);
   }, [activeIP?.id]);
 
   useEffect(() => {
@@ -538,6 +557,7 @@ export default function TopicBoardPage() {
     setPendingGenerateAsset(null);
     setInterviewSession(null);
     setInterviewExistingClaims([]);
+    replaceTemporaryCognition(null);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const requestSeq = knowledgeRequestSeqRef.current + 1;
     knowledgeRequestSeqRef.current = requestSeq;
@@ -562,7 +582,11 @@ export default function TopicBoardPage() {
     return buildBoundarySourceBundle(getKnowledgeEntries("IP原始内容"), ipId);
   }
 
-  async function runBoundaryAudit(asset: TopicAsset, requestIP: IPProfile) {
+  async function runBoundaryAudit(
+    asset: TopicAsset,
+    requestIP: IPProfile,
+    temporaryOverride?: EphemeralCognitionContext | null,
+  ) {
     const requestSeq = boundaryRequestSeqRef.current + 1;
     boundaryRequestSeqRef.current = requestSeq;
     setBoundaryTopicAssetId(asset.id);
@@ -581,6 +605,13 @@ export default function TopicBoardPage() {
       setBoundaryMessage("认知库读取失败，本次没有获得可信的边界结论。请先检查知识库数据。");
       return;
     }
+    const scopedTemporary = temporaryOverride ?? temporaryCognitionRef.current;
+    const activeTemporary = scopedTemporary
+      && scopedTemporary.activeIPId === requestIP.id
+      && scopedTemporary.topicId === asset.id
+      && scopedTemporary.expiresAt > Date.now()
+      ? scopedTemporary
+      : null;
     setInterviewExistingClaims(bundle.sources.flatMap(source => source.analysis.nodes
       .filter(node => node.reviewStatus === "human_confirmed")
       .map(node => ({
@@ -610,8 +641,20 @@ export default function TopicBoardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           activeIPId: requestIP.id,
+          topicId: asset.id,
           topic: asset.title,
           sources: bundle.sources,
+          ...(activeTemporary ? {
+            temporaryContext: {
+              activeIPId: activeTemporary.activeIPId,
+              topicId: activeTemporary.topicId,
+              sourceId: activeTemporary.sourceId,
+              rawContent: activeTemporary.rawContent,
+              analysis: activeTemporary.analysis,
+              temporaryProof: activeTemporary.temporaryProof,
+              expiresAt: activeTemporary.expiresAt,
+            },
+          } : {}),
           includeEvidence: true,
         }),
         },
@@ -624,7 +667,9 @@ export default function TopicBoardPage() {
           : "认知边界审计失败，请重试。";
         throw new Error(apiMessage);
       }
-      const parsed = parseBoundaryCheckUIResponse(raw, bundle.nodeIds);
+      const allowedNodeIds = new Set(bundle.nodeIds);
+      activeTemporary?.analysis.nodes.forEach(node => allowedNodeIds.add(node.id));
+      const parsed = parseBoundaryCheckUIResponse(raw, allowedNodeIds);
       if (!parsed) throw new Error("认知边界审计返回的数据不完整，已停止生成。");
       setBoundaryReport(parsed.report);
       setBoundaryEvidence(parsed.evidenceNodes);
@@ -710,6 +755,25 @@ export default function TopicBoardPage() {
           }
         : current);
     }
+  }
+
+  async function recheckAfterInterviewConfirmation() {
+    if (!activeIP || !boundaryTopicAssetId || !interviewSession) return;
+    if (interviewSession.activeIPId !== activeIP.id
+      || interviewSession.topicId !== boundaryTopicAssetId) return;
+    const asset = getTopicAssets(activeIP.id).find(item => item.id === boundaryTopicAssetId);
+    if (!asset?.boardResult) return;
+    await runBoundaryAudit(asset, activeIP);
+  }
+
+  async function useTemporaryInterviewCognition(context: EphemeralCognitionContext) {
+    if (!activeIP || !boundaryTopicAssetId || !interviewSession) return;
+    if (context.activeIPId !== activeIP.id || context.topicId !== boundaryTopicAssetId
+      || context.topicId !== interviewSession.topicId) return;
+    const asset = getTopicAssets(activeIP.id).find(item => item.id === boundaryTopicAssetId);
+    if (!asset?.boardResult) return;
+    replaceTemporaryCognition(context);
+    await runBoundaryAudit(asset, activeIP, context);
   }
 
   function retryKnowledgeData() {
@@ -1059,9 +1123,13 @@ export default function TopicBoardPage() {
               topicId={interviewSession.topicId}
               interviewId={interviewSession.interviewId}
               questions={interviewSession.questions}
+              topicContent={getTopicAssets(interviewSession.activeIPId)
+                .find(item => item.id === interviewSession.topicId)?.title ?? ""}
               existingClaims={interviewExistingClaims}
               state={interviewSession.state}
               errorMessage={interviewSession.errorMessage}
+              onLongTermConfirmed={recheckAfterInterviewConfirmation}
+              onTemporaryConfirmed={useTemporaryInterviewCognition}
             />
           )}
 
