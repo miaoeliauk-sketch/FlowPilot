@@ -8,6 +8,17 @@ function installBrowserEnvironment() {
     url: "http://localhost/knowledge-intake",
     pretendToBeVisual: true,
   });
+  let lockTail = Promise.resolve();
+  Object.defineProperty(dom.window.navigator, "locks", {
+    configurable: true,
+    value: {
+      request<T>(_name: string, operation: () => T | Promise<T>): Promise<T> {
+        const result = lockTail.then(operation);
+        lockTail = result.then(() => undefined, () => undefined);
+        return result;
+      },
+    },
+  });
   const browserGlobals: Record<string, unknown> = {
     window: dom.window,
     self: dom.window,
@@ -418,6 +429,101 @@ test("失败分段重试必须串行完成并保留每一段的结果", async ()
   }
 });
 
+test("AI保存等待写锁时重试失败分段会让旧批次失效且不污染新结果", async () => {
+  const { act, render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  const originalLocks = Object.getOwnPropertyDescriptor(navigator, "locks");
+  let releaseLock!: () => void;
+  let reportLockStarted!: () => void;
+  const lockStarted = new Promise<void>(resolve => {
+    reportLockStarted = resolve;
+  });
+  const lockGate = new Promise<void>(resolve => {
+    releaseLock = resolve;
+  });
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      request<T>(_name: string, operation: () => T | Promise<T>): Promise<T> {
+        reportLockStarted();
+        return lockGate.then(operation);
+      },
+    },
+  });
+  let callCount = 0;
+  globalThis.fetch = async () => {
+    callCount += 1;
+    if (callCount === 2) {
+      return new Response(JSON.stringify({ error: "第二段首次提炼失败" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const title = callCount === 1
+      ? "旧批次第一段方法"
+      : callCount === 3
+        ? "旧批次第三段方法"
+        : "第二段重试后的新方法";
+    return new Response(JSON.stringify({
+      mode: "global",
+      items: [buildIntakeResponseItem(title)],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    const content = [
+      "# 第一章 选题",
+      "甲".repeat(2_100),
+      "## 第二章 开头",
+      "乙".repeat(2_100),
+      "## 第三章 结尾",
+      "丙".repeat(2_100),
+    ].join("\n");
+
+    await user.click(view.getByPlaceholderText(/粘贴逐字稿/));
+    await user.paste(content);
+    await user.click(view.getByRole("button", { name: "预览自动分段" }));
+    await user.click(view.getByRole("button", { name: "确认分段并开始提炼" }));
+    await waitFor(() => assert.ok(view.getByRole("button", { name: "重试第2段" })));
+    assert.ok(view.getAllByText("旧批次第一段方法").length > 0);
+    assert.ok(view.getAllByText("旧批次第三段方法").length > 0);
+    for (const keepAllButton of view.queryAllByRole("button", { name: "全部保留" })) {
+      await user.click(keepAllButton);
+    }
+
+    const saveButton = view.getAllByRole("button", { name: /写入通用知识库/ })[0] as HTMLButtonElement;
+    await waitFor(() => assert.equal(saveButton.disabled, false));
+    await user.click(saveButton);
+    await lockStarted;
+    await user.click(view.getByRole("button", { name: "重试第2段" }));
+    await waitFor(() => assert.ok(view.getAllByText("第二段重试后的新方法").length > 0));
+
+    await act(async () => {
+      releaseLock();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 0);
+    assert.ok(view.getAllByText("第二段重试后的新方法").length > 0);
+    assert.equal(view.queryByRole("alert"), null);
+    assert.equal(view.queryByText(/成功写入/), null);
+  } finally {
+    releaseLock();
+    globalThis.fetch = originalFetch;
+    if (originalLocks) Object.defineProperty(navigator, "locks", originalLocks);
+    else Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  }
+});
+
 test("普通单次入库不会启用长文分段去重", async () => {
   const { render, waitFor } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;
@@ -574,6 +680,219 @@ test("单篇内容保存前展示全库三档相似依据并由人工决定是�
     assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 4);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("普通AI方法卡保存时重新全库检查并要求确认新出现的部分相似内容", async () => {
+  const { render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    mode: "global",
+    items: [buildIntakeResponseItem("反常识选题法", {
+      summary: "用反常识冲突解决普通选题缺少吸引力的问题",
+      coreMethod: "先指出大众默认判断，再用真实反例推翻它",
+      applicableScenarios: ["知识口播", "观点短视频"],
+      aiUsage: "当选题缺少冲突时，用反例重构切入角度",
+    })],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    await user.type(view.getByPlaceholderText(/粘贴逐字稿/), "一份等待保存的反常识选题方法资料");
+    await user.click(view.getByRole("button", { name: "AI提炼方法" }));
+
+    await waitFor(() => assert.ok(view.getByText("全库暂未发现相似内容")));
+    await user.click(view.getByRole("button", { name: "继续入库「反常识选题法」" }));
+
+    localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+      buildExistingKnowledgeEntry("late-partial", {
+        title: "普通观点怎样改成反常识选题",
+        rawContent: [
+          "【一句话总结】\n把大家熟悉的观点换一个方向表达",
+          "【核心方法】\n先列出大众默认判断，再寻找能够推翻判断的反例",
+          "【适用场景】\n知识口播",
+          "【AI调用方式】\n寻找观点中可以被真实反例挑战的部分",
+        ].join("\n\n"),
+        note: JSON.stringify({
+          coreMethod: "先列出大众默认判断，再寻找能够推翻判断的反例",
+          applicableScenarios: ["知识口播"],
+          aiUsage: "寻找观点中可以被真实反例挑战的部分",
+        }),
+        contentDirection: ["知识口播"],
+        sourcePlatform: "文章",
+        sourceName: "后写入的选题笔记",
+      }),
+    ]));
+
+    await user.click(view.getAllByRole("button", { name: /写入通用知识库/ })[0]!);
+
+    await waitFor(() => assert.ok(
+      view.getByRole("alert").textContent?.includes("发现新的相似内容，请重新确认"),
+    ));
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 1);
+    assert.ok(view.getByText("部分相似"));
+
+    await user.click(view.getByRole("button", { name: "继续入库「反常识选题法」" }));
+    await user.click(view.getAllByRole("button", { name: /写入通用知识库/ })[0]!);
+    await waitFor(() => assert.ok(view.getByText("成功写入 1 条知识")));
+
+    const savedEntries = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as Array<{
+      id?: string;
+      title?: string;
+      note?: string;
+    }>;
+    const saved = savedEntries.find(entry => entry.title === "反常识选题法");
+    assert.ok(saved?.note);
+    const note = JSON.parse(saved.note) as {
+      intakePrecheck?: {
+        version?: number;
+        comparisonScope?: string;
+        decision?: string;
+        checkedAt?: string;
+        confirmedAt?: string;
+        similarEntries?: Array<{ knowledgeId?: string; tier?: string }>;
+      };
+    };
+    assert.equal(note.intakePrecheck?.version, 1);
+    assert.equal(note.intakePrecheck?.comparisonScope, "full_library");
+    assert.equal(note.intakePrecheck?.decision, "confirmed_continue");
+    assert.ok(note.intakePrecheck?.checkedAt);
+    assert.ok(note.intakePrecheck?.confirmedAt);
+    assert.deepEqual(note.intakePrecheck?.similarEntries?.map(entry => ({
+      knowledgeId: entry.knowledgeId,
+      tier: entry.tier,
+    })), [{ knowledgeId: "late-partial", tier: "partial" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("AI保存等待写锁时用户改为暂不入库会让旧保存请求失效", async () => {
+  const { act, render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  const originalLocks = Object.getOwnPropertyDescriptor(navigator, "locks");
+  let releaseLock!: () => void;
+  let reportLockStarted!: () => void;
+  const lockStarted = new Promise<void>(resolve => {
+    reportLockStarted = resolve;
+  });
+  const lockGate = new Promise<void>(resolve => {
+    releaseLock = resolve;
+  });
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      request<T>(_name: string, operation: () => T | Promise<T>): Promise<T> {
+        reportLockStarted();
+        return lockGate.then(operation);
+      },
+    },
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    mode: "global",
+    items: [buildIntakeResponseItem("等待锁的选题法")],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    await user.type(view.getByPlaceholderText(/粘贴逐字稿/), "一份用于验证等待写锁期间撤销决定的方法资料");
+    await user.click(view.getByRole("button", { name: "AI提炼方法" }));
+    await waitFor(() => assert.ok(view.getByText("全库暂未发现相似内容")));
+    await user.click(view.getByRole("button", { name: "继续入库「等待锁的选题法」" }));
+    await user.click(view.getAllByRole("button", { name: /写入通用知识库/ })[0]!);
+    await lockStarted;
+
+    await user.click(view.getByRole("button", { name: "暂不入库「等待锁的选题法」" }));
+    await act(async () => {
+      releaseLock();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    assert.equal(
+      view.getByRole("button", { name: "暂不入库「等待锁的选题法」" }).getAttribute("aria-pressed"),
+      "true",
+    );
+    assert.equal(view.queryByRole("alert"), null);
+    assert.equal(view.queryByText(/成功写入/), null);
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 0);
+  } finally {
+    releaseLock();
+    globalThis.fetch = originalFetch;
+    if (originalLocks) Object.defineProperty(navigator, "locks", originalLocks);
+    else Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  }
+});
+
+test("AI保存等待写锁时重新输入会取消旧请求且不污染新界面", async () => {
+  const { render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  const originalLocks = Object.getOwnPropertyDescriptor(navigator, "locks");
+  let releaseLock!: () => void;
+  let reportLockStarted!: () => void;
+  const lockStarted = new Promise<void>(resolve => {
+    reportLockStarted = resolve;
+  });
+  const lockGate = new Promise<void>(resolve => {
+    releaseLock = resolve;
+  });
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      request<T>(_name: string, operation: () => T | Promise<T>): Promise<T> {
+        reportLockStarted();
+        return lockGate.then(operation);
+      },
+    },
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    mode: "global",
+    items: [buildIntakeResponseItem("等待锁后重置的选题法")],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const view = render(
+      <IPProvider>
+        <KnowledgeIntakePage />
+      </IPProvider>,
+    );
+    const user = userEvent.setup({ document });
+    await user.type(view.getByPlaceholderText(/粘贴逐字稿/), "一份用于验证重新输入取消旧保存的方法资料");
+    await user.click(view.getByRole("button", { name: "AI提炼方法" }));
+    await waitFor(() => assert.ok(view.getByText("全库暂未发现相似内容")));
+    await user.click(view.getByRole("button", { name: "继续入库「等待锁后重置的选题法」" }));
+    await user.click(view.getAllByRole("button", { name: /写入通用知识库/ })[0]!);
+    await lockStarted;
+
+    await user.click(view.getAllByRole("button", { name: "重新输入" })[0]!);
+    releaseLock();
+
+    await waitFor(() => assert.ok(view.getByPlaceholderText(/粘贴逐字稿/)));
+    assert.equal(view.queryByText(/成功写入/), null);
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]").length, 0);
+  } finally {
+    releaseLock();
+    globalThis.fetch = originalFetch;
+    if (originalLocks) Object.defineProperty(navigator, "locks", originalLocks);
+    else Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
   }
 });
 

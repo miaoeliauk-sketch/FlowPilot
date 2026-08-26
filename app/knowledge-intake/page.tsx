@@ -1,11 +1,11 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useIP } from "@/lib/ip-context";
 import {
   addKnowledgeEntry,
   getKnowledgeEntriesForFullLibraryComparison,
 } from "@/lib/ip-store";
-import type { KnowledgeCategory } from "@/lib/types";
+import type { KnowledgeCategory, KnowledgeEntry } from "@/lib/types";
 import { apiFetch } from "@/lib/api-fetch";
 import { parseXlsxFile } from "@/lib/xlsx-parser";
 import { IP_CATEGORIES, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
@@ -42,6 +42,13 @@ import {
   type PrepareReviewedMethodCardBatchInput,
   type PreparedReviewedMethodCardBatch,
 } from "@/lib/knowledge-reviewed-intake";
+import {
+  confirmAIExtractedKnowledgeAssessment,
+  isAIExtractedKnowledgeConfirmationValid,
+  prepareAIExtractedKnowledgeBatch,
+  saveAIExtractedKnowledgeBatch,
+  type AIExtractedKnowledgeConfirmation,
+} from "@/lib/knowledge-ai-intake";
 
 const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -75,6 +82,7 @@ interface IntakeItem {
   categoryOverride?: string;
   sourceSegments: KnowledgeMethodCardSource[];
   precheck: KnowledgeIntakePrecheckAssessment;
+  precheckConfirmation?: AIExtractedKnowledgeConfirmation;
 }
 
 interface SegmentRun {
@@ -430,6 +438,54 @@ function buildPrecheckCandidate(
   };
 }
 
+function buildAIExtractedKnowledgeEntry(
+  item: IntakeItem,
+  category: KnowledgeCategory,
+): Omit<KnowledgeEntry, "id" | "createdAt"> {
+  const triggerKeywords = [...(item.triggerKeywords ?? []), ...(item.similarPhrases ?? [])]
+    .map(keyword => keyword.trim())
+    .filter(Boolean);
+  const note = JSON.stringify({
+    originalCategory: item.category,
+    normalizedCategory: category,
+    methodCard: true,
+    coreMethod: item.coreMethod ?? "",
+    applicableScenarios: item.applicableScenarios ?? [],
+    triggerKeywords: item.triggerKeywords ?? [],
+    similarPhrases: item.similarPhrases ?? [],
+    aiUsage: item.aiUsage ?? "",
+    examples: item.examples ?? [],
+    unsuitableCases: item.unsuitableCases ?? [],
+    confidence: item.confidence,
+    reason: item.confidenceReason,
+    matchedRules: [...(item.tags ?? []), ...triggerKeywords],
+    needsReview: item.ingestRecommend === "待确认",
+    sourceSegments: item.sourceSegments,
+  });
+  return {
+    category,
+    title: item.title,
+    rawContent: buildMethodCardContent(item),
+    tags: item.tags ?? [],
+    keywords: triggerKeywords,
+    ipId: isIPKnowledgeCategory(category) ? item.ipId : null,
+    sourceTier: (["高", "中", "低"].includes(item.confidence)
+      ? item.confidence as "高" | "中" | "低"
+      : "低"),
+    sourceTierReason: item.aiUsage || item.confidenceReason,
+    contentDirection: item.applicableScenarios ?? [],
+    sourcePlatform: "智能入库助手",
+    sourceUrl: "",
+    note,
+    extractedAt: new Date().toISOString(),
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    dna: null,
+  };
+}
+
 interface KnowledgeIntakePageProps {
   searchParams?: {
     scope?: string;
@@ -458,6 +514,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [sourceType, setSourceType] = useState<"text" | "excel">("text");
   const [fileProcessing, setFileProcessing] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [savingAIIntake, setSavingAIIntake] = useState(false);
   const [items, setItems] = useState<IntakeItem[]>([]);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -467,6 +524,12 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   const [segmentProgress, setSegmentProgress] = useState<{ current: number; total: number; title: string } | null>(null);
   const [exactDuplicateCount, setExactDuplicateCount] = useState(0);
   const [resolvedSimilarGroupIds, setResolvedSimilarGroupIds] = useState<string[]>([]);
+  const aiSaveRevisionRef = useRef(0);
+
+  function invalidatePendingAIIntakeSave() {
+    aiSaveRevisionRef.current += 1;
+    setSavingAIIntake(false);
+  }
   const globalContentLength = rawContent.trim().length;
   const globalContentAboveRecommended = !isIPMode && globalContentLength > GLOBAL_KNOWLEDGE_INTAKE_MAX_CHARS;
   const globalSegmentation = useMemo(
@@ -525,17 +588,21 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
       ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
     });
     const assessmentsById = new Map(result.assessments.map(assessment => [assessment.candidateId, assessment]));
-    return mappedItems.map(item => ({
-      ...item,
-      precheck: assessmentsById.get(item.id) ?? {
+    return mappedItems.map(item => {
+      const precheck = assessmentsById.get(item.id) ?? {
         candidateId: item.id,
         quality: { status: "needs_manual_review", issues: [{
           code: "PRECHECK_UNAVAILABLE",
           message: "入库前检查结果暂不可用，请人工检查",
         }] },
         similarEntries: [],
-      },
-    }));
+      } satisfies KnowledgeIntakePrecheckAssessment;
+      return {
+        ...item,
+        selected: item.selected && precheck.similarEntries.length === 0,
+        precheck,
+      };
+    });
   }
 
   function applyDuplicateClassification(cards: IntakeItem[]) {
@@ -576,6 +643,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   }
 
   async function handleInputFile(file: File) {
+    invalidatePendingAIIntakeSave();
     setError("");
     setFileName(file.name);
     if (file.name.match(/\.xlsx?$/i)) {
@@ -612,6 +680,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     if (!rawContent.trim()) { setError("请先粘贴原始资料"); return; }
     if (isIPMode && !activeIP) { setError("请先选择当前IP"); return; }
     if (globalContentTooLong) { setError(globalLengthWarning); return; }
+    invalidatePendingAIIntakeSave();
     setLoading(true); setError(""); setItems([]); setSaved(false);
     setExactDuplicateCount(0);
     setResolvedSimilarGroupIds([]);
@@ -626,6 +695,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
   async function handleSegmentAnalyze() {
     if (globalSegmentation?.status !== "ready") return;
+    invalidatePendingAIIntakeSave();
     const segments = globalSegmentation.segments;
     setLoading(true);
     setError("");
@@ -669,6 +739,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
   async function handleRetrySegment(segmentId: string) {
     const run = segmentRuns.find(candidate => candidate.segment.id === segmentId);
     if (!run || run.status === "processing" || retryInProgress) return;
+    invalidatePendingAIIntakeSave();
     const segmentIndex = segmentRuns.findIndex(candidate => candidate.segment.id === segmentId) + 1;
     setSegmentRuns(current => current.map(candidate => candidate.segment.id === segmentId
       ? { ...candidate, status: "processing", error: undefined }
@@ -695,6 +766,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
       setError("失败分段正在重试，请等待完成后再重新输入");
       return;
     }
+    invalidatePendingAIIntakeSave();
     setItems([]);
     setSegmentRuns([]);
     setSegmentProgress(null);
@@ -707,7 +779,8 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
     setError("");
   }
 
-  function handleSave() {
+  async function handleSave() {
+    if (savingAIIntake) return;
     if (segmentWorkflowBusy) {
       setError("分段内容仍在提炼，请等待全部处理完成后再入库");
       return;
@@ -726,6 +799,63 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
       return;
     }
     let count = 0;
+    if (!isIPMode) {
+      const saveRevision = aiSaveRevisionRef.current;
+      setSavingAIIntake(true);
+      try {
+        const prepared = prepareAIExtractedKnowledgeBatch({
+          items: toSave.map(item => {
+            const category = (item.categoryOverride || item.category) as KnowledgeCategory;
+            return {
+              candidate: buildPrecheckCandidate(item, false, rawContent),
+              entry: buildAIExtractedKnowledgeEntry(item, category),
+              confirmation: item.precheckConfirmation,
+            };
+          }),
+          ipNamesById: Object.fromEntries(ips.map(ip => [ip.id, ip.name])),
+        });
+        const assessmentsById = new Map(
+          prepared.assessments.map(assessment => [assessment.candidateId, assessment]),
+        );
+        const confirmationRequiredIds = new Set(prepared.items.flatMap(item => {
+          const assessment = assessmentsById.get(item.candidate.id);
+          if (!assessment || assessment.similarEntries.length === 0) return [];
+          return isAIExtractedKnowledgeConfirmationValid(assessment, item.confirmation)
+            ? []
+            : [item.candidate.id];
+        }));
+        setItems(current => current.map(item => {
+          const assessment = assessmentsById.get(item.id);
+          if (!assessment) return item;
+          return confirmationRequiredIds.has(item.id)
+            ? {
+                ...item,
+                precheck: assessment,
+                selected: false,
+                precheckConfirmation: undefined,
+              }
+            : { ...item, precheck: assessment };
+        }));
+        if (confirmationRequiredIds.size > 0) {
+          setError("保存前重新检查发现新的相似内容，请重新确认后再保存");
+          return;
+        }
+        count = (await saveAIExtractedKnowledgeBatch(prepared, {
+          isStillCurrent: () => aiSaveRevisionRef.current === saveRevision,
+        })).length;
+      } catch (saveError) {
+        if (aiSaveRevisionRef.current !== saveRevision) return;
+        setError(saveError instanceof Error ? saveError.message : "入库前检查或保存失败，请重试");
+        return;
+      } finally {
+        if (aiSaveRevisionRef.current === saveRevision) setSavingAIIntake(false);
+      }
+      setSaveCount(count);
+      setSaved(true);
+      setError("");
+      return;
+    }
+
     for (const it of toSave) {
       const cat = (it.categoryOverride || it.category) as KnowledgeCategory;
       if (isIPMode) {
@@ -765,26 +895,6 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
         count++;
         continue;
       }
-      const triggerKeywords = [...(it.triggerKeywords ?? []), ...(it.similarPhrases ?? [])].map(t => t.trim()).filter(Boolean);
-      const ev = JSON.stringify({
-        originalCategory: it.category,
-        normalizedCategory: cat,
-        methodCard: true,
-        coreMethod: it.coreMethod ?? "",
-        applicableScenarios: it.applicableScenarios ?? [],
-        triggerKeywords: it.triggerKeywords ?? [],
-        similarPhrases: it.similarPhrases ?? [],
-        aiUsage: it.aiUsage ?? "",
-        examples: it.examples ?? [],
-        unsuitableCases: it.unsuitableCases ?? [],
-        confidence: it.confidence,
-        reason: it.confidenceReason,
-        matchedRules: [...(it.tags ?? []), ...triggerKeywords],
-        needsReview: it.ingestRecommend === "待确认",
-        sourceSegments: it.sourceSegments,
-      });
-      addKnowledgeEntry({ category: cat, title: it.title, rawContent: buildMethodCardContent(it), tags: it.tags ?? [], keywords: triggerKeywords, ipId: isIPKnowledgeCategory(cat) ? it.ipId : null, sourceTier: (["高","中","低"].includes(it.confidence) ? it.confidence as "高"|"中"|"低" : "低"), sourceTierReason: it.aiUsage || it.confidenceReason, contentDirection: it.applicableScenarios ?? [], sourcePlatform: "智能入库助手", sourceUrl: "", note: ev, extractedAt: new Date().toISOString(), metrics: null, viralEvaluation: null, usageRecords: [], status: "未使用", dna: null });
-      count++;
     }
     setSaveCount(count);
     setSaved(true);
@@ -800,12 +910,14 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
   function handleKeepSimilarCard(group: SimilarKnowledgeMethodCardGroup, cardId: string) {
     if (retryInProgress) return;
+    invalidatePendingAIIntakeSave();
     const groupCardIds = new Set(group.cardIds);
     setItems(current => current.filter(item => !groupCardIds.has(item.id) || item.id === cardId));
   }
 
   function handleMergeSimilarGroup(group: SimilarKnowledgeMethodCardGroup) {
     if (retryInProgress) return;
+    invalidatePendingAIIntakeSave();
     const groupCards = cardsForSimilarGroup(group);
     if (groupCards.length < 2) return;
     const merged = mergeKnowledgeMethodCards(groupCards);
@@ -820,6 +932,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
   function handleKeepAllSimilarCards(group: SimilarKnowledgeMethodCardGroup) {
     if (retryInProgress) return;
+    invalidatePendingAIIntakeSave();
     setResolvedSimilarGroupIds(current => current.includes(group.id) ? current : [...current, group.id]);
   }
 
@@ -843,9 +956,9 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
 
       {!isIPMode && (
         <div className="mb-4 flex gap-2" aria-label="入库模式">
-          <button type="button" aria-pressed={intakeMode === "ai"} onClick={() => setIntakeMode("ai")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">AI提炼方法卡</button>
-          <button type="button" aria-pressed={intakeMode === "exact"} onClick={() => setIntakeMode("exact")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">原文保真保存</button>
-          <button type="button" aria-pressed={intakeMode === "reviewed"} onClick={() => setIntakeMode("reviewed")} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">人工确认方法卡</button>
+          <button type="button" aria-pressed={intakeMode === "ai"} onClick={() => { invalidatePendingAIIntakeSave(); setIntakeMode("ai"); }} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">AI提炼方法卡</button>
+          <button type="button" aria-pressed={intakeMode === "exact"} onClick={() => { invalidatePendingAIIntakeSave(); setIntakeMode("exact"); }} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">原文保真保存</button>
+          <button type="button" aria-pressed={intakeMode === "reviewed"} onClick={() => { invalidatePendingAIIntakeSave(); setIntakeMode("reviewed"); }} className="rounded-[9px] border px-4 py-2 text-[12.5px] font-bold">人工确认方法卡</button>
         </div>
       )}
 
@@ -883,7 +996,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
               }} />
           </div>
           <label className="mb-2 block text-[13px] font-semibold text-[#555]">或粘贴原始资料</label>
-          <textarea value={rawContent} onChange={e => { setRawContent(e.target.value); setFileName(""); setSourceType("text"); setError(""); }}
+          <textarea value={rawContent} onChange={e => { invalidatePendingAIIntakeSave(); setRawContent(e.target.value); setFileName(""); setSourceType("text"); setError(""); }}
             placeholder={isIPMode
               ? "粘贴当前IP的逐字稿、文章、观点、经历或受众反馈…AI会理解完整内容，不会拆成方法卡。"
               : "粘贴逐字稿、文案、方法论笔记、评论洞察…AI会提炼成可复用的短视频方法知识。"}
@@ -1059,7 +1172,7 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
             <div className="flex gap-2">
               <button onClick={resetIntake} disabled={retryInProgress}
                 className="rounded-[10px] bg-[#F2F1ED] px-4 py-2 text-[12.5px] font-semibold text-[#666] disabled:opacity-40">重新输入</button>
-              <button onClick={handleSave} disabled={selectedCount === 0 || segmentWorkflowBusy || unresolvedSimilarGroups.length > 0}
+              <button onClick={handleSave} disabled={savingAIIntake || selectedCount === 0 || segmentWorkflowBusy || unresolvedSimilarGroups.length > 0}
                 className="rounded-[10px] px-4 py-2 text-[12.5px] font-bold disabled:opacity-40"
                 style={{ background: "#1C1C1B", color: "#fff" }}>
                 {isIPMode ? "写入当前IP知识库" : "写入通用知识库"}（{selectedCount} 条）
@@ -1087,14 +1200,18 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
                       <span className="text-[11.5px] text-[#888]">分类：</span>
                       <select value={effectiveCategory} disabled={retryInProgress}
-                        onChange={e => setItems(prev => prev.map((it,j) => j===i ? {
-                          ...it,
-                          categoryOverride: e.target.value,
-                          ipId: isIPKnowledgeCategory(e.target.value) && ips.some(ip => ip.id === it.ipId)
-                            ? it.ipId
-                            : null,
-                          selected: isIPKnowledgeCategory(e.target.value) ? false : it.selected,
-                        } : it))}
+                        onChange={e => {
+                          invalidatePendingAIIntakeSave();
+                          setItems(prev => prev.map((it,j) => j===i ? {
+                            ...it,
+                            categoryOverride: e.target.value,
+                            ipId: isIPKnowledgeCategory(e.target.value) && ips.some(ip => ip.id === it.ipId)
+                              ? it.ipId
+                              : null,
+                            selected: isIPKnowledgeCategory(e.target.value) ? false : it.selected,
+                            precheckConfirmation: undefined,
+                          } : it));
+                        }}
                         className="rounded-[6px] border border-[#E5E4DE] px-2 py-0.5 text-[11.5px] outline-none">
                         {availableCategories.map(c => <option key={c}>{c}</option>)}
                       </select>
@@ -1105,12 +1222,16 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                         <select
                           value={item.ipId ?? ""}
                           disabled={retryInProgress}
-                          onChange={e => setItems(prev => prev.map((it,j) => j===i ? {
-                            ...it,
-                            ipId: e.target.value || null,
-                            ipMatchStatus: e.target.value ? "matched" : "uncertain",
-                            selected: e.target.value ? it.selected : false,
-                          } : it))}
+                          onChange={e => {
+                            invalidatePendingAIIntakeSave();
+                            setItems(prev => prev.map((it,j) => j===i ? {
+                              ...it,
+                              ipId: e.target.value || null,
+                              ipMatchStatus: e.target.value ? "matched" : "uncertain",
+                              selected: e.target.value ? it.selected : false,
+                              precheckConfirmation: undefined,
+                            } : it));
+                          }}
                           className="rounded-[6px] border border-[#E5E4DE] px-2 py-0.5 text-[11.5px] outline-none"
                         >
                           <option value="">请选择所属IP</option>
@@ -1140,8 +1261,15 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                   <button
                     type="button"
                     aria-pressed={item.selected}
-                    onClick={() => setItems(previous => previous.map((candidate, index) =>
-                      index === i ? { ...candidate, selected: true } : candidate))}
+                    onClick={() => {
+                      invalidatePendingAIIntakeSave();
+                      setItems(previous => previous.map((candidate, index) =>
+                        index === i ? {
+                          ...candidate,
+                          selected: true,
+                          precheckConfirmation: confirmAIExtractedKnowledgeAssessment(candidate.precheck),
+                        } : candidate));
+                    }}
                     disabled={retryInProgress}
                     className="rounded-[8px] border px-3 py-1.5 text-[11.5px] font-bold disabled:opacity-40"
                     style={item.selected
@@ -1153,8 +1281,15 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
                   <button
                     type="button"
                     aria-pressed={!item.selected}
-                    onClick={() => setItems(previous => previous.map((candidate, index) =>
-                      index === i ? { ...candidate, selected: false } : candidate))}
+                    onClick={() => {
+                      invalidatePendingAIIntakeSave();
+                      setItems(previous => previous.map((candidate, index) =>
+                        index === i ? {
+                          ...candidate,
+                          selected: false,
+                          precheckConfirmation: undefined,
+                        } : candidate));
+                    }}
                     disabled={retryInProgress}
                     className="rounded-[8px] border px-3 py-1.5 text-[11.5px] font-semibold disabled:opacity-40"
                     style={!item.selected
@@ -1171,13 +1306,13 @@ export default function KnowledgeIntakePage({ searchParams }: KnowledgeIntakePag
           <div className="mt-4 flex justify-end gap-2">
             <button onClick={resetIntake} disabled={retryInProgress}
               className="rounded-[10px] bg-[#F2F1ED] px-5 py-2.5 text-[13px] font-semibold text-[#666] disabled:opacity-40">重新输入</button>
-            <button onClick={handleSave} disabled={selectedCount === 0 || segmentWorkflowBusy || unresolvedSimilarGroups.length > 0}
+            <button onClick={handleSave} disabled={savingAIIntake || selectedCount === 0 || segmentWorkflowBusy || unresolvedSimilarGroups.length > 0}
               className="rounded-[10px] px-5 py-2.5 text-[13px] font-bold disabled:opacity-40"
               style={{ background: "#1C1C1B", color: "#fff" }}>
               {isIPMode ? "写入当前IP知识库" : "写入通用知识库"}（{selectedCount} 条）
             </button>
           </div>
-          {error && <div className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</div>}
+          {error && <div role="alert" className="mt-3 rounded-[8px] bg-[#FCEBEB] px-3 py-2 text-[12.5px] text-[#A32D2D]">{error}</div>}
         </>
       )}
 

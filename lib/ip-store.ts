@@ -108,24 +108,50 @@ function writeJSON<T>(key: string, value: T) {
 }
 
 interface KnowledgeLibraryWriteLock {
-  request<T>(name: string, operation: () => T): Promise<T>;
+  request<T>(name: string, operation: () => T | Promise<T>): Promise<T>;
 }
 
-function getKnowledgeLibraryWriteLock(): KnowledgeLibraryWriteLock | null {
+function getKnowledgeLibraryWriteLock(unsupportedMessage: string): KnowledgeLibraryWriteLock | null {
   if (typeof window === "undefined") return null;
   const locks = typeof navigator === "undefined"
     ? undefined
     : (navigator as Navigator & { locks?: KnowledgeLibraryWriteLock }).locks;
   if (!locks) {
-    throw new Error("当前浏览器不支持安全删除知识，请升级浏览器后重试");
+    throw new Error(unsupportedMessage);
   }
   return locks;
 }
 
-async function runWithKnowledgeLibraryWriteLock<T>(operation: () => T): Promise<T> {
-  const lock = getKnowledgeLibraryWriteLock();
-  if (!lock) return operation();
+async function runWithKnowledgeLibraryWriteLock<T>(
+  operation: () => T | Promise<T>,
+  unsupportedMessage = "当前浏览器不支持安全删除知识，请升级浏览器后重试",
+): Promise<T> {
+  const lock = getKnowledgeLibraryWriteLock(unsupportedMessage);
+  if (!lock) return await operation();
   return lock.request(KNOWLEDGE_LIBRARY_WRITE_LOCK_NAME, operation);
+}
+
+const knowledgeWriteTransactionMarker = Symbol("knowledge-library-write-transaction");
+const activeKnowledgeWriteTransactions = new WeakSet<object>();
+
+export interface KnowledgeLibraryWriteTransaction {
+  readonly [knowledgeWriteTransactionMarker]: true;
+}
+
+export async function runKnowledgeLibraryWriteTransaction<T>(
+  operation: (transaction: KnowledgeLibraryWriteTransaction) => T | Promise<T>,
+): Promise<T> {
+  return runWithKnowledgeLibraryWriteLock(async () => {
+    const transaction = Object.freeze({
+      [knowledgeWriteTransactionMarker]: true as const,
+    });
+    activeKnowledgeWriteTransactions.add(transaction);
+    try {
+      return await operation(transaction);
+    } finally {
+      activeKnowledgeWriteTransactions.delete(transaction);
+    }
+  }, "当前浏览器无法安全写入知识库，请升级浏览器后重试");
 }
 
 function writeJSONStrict<T>(key: string, value: T, failureMessage: string): void {
@@ -925,6 +951,187 @@ export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt"
   };
   writeJSON(KEY_KNOWLEDGE_ENTRIES, [...all, entry]);
   return entry;
+}
+
+export interface AIExtractedKnowledgeStrictStorageItem {
+  idempotencyKey: string;
+  entry: Omit<KnowledgeEntry, "id" | "createdAt">;
+}
+
+export type AIExtractedKnowledgePersistenceState = "none" | "all" | "partial";
+
+export function getAIExtractedKnowledgePersistenceState(
+  transaction: KnowledgeLibraryWriteTransaction,
+  items: readonly AIExtractedKnowledgeStrictStorageItem[],
+): AIExtractedKnowledgePersistenceState {
+  if (
+    transaction[knowledgeWriteTransactionMarker] !== true
+    || !activeKnowledgeWriteTransactions.has(transaction)
+  ) {
+    throw new Error("AI提炼方法卡必须在知识库写锁内核对");
+  }
+  const all = readKnowledgeEntriesStrict();
+  let persistedCount = 0;
+  for (const item of items) {
+    const matches = all.filter(entry => readAIIntakeIdempotencyKey(entry) === item.idempotencyKey);
+    if (matches.length > 1) {
+      throw new Error("历史知识存在重复的AI入库凭证，已拒绝保存，请先修复异常数据");
+    }
+    if (matches.length === 1) persistedCount += 1;
+  }
+  if (persistedCount === 0) return "none";
+  if (persistedCount === items.length) return "all";
+  return "partial";
+}
+
+function readAIIntakeIdempotencyKey(entry: Pick<KnowledgeEntry, "note">): string | null {
+  try {
+    const note = JSON.parse(entry.note) as unknown;
+    if (!note || typeof note !== "object" || Array.isArray(note)) return null;
+    const precheck = (note as Record<string, unknown>).intakePrecheck;
+    if (!precheck || typeof precheck !== "object" || Array.isArray(precheck)) return null;
+    const key = (precheck as Record<string, unknown>).idempotencyKey;
+    return typeof key === "string" && key.trim() ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+function serializeAIIntakeEntryContent(
+  entry: KnowledgeEntry | Omit<KnowledgeEntry, "id" | "createdAt">,
+): string {
+  const record = entry as Partial<KnowledgeEntry>;
+  const {
+    id: _id,
+    createdAt: _createdAt,
+    extractedAt: _extractedAt,
+    ...content
+  } = record;
+  let normalizedNote = content.note;
+  try {
+    const parsed = JSON.parse(content.note ?? "") as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const note = { ...(parsed as Record<string, unknown>) };
+      const precheck = note.intakePrecheck;
+      if (precheck && typeof precheck === "object" && !Array.isArray(precheck)) {
+        const stablePrecheck = { ...(precheck as Record<string, unknown>) };
+        delete stablePrecheck.initialCheckedAt;
+        delete stablePrecheck.checkedAt;
+        delete stablePrecheck.confirmedAt;
+        note.intakePrecheck = stablePrecheck;
+      }
+      normalizedNote = JSON.stringify(note);
+    }
+  } catch {
+    // 非JSON备注保持原样参与幂等比较。
+  }
+  const normalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalize);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, normalize(nested)]),
+    );
+  };
+  return JSON.stringify(normalize({ ...content, note: normalizedNote }));
+}
+
+// AI提炼方法卡专用：整批只写一次，严格回读；失败时恢复写入前快照。
+export function saveAIExtractedKnowledgeEntriesStrict(
+  transaction: KnowledgeLibraryWriteTransaction,
+  items: readonly AIExtractedKnowledgeStrictStorageItem[],
+): KnowledgeEntry[] {
+  if (
+    transaction[knowledgeWriteTransactionMarker] !== true
+    || !activeKnowledgeWriteTransactions.has(transaction)
+  ) {
+    throw new Error("AI提炼方法卡必须在知识库写锁内保存");
+  }
+  if (items.length === 0) throw new Error("至少需要一张AI提炼方法卡");
+  if (typeof window === "undefined") throw new Error("AI提炼方法卡保存失败，请稍后重试");
+  if (items.some(item => !item.idempotencyKey.trim())) {
+    throw new Error("AI提炼方法卡缺少幂等凭证，已拒绝保存");
+  }
+  if (new Set(items.map(item => item.idempotencyKey)).size !== items.length) {
+    throw new Error("同一批次存在重复的AI提炼方法卡，已拒绝保存");
+  }
+  if (items.some(item => readAIIntakeIdempotencyKey(item.entry) !== item.idempotencyKey)) {
+    throw new Error("存储参数与审计记录的幂等凭证不一致，已拒绝保存");
+  }
+  if (items.some(item => item.entry.sourceAnalysis?.parserVersion === 2)) {
+    throw new Error("V2认知只能通过最终凭证验证入口保存");
+  }
+
+  const originalRaw = localStorage.getItem(KEY_KNOWLEDGE_ENTRIES);
+  const all = readKnowledgeEntriesStrict();
+  const existingByKey = new Map<string, KnowledgeEntry[]>();
+  for (const entry of all) {
+    const key = readAIIntakeIdempotencyKey(entry);
+    if (!key) continue;
+    existingByKey.set(key, [...(existingByKey.get(key) ?? []), migrateKnowledgeEntry(entry)]);
+  }
+
+  const createdAt = new Date().toISOString();
+  const additions: KnowledgeEntry[] = [];
+  const resolved = items.map(item => {
+    const existing = existingByKey.get(item.idempotencyKey) ?? [];
+    if (existing.length > 1) {
+      throw new Error("历史知识存在重复的AI入库凭证，已拒绝保存，请先修复异常数据");
+    }
+    if (existing.length === 1) {
+      const saved = existing[0]!;
+      const normalizedInput = migrateKnowledgeEntry({
+        ...item.entry,
+        executionTemplate: null,
+        id: saved.id,
+        createdAt: saved.createdAt,
+      });
+      if (serializeAIIntakeEntryContent(saved) !== serializeAIIntakeEntryContent(normalizedInput)) {
+        throw new Error("AI入库凭证已存在，但保存内容不一致，已拒绝覆盖");
+      }
+      return saved;
+    }
+    let id = genId();
+    while (all.some(entry => entry.id === id) || additions.some(entry => entry.id === id)) {
+      id = genId();
+    }
+    const candidate = migrateKnowledgeEntry({
+      ...item.entry,
+      executionTemplate: null,
+      id,
+      createdAt,
+    });
+    additions.push(candidate);
+    return candidate;
+  });
+  if (additions.length === 0) return resolved;
+
+  try {
+    writeKnowledgeEntriesStrict(
+      [...all, ...additions],
+      "AI提炼方法卡保存失败，请稍后重试",
+    );
+    const persisted = readKnowledgeEntriesStrict().map(migrateKnowledgeEntry);
+    return resolved.map(candidate => {
+      const matches = persisted.filter(entry => entry.id === candidate.id);
+      if (
+        matches.length !== 1
+        || serializeAIIntakeEntryContent(matches[0]!) !== serializeAIIntakeEntryContent(candidate)
+      ) {
+        throw new Error("AI提炼方法卡写入后回读校验失败");
+      }
+      return matches[0]!;
+    });
+  } catch {
+    try {
+      restoreRawStorageValueStrict(KEY_KNOWLEDGE_ENTRIES, originalRaw);
+    } catch {
+      throw new Error("AI提炼方法卡保存失败，且自动恢复失败；请立即停止重试并恢复备份");
+    }
+    throw new Error("AI提炼方法卡保存失败，未保存任何内容，请重试");
+  }
 }
 
 export function addKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">): KnowledgeEntry {
