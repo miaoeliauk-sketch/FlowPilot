@@ -72,6 +72,23 @@ afterEach(async () => {
 
 after(() => restoreBrowser?.());
 
+test("携带IP编号进入资料导入页时自动对齐对应IP", async () => {
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ipB.id));
+  window.history.replaceState({}, "", `/knowledge-intake/original?ipId=${encodeURIComponent(ipA.id)}`);
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const { IPProvider } = await import("./ip-context");
+    const OriginalSourcePage = (await import("../app/knowledge-intake/original/page")).default;
+    const view = render(<IPProvider><OriginalSourcePage /></IPProvider>);
+
+    assert.ok(await view.findByText(ipA.name, { selector: "b" }));
+    assert.equal(JSON.parse(localStorage.getItem("ipwr:activeIpId") ?? "null"), ipA.id);
+  } finally {
+    window.history.replaceState({}, "", "/knowledge-intake/original");
+  }
+});
+
 test("IP A发起的旧分析在切换到IP B后不会展示也不能保存", async () => {
   const originalContent = "老师原话：真正重要的是判断力。";
   let resolveAnalysis: ((response: Response) => void) | null = null;
@@ -102,6 +119,7 @@ test("IP A发起的旧分析在切换到IP B后不会展示也不能保存", asy
   );
   const user = userEvent.setup({ document });
 
+  await user.type(view.getByPlaceholderText("例如：持续输出的真正含义"), "判断力");
   await user.type(view.getByPlaceholderText(/粘贴老师的课程/), originalContent);
   await user.click(view.getByRole("button", { name: "开始理解内容" }));
   await waitFor(() => assert.equal(typeof resolveAnalysis, "function"));

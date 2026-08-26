@@ -20,6 +20,19 @@ import { saveTopicBoardEvaluation, TopicBoardOwnershipError } from "@/lib/topic-
 import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 import { getLearningEligibleVideoReviews } from "@/lib/review-traceability";
+import {
+  BoundaryAuditPanel,
+  type BoundaryAuditStatus,
+} from "@/components/ip-boundary/BoundaryAuditPanel";
+import type { BoundaryReport } from "@/lib/ip-boundary-engine";
+import {
+  BoundaryAuditTimeoutError,
+  buildBoundarySourceBundle,
+  decideBoundaryAction,
+  fetchBoundaryCheckWithTimeout,
+  parseBoundaryCheckUIResponse,
+  type BoundaryEvidenceNode,
+} from "@/lib/ip-boundary-ui";
 
 // ── Constants ──
 const PHASES = [
@@ -163,11 +176,11 @@ function getBoardKnowledgeEntries(activeIP: IPProfile | null): KnowledgeEntry[] 
   });
 }
 
-function collectKnowledgeContext(topic: string, activeIP: IPProfile | null): {
+function collectKnowledgeContext(topic: string, activeIP: IPProfile | null, entries = getBoardKnowledgeEntries(activeIP)): {
   id: string; title: string; category: string; reason: string; relevanceTier: string; relevanceReason: string; matchScore: number;
   matchedFields: string[]; matchedKeywords: string[]; methodMatches: string[]; methodAdvice: string;
 }[] {
-  return searchKnowledgeEntries(topic, getBoardKnowledgeEntries(activeIP), { limit: 8, minScore: 2 }).results;
+  return searchKnowledgeEntries(topic, entries, { limit: 8, minScore: 2 }).results;
 }
 
 interface HistoricalEvidenceItem {
@@ -380,11 +393,15 @@ function TopicHistoryPanel({
   assets,
   onOpen,
   onStatusChange,
+  onGenerate,
+  isGenerateDisabled,
 }: {
   activeIPName: string | null;
   assets: TopicAsset[];
   onOpen: (asset: TopicAsset) => void;
   onStatusChange: (asset: TopicAsset, status: Exclude<TopicAssetStatus, "草稿" | "已评估">) => void;
+  onGenerate: (asset: TopicAsset) => void;
+  isGenerateDisabled: (asset: TopicAsset) => boolean;
 }) {
   return (
     <section aria-label="当前IP选题历史" className="mb-6 rounded-[20px] border border-[#E5E4DE] bg-white p-5">
@@ -418,13 +435,15 @@ function TopicHistoryPanel({
                 </div>
                 <div className="flex flex-wrap justify-end gap-1.5">
                   {(asset.status === "已评估" || asset.status === "已采用") && asset.boardResult && (
-                    <a
-                      href={`/script-factory?topicId=${encodeURIComponent(asset.id)}`}
+                    <button
+                      type="button"
+                      onClick={() => onGenerate(asset)}
+                      disabled={isGenerateDisabled(asset)}
                       aria-label={`用选题“${asset.title}”生成脚本`}
-                      className="rounded-full bg-[#1C1C1B] px-2.5 py-1 text-[11px] font-semibold text-white"
+                      className="rounded-full bg-[#1C1C1B] px-2.5 py-1 text-[11px] font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#B8B8B4]"
                     >
                       生成脚本
-                    </a>
+                    </button>
                   )}
                   {asset.boardResult && (
                     <button type="button" aria-label={`查看选题“${asset.title}”完整评估`} onClick={() => onOpen(asset)} className="rounded-full bg-[#F1EFE8] px-2.5 py-1 text-[11px] font-semibold text-[#555]">查看评估</button>
@@ -460,27 +479,50 @@ export default function TopicBoardPage() {
   const [topicHistory, setTopicHistory] = useState<TopicAsset[]>([]);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
+  const boundaryRequestSeqRef = useRef(0);
+  const [boundaryStatus, setBoundaryStatus] = useState<BoundaryAuditStatus>("idle");
+  const [boundaryReport, setBoundaryReport] = useState<BoundaryReport | null>(null);
+  const [boundaryEvidence, setBoundaryEvidence] = useState<BoundaryEvidenceNode[]>([]);
+  const [boundaryMessage, setBoundaryMessage] = useState<string | null>(null);
+  const [boundaryTopicAssetId, setBoundaryTopicAssetId] = useState<string | null>(null);
+  const [pendingGenerateAsset, setPendingGenerateAsset] = useState<TopicAsset | null>(null);
 
   // 参考知识：选题输入停止变化800ms后自动检索，不是实时每个按键都查
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
+  const [knowledgeDataError, setKnowledgeDataError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knowledgeRequestSeqRef = useRef(0);
 
   useEffect(() => {
+    boundaryRequestSeqRef.current += 1;
     activeIPIdRef.current = activeIP?.id ?? null;
     setTopicHistory(activeIP ? getTopicAssets(activeIP.id) : []);
     setResult(null);
     setSaveNotice(null);
+    setBoundaryStatus("idle");
+    setBoundaryReport(null);
+    setBoundaryEvidence([]);
+    setBoundaryMessage(null);
+    setBoundaryTopicAssetId(null);
+    setPendingGenerateAsset(null);
   }, [activeIP?.id]);
 
   useEffect(() => {
+    boundaryRequestSeqRef.current += 1;
+    setBoundaryStatus("idle");
+    setBoundaryReport(null);
+    setBoundaryEvidence([]);
+    setBoundaryMessage(null);
+    setBoundaryTopicAssetId(null);
+    setPendingGenerateAsset(null);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const requestSeq = knowledgeRequestSeqRef.current + 1;
     knowledgeRequestSeqRef.current = requestSeq;
     const requestIP = activeIP;
     setKnowledgeRefs([]);
+    setKnowledgeDataError(null);
     if (topic.trim().length < 5) {
       setKnowledgeLoading(false);
       setKnowledgeSearched(false);
@@ -494,6 +536,99 @@ export default function TopicBoardPage() {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topic, activeIP?.id]);
+
+  function boundarySourceBundle(ipId: string) {
+    return buildBoundarySourceBundle(getKnowledgeEntries("IP原始内容"), ipId);
+  }
+
+  async function runBoundaryAudit(asset: TopicAsset, requestIP: IPProfile) {
+    const requestSeq = boundaryRequestSeqRef.current + 1;
+    boundaryRequestSeqRef.current = requestSeq;
+    setBoundaryTopicAssetId(asset.id);
+    setBoundaryReport(null);
+    setBoundaryEvidence([]);
+    setBoundaryMessage(null);
+    setPendingGenerateAsset(null);
+
+    let bundle: ReturnType<typeof boundarySourceBundle>;
+    try {
+      bundle = boundarySourceBundle(requestIP.id);
+    } catch {
+      setBoundaryStatus("unavailable");
+      setBoundaryMessage("认知库读取失败，本次没有获得可信的边界结论。请先检查知识库数据。");
+      return;
+    }
+    if (bundle.sources.length === 0) {
+      if (bundle.unregisteredV1) {
+        setBoundaryStatus("upgrade_required");
+        setBoundaryMessage("当前IP的历史认知尚未完成合规登记，已停止进入脚本生成。");
+      } else if (bundle.registeredV1) {
+        setBoundaryStatus("legacy");
+      } else {
+        setBoundaryStatus("unavailable");
+        setBoundaryMessage("当前IP还没有可用于边界审计的已确认V2认知。");
+      }
+      return;
+    }
+
+    setBoundaryStatus("checking");
+    try {
+      const response = await fetchBoundaryCheckWithTimeout({
+        fetcher: apiFetch,
+        url: "/api/ip-boundary/check",
+        init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId: requestIP.id,
+          topic: asset.title,
+          sources: bundle.sources,
+          includeEvidence: true,
+        }),
+        },
+      });
+      const raw: unknown = await response.json();
+      if (boundaryRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== requestIP.id) return;
+      if (!response.ok) {
+        const apiMessage = typeof raw === "object" && raw !== null && "error" in raw && typeof raw.error === "string"
+          ? raw.error
+          : "认知边界审计失败，请重试。";
+        throw new Error(apiMessage);
+      }
+      const parsed = parseBoundaryCheckUIResponse(raw, bundle.nodeIds);
+      if (!parsed) throw new Error("认知边界审计返回的数据不完整，已停止生成。");
+      setBoundaryReport(parsed.report);
+      setBoundaryEvidence(parsed.evidenceNodes);
+      setBoundaryStatus("ready");
+    } catch (auditError) {
+      if (boundaryRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== requestIP.id) return;
+      if (auditError instanceof BoundaryAuditTimeoutError) {
+        setBoundaryStatus("timeout");
+        setBoundaryMessage("本次审计超过15秒，生成入口继续保持锁定。请重新审计。");
+        return;
+      }
+      setBoundaryStatus("unavailable");
+      setBoundaryMessage(auditError instanceof Error ? auditError.message : "认知边界审计失败，请重试。");
+    }
+  }
+
+  function retryBoundaryAudit() {
+    if (!activeIP || !boundaryTopicAssetId) return;
+    const asset = getTopicAssets(activeIP.id).find(item => item.id === boundaryTopicAssetId);
+    if (asset?.boardResult) void runBoundaryAudit(asset, activeIP);
+  }
+
+  function retryKnowledgeData() {
+    const requestSeq = knowledgeRequestSeqRef.current + 1;
+    knowledgeRequestSeqRef.current = requestSeq;
+    setKnowledgeDataError(null);
+    setKnowledgeLoading(true);
+    setKnowledgeSearched(true);
+    void searchKnowledge(topic, activeIP, requestSeq);
+    if (!activeIP || !boundaryTopicAssetId) return;
+    const asset = getTopicAssets(activeIP.id).find(item => item.id === boundaryTopicAssetId);
+    if (asset?.boardResult) void runBoundaryAudit(asset, activeIP);
+  }
 
   function refsFromMatches(matches: KnowledgeSearchMatch[], allEntries: KnowledgeEntry[]): KnowledgeRef[] {
     const entryMap = new Map(allEntries.map(e => [e.id, e]));
@@ -523,7 +658,18 @@ export default function TopicBoardPage() {
       knowledgeRequestSeqRef.current === requestSeq &&
       activeIPIdRef.current === (requestIP?.id ?? null)
     );
-    const allEntries = getBoardKnowledgeEntries(requestIP);
+    let allEntries: KnowledgeEntry[];
+    try {
+      allEntries = getBoardKnowledgeEntries(requestIP);
+      if (isCurrentRequest()) setKnowledgeDataError(null);
+    } catch {
+      if (!isCurrentRequest()) return;
+      setKnowledgeDataError("部分认知数据损坏，系统已停止检索和边界审计。");
+      setKnowledgeRefs([]);
+      setKnowledgeLoading(false);
+      setKnowledgeSearched(true);
+      return;
+    }
     if (allEntries.length === 0) {
       if (!isCurrentRequest()) return;
       setKnowledgeLoading(false);
@@ -570,6 +716,16 @@ export default function TopicBoardPage() {
     const requestIP = activeIP;
     if (!requestIP) { setError("请先选择当前操盘IP"); return; }
     const requestedTopic = topic.trim();
+    let boardKnowledgeEntries: KnowledgeEntry[];
+    try {
+      boardKnowledgeEntries = getBoardKnowledgeEntries(requestIP);
+      setKnowledgeDataError(null);
+    } catch {
+      setKnowledgeDataError("部分认知数据损坏，系统已停止检索和边界审计。");
+      setKnowledgeLoading(false);
+      setError("认知底座加载异常，请先重新加载。");
+      return;
+    }
     setError(null); setSaveNotice(null); setResult(null); setLoading(true); setPhase(1);
     setExpanded({});
 
@@ -581,10 +737,9 @@ export default function TopicBoardPage() {
 
     try {
       const personas = getLatestPersonas(requestIP.id);
-      const stableKnowledgeContext = collectKnowledgeContext(requestedTopic, requestIP);
+      const stableKnowledgeContext = collectKnowledgeContext(requestedTopic, requestIP, boardKnowledgeEntries);
       const historicalData = collectHistoricalData(requestedTopic, requestIP);
-      const allEntries = getBoardKnowledgeEntries(requestIP);
-      const stableRefs = refsFromMatches(stableKnowledgeContext as KnowledgeSearchMatch[], allEntries);
+      const stableRefs = refsFromMatches(stableKnowledgeContext as KnowledgeSearchMatch[], boardKnowledgeEntries);
       setKnowledgeRefs(stableRefs);
       setKnowledgeSearched(true);
       const res = await apiFetch("/api/topic-review", {
@@ -625,7 +780,10 @@ export default function TopicBoardPage() {
           ? `评估已保存到${requestIP.name}的选题库。`
           : `评估已保存到${requestIP.name}的选题库；当前IP已切换，可切回查看。`,
       );
-      if (currentIPId === requestIP.id) setResult(saved.boardResult);
+      if (currentIPId === requestIP.id) {
+        setResult(saved.boardResult);
+        void runBoundaryAudit(saved, requestIP);
+      }
     } catch (err) {
       if (err instanceof TopicBoardOwnershipError) {
         setError("评估结果IP与发起请求时的IP不一致，已阻止保存，请重试。");
@@ -644,6 +802,41 @@ export default function TopicBoardPage() {
     }
     setError(null);
     setResult(asset.boardResult);
+    if (activeIP && asset.ipId === activeIP.id) void runBoundaryAudit(asset, activeIP);
+  }
+
+  function navigateToScriptFactory(asset: TopicAsset) {
+    window.location.href = `/script-factory?topicId=${encodeURIComponent(asset.id)}`;
+  }
+
+  function handleGenerateFromHistory(asset: TopicAsset) {
+    if (!activeIP || asset.ipId !== activeIP.id || !asset.boardResult) return;
+    if (asset.boardResult.decisionStatus === "blocked" || asset.boardResult.safetyVeto) return;
+    if (boundaryTopicAssetId !== asset.id) {
+      setResult(asset.boardResult);
+      void runBoundaryAudit(asset, activeIP);
+      return;
+    }
+    if (boundaryStatus === "legacy") {
+      navigateToScriptFactory(asset);
+      return;
+    }
+    if (boundaryStatus !== "ready" || !boundaryReport) return;
+    const action = decideBoundaryAction(boundaryReport);
+    if (action === "intercept") return;
+    if (action === "confirm") {
+      setPendingGenerateAsset(asset);
+      return;
+    }
+    navigateToScriptFactory(asset);
+  }
+
+  function isHistoryGenerateDisabled(asset: TopicAsset): boolean {
+    if (asset.boardResult?.decisionStatus === "blocked" || asset.boardResult?.safetyVeto) return true;
+    if (boundaryTopicAssetId !== asset.id) return false;
+    if (boundaryStatus === "legacy") return false;
+    if (boundaryStatus !== "ready" || !boundaryReport) return true;
+    return decideBoundaryAction(boundaryReport) === "intercept";
   }
 
   function changeHistoryStatus(
@@ -722,7 +915,20 @@ export default function TopicBoardPage() {
         assets={topicHistory}
         onOpen={openHistoryResult}
         onStatusChange={changeHistoryStatus}
+        onGenerate={handleGenerateFromHistory}
+        isGenerateDisabled={isHistoryGenerateDisabled}
       />
+
+      {knowledgeDataError && (
+        <div role="alert" className="mb-6 rounded-[14px] border border-[#E8C96A] bg-[#FFF8DC] px-5 py-4 text-[#755700]">
+          <div className="text-[14px] font-bold">认知底座加载异常</div>
+          <p className="mt-1 text-[12.5px] leading-5">{knowledgeDataError}原数据未被修改或删除。</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" onClick={retryKnowledgeData} className="rounded-[9px] bg-white px-3 py-2 text-[12px] font-semibold text-[#755700]">重新加载</button>
+            <a href={activeIP?.id ? `/knowledge-intake/original?ipId=${encodeURIComponent(activeIP.id)}` : "/knowledge-intake/original"} className="rounded-[9px] bg-[#1C1C1B] px-3 py-2 text-[12px] font-semibold text-white">去重新解析相关资料</a>
+          </div>
+        </div>
+      )}
 
       <KnowledgePanel loading={knowledgeLoading} refs={knowledgeRefs} searched={knowledgeSearched} />
 
@@ -741,6 +947,15 @@ export default function TopicBoardPage() {
 
       {!loading && result && (
         <div className="flex flex-col gap-8">
+
+          <BoundaryAuditPanel
+            status={boundaryStatus}
+            report={boundaryReport}
+            evidenceNodes={boundaryEvidence}
+            message={boundaryMessage}
+            activeIPId={activeIP?.id ?? null}
+            onRetry={boundaryStatus === "timeout" ? retryBoundaryAudit : undefined}
+          />
 
           {/* 安全合规官一票否决横幅 */}
           {isBlockedResult && (
@@ -1264,6 +1479,19 @@ export default function TopicBoardPage() {
           </>
           )}
 
+        </div>
+      )}
+
+      {pendingGenerateAsset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4" role="dialog" aria-label="认知覆盖不完整" aria-modal="true">
+          <div className="w-full max-w-md rounded-[18px] bg-white p-6 shadow-xl">
+            <h2 className="text-[18px] font-bold text-[#1C1C1B]">认知覆盖不完整</h2>
+            <p className="mt-2 text-[13px] leading-6 text-[#555]">当前选题只有部分认知支撑，AI可能会补充尚未被IP确认的细节。是否仍要继续？</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setPendingGenerateAsset(null)} className="rounded-[10px] border border-[#E5E4DE] px-4 py-2 text-[13px] font-semibold text-[#555]">取消</button>
+              <button type="button" onClick={() => navigateToScriptFactory(pendingGenerateAsset)} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[13px] font-semibold text-white">仍要生成脚本</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

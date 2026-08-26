@@ -80,7 +80,7 @@ function SimilarityResults({
 }
 
 export default function IPOriginalContentIntakePage() {
-  const { activeIP, ips } = useIP();
+  const { activeIP, ips, loading: ipLoading, switchIP } = useIP();
   const [title, setTitle] = useState("");
   const [sourceKind, setSourceKind] = useState<IPOriginalSourceKind>("直播逐字稿");
   const [sourceName, setSourceName] = useState("");
@@ -130,6 +130,17 @@ export default function IPOriginalContentIntakePage() {
     setSaveDecision(null);
     setError("");
   }, [activeIP?.id]);
+
+  useEffect(() => {
+    if (ipLoading || typeof window === "undefined") return;
+    const requestedIPId = new URLSearchParams(window.location.search).get("ipId")?.trim();
+    if (!requestedIPId || requestedIPId === activeIP?.id) return;
+    if (!ips.some(ip => ip.id === requestedIPId)) {
+      setError("链接中的IP不存在，已保持当前IP不变。");
+      return;
+    }
+    switchIP(requestedIPId);
+  }, [activeIP?.id, ipLoading, ips, switchIP]);
 
   function buildPrecheck(
     nextAnalysis: IPSourceAnalysisSnapshot,

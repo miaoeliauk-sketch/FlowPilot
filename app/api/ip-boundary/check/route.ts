@@ -22,6 +22,7 @@ import {
 } from "@/lib/ip-source-analysis-v2";
 import { StructuredDeepSeekError } from "@/lib/structured-deepseek";
 import { DeepSeekRequestPayloadTooLargeError } from "@/lib/deepseek";
+import type { BoundaryEvidenceNode } from "@/lib/ip-boundary-ui";
 
 const MAX_SOURCES = 50;
 
@@ -81,6 +82,7 @@ export async function POST(request: NextRequest) {
 
   const activeIPId = typeof body.activeIPId === "string" ? body.activeIPId.trim() : "";
   const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+  const includeEvidence = body.includeEvidence === true;
   if (!activeIPId || !topic || topic.length > 500
     || !Array.isArray(body.sources) || body.sources.length === 0 || body.sources.length > MAX_SOURCES) {
     return NextResponse.json({ error: "边界判断请求不完整或超出限制" }, { status: 400 });
@@ -135,7 +137,24 @@ export async function POST(request: NextRequest) {
       confirmedNodes,
       request.headers.get("X-DeepSeek-Key") || "",
     );
-    return NextResponse.json(report);
+    if (!includeEvidence) return NextResponse.json(report);
+
+    const nodeById = new Map(confirmedNodes.map(node => [node.id, node]));
+    const evidenceNodes: BoundaryEvidenceNode[] = [
+      ...report.matchedNodeIds.map(nodeId => ({ nodeId, relation: "matched" as const })),
+      ...report.conflictingNodeIds.map(nodeId => ({ nodeId, relation: "conflicting" as const })),
+    ].map(reference => {
+      const node = nodeById.get(reference.nodeId);
+      if (!node) throw new BoundaryResponseValidationError("边界判断结果引用了不存在的认知节点");
+      return {
+        ...reference,
+        verificationStatus: "human_confirmed" as const,
+        question: node.question,
+        claim: node.claim,
+        reasoningSteps: node.reasoningSteps,
+      };
+    });
+    return NextResponse.json({ report, evidenceNodes });
   } catch (error) {
     const cause = error instanceof StructuredDeepSeekError ? error.cause : error;
     if (cause instanceof BoundaryContextTooLargeError

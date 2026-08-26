@@ -3,7 +3,9 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 import { addKnowledgeEntry, getKnowledgeEntries } from "./ip-store";
+import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 import { addVideoReviewForSource } from "./review-traceability";
+import { createValidTopicBoardResult } from "./topic-board-contract.fixture";
 import type { IPProfile, KnowledgeCategory } from "./types";
 
 const SHIKONG: IPProfile = {
@@ -210,7 +212,8 @@ test("知识只被检索展示时不写入选题使用记录", async () => {
       });
     };
 
-    const { cleanup, render } = await import("@testing-library/react");
+    const { cleanup, render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
     cleanupPage = cleanup;
     const { IPProvider } = await import("./ip-context");
     const TopicBoardPage = (await import("../app/topic-board/page")).default;
@@ -727,5 +730,290 @@ test("董事会评审只发送通用和当前IP可见的历史证据", async () 
     cleanupPage?.();
     globalThis.fetch = originalFetch;
     restoreBrowser();
+  }
+});
+
+async function renderBoundaryAuditScenario(report: {
+  coverage: "FULL" | "PARTIAL" | "NONE";
+  stance: "ALIGNED" | "CONFLICTING" | "UNDETERMINED";
+  explanation: string;
+  matchedNodeIds: string[];
+  conflictingNodeIds: string[];
+  supportedParts: string[];
+  missingElements: Array<"CLAIM" | "REASONING" | "CASE" | "DATA" | "DETAIL">;
+}, boundaryFetcher?: (init?: RequestInit) => Promise<Response>) {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    const sourceId = "boundary-source-v2";
+    const rawContent = "老师明确说：持续输出不等于日更，输出质量来自问题深化。";
+    const extracted = buildIPSourceAnalysisV2({
+      sourceId,
+      sourceContent: rawContent,
+      analyzedAt: "2026-08-26T10:00:00.000Z",
+      createId: () => "00000000-0000-4000-8000-000000000201",
+      candidate: {
+        nodes: [{
+          nodeRef: "N1",
+          question: { content: "持续输出是否等于日更？", derivation: "explicit", anchors: [{ quote: rawContent }] },
+          claim: { content: "持续输出不等于日更。", anchors: [{ quote: "持续输出不等于日更" }] },
+          reasoning: {
+            status: "complete",
+            steps: [{ order: 1, content: "输出质量来自问题深化。", anchors: [{ quote: "输出质量来自问题深化" }] }],
+          },
+          evidence: [],
+          concepts: [],
+        }],
+        aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+      },
+    });
+    const analysis = {
+      ...extracted,
+      nonce: 2,
+      nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+    };
+    const confirmedNodeId = analysis.nodes[0]!.id;
+    const responseReport = {
+      ...report,
+      matchedNodeIds: report.matchedNodeIds.map(() => confirmedNodeId),
+      conflictingNodeIds: report.conflictingNodeIds.map(() => confirmedNodeId),
+    };
+    localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+      id: sourceId,
+      category: "IP原始内容",
+      title: "持续输出直播片段",
+      rawContent,
+      sourceKind: "直播逐字稿",
+      sourceName: "持续输出直播.txt",
+      sourceAnalysis: analysis,
+      sourceFinalProof: "final-proof-for-page-test",
+      sourceLegacyProof: null,
+      tags: ["持续输出"],
+      keywords: ["日更"],
+      ipId: SHUIMURAN.id,
+      sourceTier: "高",
+      sourceTierReason: "测试中的已确认原始内容",
+      contentDirection: ["个人成长"],
+      sourcePlatform: "直播逐字稿",
+      sourceUrl: "",
+      note: "",
+      createdAt: "2026-08-26T10:00:00.000Z",
+      extractedAt: analysis.analyzedAt,
+      metrics: null,
+      viralEvaluation: null,
+      usageRecords: [],
+      status: "未使用",
+      trustStatus: null,
+      sourceReference: null,
+      executionTemplate: null,
+      dna: null,
+    }]));
+
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "/api/topic-review") {
+        return new Response(JSON.stringify(createValidTopicBoardResult()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (String(input) === "/api/ip-boundary/check") {
+        if (boundaryFetcher) return boundaryFetcher(init);
+        return new Response(JSON.stringify({
+          report: responseReport,
+          evidenceNodes: [
+            ...responseReport.matchedNodeIds.map(nodeId => ({ nodeId, relation: "matched" as const })),
+            ...responseReport.conflictingNodeIds.map(nodeId => ({ nodeId, relation: "conflicting" as const })),
+          ].map(reference => ({
+            ...reference,
+            verificationStatus: "human_confirmed",
+            question: "持续输出是否等于日更？",
+            claim: "持续输出不等于日更。",
+            reasoningSteps: ["输出质量来自问题深化，而不是机械增加频次。"],
+          })),
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const { cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const user = userEvent.setup({ document });
+    const page = render(
+      <IPProvider>
+        <TopicBoardPage />
+      </IPProvider>,
+    );
+
+    await user.click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText("评估已保存到水木然的选题库。", {}, { timeout: 7000 });
+    return { page, user, restore: () => {
+      cleanupPage?.();
+      globalThis.fetch = originalFetch;
+      restoreBrowser();
+    } };
+  } catch (error) {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+    throw error;
+  }
+}
+
+test("立场冲突时页面展示认知警告并禁止进入脚本生成", async () => {
+  const scenario = await renderBoundaryAuditScenario({
+    coverage: "PARTIAL",
+    stance: "CONFLICTING",
+    explanation: "该选题把日更当作增长手段，与已确认观点相反。",
+    matchedNodeIds: [],
+    conflictingNodeIds: ["node-conflict"],
+    supportedParts: ["持续输出"],
+    missingElements: ["REASONING"],
+  });
+
+  try {
+    assert.ok(scenario.page.getByText("立场冲突"));
+    assert.ok(scenario.page.getByText("持续输出不等于日更。"));
+    assert.equal(
+      (scenario.page.getByRole("button", { name: /生成脚本/ }) as HTMLButtonElement).disabled,
+      true,
+    );
+  } finally {
+    scenario.restore();
+  }
+});
+
+test("认知仅部分覆盖时进入脚本生成前必须二次确认", async () => {
+  const scenario = await renderBoundaryAuditScenario({
+    coverage: "PARTIAL",
+    stance: "ALIGNED",
+    explanation: "已有观点支持方向，但缺少具体案例。",
+    matchedNodeIds: ["node-partial"],
+    conflictingNodeIds: [],
+    supportedParts: ["精准减负"],
+    missingElements: ["CASE"],
+  });
+
+  try {
+    await scenario.user.click(scenario.page.getByRole("button", { name: /生成脚本/ }));
+    assert.ok(await scenario.page.findByRole("dialog", { name: "认知覆盖不完整" }));
+    assert.ok(scenario.page.getByText(/AI可能会补充尚未被IP确认的细节/));
+  } finally {
+    scenario.restore();
+  }
+});
+
+test("认知真空时禁止生成并提供真实可用的资料导入入口", async () => {
+  const scenario = await renderBoundaryAuditScenario({
+    coverage: "NONE",
+    stance: "UNDETERMINED",
+    explanation: "当前认知库没有涉及该主题。",
+    matchedNodeIds: [],
+    conflictingNodeIds: [],
+    supportedParts: [],
+    missingElements: ["CLAIM"],
+  });
+
+  try {
+    assert.ok(scenario.page.getByText("认知真空"));
+    const importLink = scenario.page.getByRole("link", { name: "导入资料" });
+    assert.equal(importLink.getAttribute("href"), `/knowledge-intake/original?ipId=${encodeURIComponent(SHUIMURAN.id)}`);
+    assert.equal(
+      (scenario.page.getByRole("button", { name: /生成脚本/ }) as HTMLButtonElement).disabled,
+      true,
+    );
+  } finally {
+    scenario.restore();
+  }
+});
+
+test("董事会读取到损坏认知时停止加载并提供重新加载入口", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  try {
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+      id: "damaged-topic-board-cognition",
+      category: "IP原始内容",
+      title: "损坏认知",
+      rawContent: "原始内容",
+      sourceAnalysis: { parserVersion: 2, sourceId: "wrong-source" },
+      ipId: SHUIMURAN.id,
+      createdAt: "2026-08-26T12:00:00.000Z",
+    }]));
+
+    const { cleanup, render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+
+    assert.ok(await page.findByText("认知底座加载异常"));
+    const retryButton = page.getByRole("button", { name: "重新加载" });
+    assert.equal(page.queryByText("检索中…"), null);
+    assert.notEqual(localStorage.getItem("ipwr:knowledgeEntries"), null, "容错入口不得删除原数据");
+    localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([]));
+    await userEvent.setup({ document }).click(retryButton);
+    await waitFor(() => assert.equal(page.queryByText("认知底座加载异常"), null));
+    cleanup();
+  } finally {
+    restoreBrowser();
+  }
+});
+
+test("边界审计超过15秒后保持生成锁定并允许重新审计", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  let boundaryCalls = 0;
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      originalSetTimeout(handler, timeout === 15_000 ? 0 : timeout, ...args)
+    )) as typeof setTimeout,
+  });
+
+  let scenario: Awaited<ReturnType<typeof renderBoundaryAuditScenario>> | null = null;
+  try {
+    scenario = await renderBoundaryAuditScenario({
+      coverage: "FULL",
+      stance: "ALIGNED",
+      explanation: "不会返回的模拟结果。",
+      matchedNodeIds: ["node-timeout"],
+      conflictingNodeIds: [],
+      supportedParts: ["选题"],
+      missingElements: [],
+    }, async init => {
+      boundaryCalls += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+
+    assert.ok(await scenario.page.findByText("审计响应超时"));
+    assert.equal(
+      (scenario.page.getByRole("button", { name: /生成脚本/ }) as HTMLButtonElement).disabled,
+      true,
+    );
+    await scenario.user.click(scenario.page.getByRole("button", { name: "重新审计" }));
+    await scenario.page.findByText("审计响应超时");
+    assert.equal(boundaryCalls, 2);
+  } finally {
+    scenario?.restore();
+    Object.defineProperty(globalThis, "setTimeout", { configurable: true, writable: true, value: originalSetTimeout });
   }
 });

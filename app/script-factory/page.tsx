@@ -32,6 +32,19 @@ import { getScriptDirectorRules } from "@/lib/script-director-rule-store";
 import { ensureShuimuranDirectorRuleMigrated } from "@/lib/shuimuran-director-rule-migration";
 import { KnowledgeInspirationDrawer } from "@/components/knowledge/KnowledgeInspirationDrawer";
 import { getLegacyIPSourceAnalysisItems } from "@/lib/ip-source-analysis-v2";
+import {
+  BoundaryAuditPanel,
+  type BoundaryAuditStatus,
+} from "@/components/ip-boundary/BoundaryAuditPanel";
+import type { BoundaryReport } from "@/lib/ip-boundary-engine";
+import {
+  BoundaryAuditTimeoutError,
+  buildBoundarySourceBundle,
+  decideBoundaryAction,
+  fetchBoundaryCheckWithTimeout,
+  parseBoundaryCheckUIResponse,
+  type BoundaryEvidenceNode,
+} from "@/lib/ip-boundary-ui";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -662,8 +675,28 @@ function KnowledgePanel({ loading, refs, searched }: { loading: boolean; refs: K
   );
 }
 
+function useCognitionData() {
+  const [readVersion, setReadVersion] = useState(0);
+  try {
+    return {
+      entries: getKnowledgeEntries(),
+      error: null as string | null,
+      readVersion,
+      retry: () => setReadVersion(version => version + 1),
+    };
+  } catch {
+    return {
+      entries: [] as KnowledgeEntry[],
+      error: "部分认知数据损坏，请尝试重新解析相关资料",
+      readVersion,
+      retry: () => setReadVersion(version => version + 1),
+    };
+  }
+}
+
 export default function ScriptFactoryPage() {
   const { activeIP, loading: ipLoading } = useIP();
+  const cognitionData = useCognitionData();
   const [generationMode, setGenerationMode] = useState<GenerationMode>("standard");
   const [topic, setTopic] = useState("");
   const [angle, setAngle] = useState("");
@@ -678,6 +711,9 @@ export default function ScriptFactoryPage() {
   const [knowledgeSearched, setKnowledgeSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationSequenceRef = useRef(0);
+  const topicContentRef = useRef(topic);
+  topicContentRef.current = topic;
+  const boundaryRequestSeqRef = useRef(0);
   const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
   activeIPIdRef.current = activeIP?.id ?? null;
 
@@ -690,7 +726,7 @@ export default function ScriptFactoryPage() {
   }, [topic, activeIP?.id]);
 
   async function searchKnowledge(query: string) {
-    const allEntries = getKnowledgeEntries().filter(e => {
+    const allEntries = cognitionData.entries.filter(e => {
       if (e.ipId && e.ipId !== activeIP?.id) return false;
       const category = getNormalizedCategory(e);
       // 原始内容通过专属上下文进入生成和生成后审计，不能混入通用方法检索。
@@ -744,15 +780,30 @@ export default function ScriptFactoryPage() {
   const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
   const [linkedTopic, setLinkedTopic] = useState<TopicAsset | null>(null);
   const [activeDirectorRule, setActiveDirectorRule] = useState<ScriptDirectorRule | null>(null);
+  const [boundaryStatus, setBoundaryStatus] = useState<BoundaryAuditStatus>("idle");
+  const [boundaryReport, setBoundaryReport] = useState<BoundaryReport | null>(null);
+  const [boundaryEvidence, setBoundaryEvidence] = useState<BoundaryEvidenceNode[]>([]);
+  const [boundaryMessage, setBoundaryMessage] = useState<string | null>(null);
+  const [boundaryTopicId, setBoundaryTopicId] = useState<string | null>(null);
+  const [auditedTopicContent, setAuditedTopicContent] = useState<string | null>(null);
+  const [pendingBoundaryConfirmation, setPendingBoundaryConfirmation] = useState(false);
 
   const currentFormat = FORMAT_CATEGORIES.find(f => f.id === formatCategory) ?? FORMAT_CATEGORIES[0];
-  const caseCandidates = getKnowledgeEntries().filter(entry => {
+  const caseCandidates = cognitionData.entries.filter(entry => {
     if (entry.ipId && entry.ipId !== activeIP?.id) return false;
     const category = getNormalizedCategory(entry);
     return category === "爆款案例" || category === "选题案例" || category === "IP历史内容" || category === "IP高表现内容";
   });
   const selectedKnowledgeCase = caseCandidates.find(entry => entry.id === selectedCaseId) ?? null;
   const isDirectorRuleEnabled = generationMode === "ip" && activeDirectorRule !== null;
+  const isLinkedTopicBoundaryAllowed = !linkedTopic
+    || (!cognitionData.error
+      && boundaryTopicId === linkedTopic.id
+      && (boundaryStatus === "legacy"
+        || (boundaryStatus === "ready"
+          && boundaryReport !== null
+          && auditedTopicContent === topic.trim()
+          && decideBoundaryAction(boundaryReport) !== "intercept")));
   function switchGenerationMode(nextMode: GenerationMode) {
     generationSequenceRef.current += 1;
     setGenerationMode(nextMode);
@@ -763,8 +814,8 @@ export default function ScriptFactoryPage() {
   }
 
   function getIPSourceContext(ipId: string) {
-    return getKnowledgeEntries("IP原始内容")
-      .filter(entry => entry.ipId === ipId)
+    return cognitionData.entries
+      .filter(entry => getNormalizedCategory(entry) === "IP原始内容" && entry.ipId === ipId)
       .flatMap(entry => getLegacyIPSourceAnalysisItems(entry.sourceAnalysis).map(item => ({
         parserVersion: entry.sourceAnalysis?.parserVersion ?? 1,
         ...(entry.sourceAnalysis?.parserVersion === 2
@@ -779,6 +830,74 @@ export default function ScriptFactoryPage() {
         originalExcerpt: item.originalExcerpt,
         extractionStatus: item.extractionStatus,
       })));
+  }
+
+  async function runLinkedTopicBoundaryAudit(asset: TopicAsset, requestIP: IPProfile, topicContent = asset.title) {
+    const requestSeq = boundaryRequestSeqRef.current + 1;
+    boundaryRequestSeqRef.current = requestSeq;
+    setBoundaryTopicId(asset.id);
+    setBoundaryReport(null);
+    setBoundaryEvidence([]);
+    setBoundaryMessage(null);
+    setAuditedTopicContent(null);
+    setPendingBoundaryConfirmation(false);
+
+    if (cognitionData.error) {
+      setBoundaryStatus("unavailable");
+      setBoundaryMessage("认知库读取失败，本次审计已停止，且未修改原数据。");
+      return;
+    }
+
+    const sourceEntries = cognitionData.entries.filter(entry => getNormalizedCategory(entry) === "IP原始内容");
+    const bundle = buildBoundarySourceBundle(sourceEntries, requestIP.id);
+    if (bundle.sources.length === 0) {
+      if (bundle.unregisteredV1) {
+        setBoundaryStatus("upgrade_required");
+        setBoundaryMessage("当前IP的历史认知尚未完成合规登记，已停止脚本生成。");
+      } else if (bundle.registeredV1) {
+        setBoundaryStatus("legacy");
+      } else {
+        setBoundaryStatus("unavailable");
+        setBoundaryMessage("当前IP还没有可用于边界审计的已确认V2认知。");
+      }
+      return;
+    }
+
+    setBoundaryStatus("checking");
+    try {
+      const response = await fetchBoundaryCheckWithTimeout({
+        fetcher: apiFetch,
+        url: "/api/ip-boundary/check",
+        init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId: requestIP.id,
+          topic: topicContent,
+          sources: bundle.sources,
+          includeEvidence: true,
+        }),
+        },
+      });
+      const raw: unknown = await response.json();
+      if (boundaryRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== requestIP.id) return;
+      if (!response.ok) throw new Error("认知边界审计失败，请返回选题董事会重试。");
+      const parsed = parseBoundaryCheckUIResponse(raw, bundle.nodeIds);
+      if (!parsed) throw new Error("认知边界审计返回的数据不完整，已停止脚本生成。");
+      setBoundaryReport(parsed.report);
+      setBoundaryEvidence(parsed.evidenceNodes);
+      setAuditedTopicContent(topicContent.trim());
+      setBoundaryStatus("ready");
+    } catch (boundaryError) {
+      if (boundaryRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== requestIP.id) return;
+      if (boundaryError instanceof BoundaryAuditTimeoutError) {
+        setBoundaryStatus("timeout");
+        setBoundaryMessage("本次审计超过15秒，脚本生成继续保持锁定。请重新审计。");
+        return;
+      }
+      setBoundaryStatus("unavailable");
+      setBoundaryMessage(boundaryError instanceof Error ? boundaryError.message : "认知边界审计失败，请返回选题董事会重试。");
+    }
   }
 
   useEffect(() => {
@@ -899,6 +1018,14 @@ export default function ScriptFactoryPage() {
   }
 
   useEffect(() => {
+    boundaryRequestSeqRef.current += 1;
+    setBoundaryStatus("idle");
+    setBoundaryReport(null);
+    setBoundaryEvidence([]);
+    setBoundaryMessage(null);
+    setBoundaryTopicId(null);
+    setAuditedTopicContent(null);
+    setPendingBoundaryConfirmation(false);
     generationSequenceRef.current += 1;
     setLinkedTopic(null);
     setResult(null);
@@ -960,6 +1087,7 @@ export default function ScriptFactoryPage() {
       setTopic(asset.title);
       setLinkedTopic(asset);
       setError(null);
+      void runLinkedTopicBoundaryAudit(asset, activeIP);
     } catch (linkError) {
       setLinkedTopic(null);
       setError(
@@ -968,7 +1096,7 @@ export default function ScriptFactoryPage() {
           : "读取关联选题失败，请返回选题库重试。",
       );
     }
-  }, [activeIP?.id, ipLoading]);
+  }, [activeIP?.id, ipLoading, cognitionData.readVersion]);
 
   function handleClearPartialDraft() {
     if (!activeIP) return;
@@ -979,6 +1107,22 @@ export default function ScriptFactoryPage() {
     setResult(current => current?.generationStatus === "partial" ? null : current);
     setPartialDraftSavedAt(null);
     setDraftStorageError(null);
+  }
+
+  function handleTopicChange(nextTopic: string) {
+    topicContentRef.current = nextTopic;
+    setTopic(nextTopic);
+    if (!linkedTopic || boundaryStatus === "legacy") return;
+    const normalized = nextTopic.trim();
+    if (auditedTopicContent === normalized && boundaryStatus === "ready") return;
+    generationSequenceRef.current += 1;
+    boundaryRequestSeqRef.current += 1;
+    setBoundaryReport(null);
+    setBoundaryEvidence([]);
+    setAuditedTopicContent(null);
+    setPendingBoundaryConfirmation(false);
+    setBoundaryStatus("stale");
+    setBoundaryMessage("旧审计结论已失效，重新审计前不会开放生成入口。");
   }
 
   function getGenerationCaseEvidence(): GenerationCaseEvidence | null {
@@ -1026,8 +1170,8 @@ export default function ScriptFactoryPage() {
           needsStoryboard, needsShootingTips,
           ipSourceContext: requestMode === "ip" ? ipSourceContext : undefined,
           caseEvidence: requestMode === "ip" ? caseEvidence : undefined,
-          voiceSamples: getKnowledgeEntries("IP表达语料")
-            .filter(entry => entry.ipId === ip.id)
+          voiceSamples: cognitionData.entries
+            .filter(entry => getNormalizedCategory(entry) === "IP表达语料" && entry.ipId === ip.id)
             .slice(0, 5)
             .map(entry => ({
               id: entry.id,
@@ -1150,11 +1294,26 @@ export default function ScriptFactoryPage() {
     }
   }
 
-  async function handleGenerate() {
+  async function handleGenerate(allowPartialBoundary = false) {
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
+    if (linkedTopic && !isLinkedTopicBoundaryAllowed) {
+      setError("这条关联选题尚未通过认知边界审计，已停止脚本生成。");
+      return;
+    }
+    if (linkedTopic
+      && boundaryReport
+      && decideBoundaryAction(boundaryReport) === "confirm"
+      && !allowPartialBoundary) {
+      setPendingBoundaryConfirmation(true);
+      return;
+    }
+    setPendingBoundaryConfirmation(false);
     const requestIP = activeIP;
     const requestedTopic = topic.trim();
+    const auditedTopicAtRequest = linkedTopic && boundaryStatus !== "legacy"
+      ? auditedTopicContent
+      : requestedTopic;
     const requestedAngle = angle.trim();
     const requestMode = generationMode;
     const knowledgeRefsAtRequest = knowledgeRefs;
@@ -1187,6 +1346,9 @@ export default function ScriptFactoryPage() {
       };
       if (data.ipId !== requestIP.id) {
         throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
+      }
+      if (auditedTopicAtRequest !== requestedTopic || topicContentRef.current.trim() !== requestedTopic) {
+        throw new Error("生成期间选题内容已变更，旧结果未展示、未保存；请重新审计后再生成。");
       }
       if (activeIPIdRef.current !== requestIP.id || generationSequenceRef.current !== requestSequence) {
         throw new Error("生成期间当前操盘IP已切换，结果未保存；请切回原IP后重新生成。");
@@ -1363,10 +1525,42 @@ export default function ScriptFactoryPage() {
       )}
       {showContext && activeIP && <IPContextModal ip={activeIP} onClose={() => setShowContext(false)} />}
 
+      {cognitionData.error && (
+        <div className="mb-3 rounded-[14px] border border-[#E8C96A] bg-[#FFF8DC] px-4 py-3 text-[12.5px] text-[#755700]" role="alert">
+          <div className="font-semibold">{cognitionData.error}</div>
+          <p className="mt-1 leading-5">系统已停止认知审计和关联选题生成，没有修改或删除原始数据。</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" onClick={cognitionData.retry} className="rounded-[9px] bg-white px-3 py-2 text-[12px] font-semibold text-[#755700]">
+              重新读取认知数据
+            </button>
+            <a href={activeIP?.id ? `/knowledge-intake/original?ipId=${encodeURIComponent(activeIP.id)}` : "/knowledge-intake/original"} className="rounded-[9px] bg-[#1C1C1B] px-3 py-2 text-[12px] font-semibold text-white">
+              去重新解析相关资料
+            </a>
+          </div>
+        </div>
+      )}
+
       {linkedTopic && (
         <div className="mb-3 rounded-[14px] border border-[#B8D98D] bg-[#F7FCF0] px-4 py-3 text-[12.5px] text-[#3B6D11]">
           <div className="font-semibold">当前关联选题</div>
           <div className="mt-1 text-[#1C1C1B]">{linkedTopic.title}</div>
+        </div>
+      )}
+
+      {linkedTopic && (
+        <div className="mb-6">
+          <BoundaryAuditPanel
+            status={boundaryStatus}
+            report={boundaryReport}
+            evidenceNodes={boundaryEvidence}
+            message={boundaryMessage}
+            activeIPId={activeIP?.id ?? null}
+            onRetry={boundaryStatus === "timeout" && linkedTopic && activeIP
+              ? () => { void runLinkedTopicBoundaryAudit(linkedTopic, activeIP, topic.trim()); }
+              : boundaryStatus === "stale" && linkedTopic && activeIP && topic.trim()
+                ? () => { void runLinkedTopicBoundaryAudit(linkedTopic, activeIP, topic.trim()); }
+              : undefined}
+          />
         </div>
       )}
 
@@ -1377,7 +1571,7 @@ export default function ScriptFactoryPage() {
         <SectionHead num="①">输入选题或原文并设置产出</SectionHead>
         <div className="flex flex-col gap-3">
           <textarea
-            value={topic} onChange={e => setTopic(e.target.value)}
+            value={topic} onChange={e => handleTopicChange(e.target.value)}
             placeholder={TOPIC_PLACEHOLDER}
             className="min-h-[52px] resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"
           />
@@ -1474,12 +1668,25 @@ export default function ScriptFactoryPage() {
               需要{formatCategory === "live" ? "直播间布置建议" : "拍摄/呈现建议"}
             </label>
             <button
-              onClick={handleGenerate} disabled={loading || !topic.trim() || !activeIP}
+              onClick={() => { void handleGenerate(); }} disabled={loading || !topic.trim() || !activeIP || !isLinkedTopicBoundaryAllowed}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
               {loading ? "生成中…" : generationMode === "standard" ? "生成完整内容" : "生成IP专属内容"}
             </button>
+      </div>
+
+      {pendingBoundaryConfirmation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4" role="dialog" aria-label="认知覆盖不完整" aria-modal="true">
+          <div className="w-full max-w-[460px] rounded-[18px] bg-white p-5 shadow-xl">
+            <h2 className="text-[18px] font-bold text-[#1C1C1B]">认知覆盖不完整</h2>
+            <p className="mt-2 text-[13px] leading-6 text-[#666]">当前选题只有部分认知支撑，AI可能会补充尚未被IP确认的细节。请确认已知风险后再继续。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setPendingBoundaryConfirmation(false)} className="rounded-[10px] border border-[#D8D7D1] px-4 py-2 text-[13px] font-semibold text-[#555]">取消</button>
+              <button type="button" onClick={() => { void handleGenerate(true); }} className="rounded-[10px] bg-[#1C1C1B] px-4 py-2 text-[13px] font-semibold text-white">确认已知风险并生成</button>
+            </div>
           </div>
+        </div>
+      )}
         </div>
       </Card>
 

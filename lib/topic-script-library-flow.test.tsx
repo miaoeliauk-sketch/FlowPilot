@@ -13,6 +13,7 @@ import {
   createValidTopicBoardResult,
 } from "./topic-board-contract.fixture";
 import { getPartialScriptDraft, savePartialScriptDraft } from "./script-factory-draft";
+import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 
 function installBrowserEnvironment() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -131,6 +132,89 @@ function readRequestIPId(requestBody: Record<string, unknown>): string | null {
   return isRecord(ipProfile) && typeof ipProfile.id === "string" ? ipProfile.id : null;
 }
 
+function seedConfirmedBoundarySource(ipId: string) {
+  const sourceId = `script-boundary-source-${ipId}`;
+  const rawContent = "老师明确说：持续输出来自问题深化，而不是机械日更。";
+  const extracted = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: rawContent,
+    analyzedAt: "2026-08-26T12:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000302",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "持续输出依靠什么？", derivation: "explicit", anchors: [{ quote: rawContent }] },
+        claim: { content: "持续输出来自问题深化。", anchors: [{ quote: "持续输出来自问题深化" }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const analysis = {
+    ...extracted,
+    nonce: 2,
+    nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+  };
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: sourceId,
+    category: "IP原始内容",
+    title: "页面准入测试认知",
+    rawContent,
+    sourceAnalysis: analysis,
+    sourceFinalProof: "page-boundary-final-proof",
+    sourceLegacyProof: null,
+    ipId,
+    createdAt: "2026-08-26T12:00:00.000Z",
+  }]));
+  return analysis.nodes[0]!.id;
+}
+
+function alignedBoundaryResponse(nodeId: string) {
+  return new Response(JSON.stringify({
+    report: {
+      coverage: "FULL",
+      stance: "ALIGNED",
+      explanation: "当前选题已有人工确认认知支撑。",
+      matchedNodeIds: [nodeId],
+      conflictingNodeIds: [],
+      supportedParts: ["核心观点"],
+      missingElements: [],
+    },
+    evidenceNodes: [{
+      nodeId,
+      relation: "matched",
+      verificationStatus: "human_confirmed",
+      question: "持续输出依靠什么？",
+      claim: "持续输出来自问题深化。",
+      reasoningSteps: [],
+    }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+function partialBoundaryResponse(nodeId: string) {
+  return new Response(JSON.stringify({
+    report: {
+      coverage: "PARTIAL",
+      stance: "ALIGNED",
+      explanation: "已有观点支持方向，但缺少具体案例。",
+      matchedNodeIds: [nodeId],
+      conflictingNodeIds: [],
+      supportedParts: ["核心观点"],
+      missingElements: ["CASE"],
+    },
+    evidenceNodes: [{
+      nodeId,
+      relation: "matched",
+      verificationStatus: "human_confirmed",
+      question: "持续输出依靠什么？",
+      claim: "持续输出来自问题深化。",
+      reasoningSteps: [],
+    }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
 async function unlockGeneration(
   view: ReturnType<typeof import("@testing-library/react").render>,
   user: Awaited<ReturnType<typeof import("@testing-library/user-event").default.setup>>,
@@ -194,8 +278,10 @@ test("选题历史只为已评估和已采用选题提供经典脚本入口", as
   updateTopicAssetStatus(discarded.id, "已废弃");
 
   const { render, within } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
   const { IPProvider } = await import("./ip-context");
   const TopicBoardPage = (await import("../app/topic-board/page")).default;
+  const user = userEvent.setup({ document });
   const view = render(
     <IPProvider>
       <TopicBoardPage />
@@ -203,22 +289,22 @@ test("选题历史只为已评估和已采用选题提供经典脚本入口", as
   );
 
   const history = await view.findByRole("region", { name: "当前IP选题历史" });
-  const links = within(history).getAllByRole("link", { name: /生成脚本/ });
-  assert.equal(links.length, 2);
-  assert.equal(
-    (within(history).getByRole("link", { name: `用选题“${evaluated.title}”生成脚本` }) as HTMLAnchorElement).getAttribute("href"),
-    `/script-factory?topicId=${encodeURIComponent(evaluated.id)}`,
-  );
-  assert.equal(
-    (within(history).getByRole("link", { name: `用选题“${adopted.title}”生成脚本` }) as HTMLAnchorElement).getAttribute("href"),
-    `/script-factory?topicId=${encodeURIComponent(adopted.id)}`,
-  );
+  const generateButtons = within(history).getAllByRole("button", { name: /生成脚本/ });
+  assert.equal(generateButtons.length, 2);
+  const evaluatedButton = within(history).getByRole("button", { name: `用选题“${evaluated.title}”生成脚本` });
+  within(history).getByRole("button", { name: `用选题“${adopted.title}”生成脚本` });
   for (const asset of [draft, filmed, discarded]) {
     assert.equal(
-      within(history).queryByRole("link", { name: `用选题“${asset.title}”生成脚本` }),
+      within(history).queryByRole("button", { name: `用选题“${asset.title}”生成脚本` }),
       null,
     );
   }
+
+  await user.click(evaluatedButton);
+  assert.equal(
+    Boolean(await view.findByRole("region", { name: "认知边界审计" })),
+    true,
+  );
 });
 
 test("脚本工厂通过topicId读取当前IP的合法选题并明确显示关联", async () => {
@@ -250,6 +336,285 @@ test("脚本工厂通过topicId读取当前IP的合法选题并明确显示关�
   assert.ok(linkedTopicBanner);
   assert.ok(within(linkedTopicBanner).getByText(topic.title));
   assert.ok(view.getByRole("button", { name: "生成完整内容" }));
+});
+
+test("直接通过URL打开冲突选题时脚本工厂必须先审计并阻止生成", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "如何靠疯狂日更快速涨粉",
+    source: "manual",
+  }, { ...boardResult, topic: "如何靠疯狂日更快速涨粉" });
+  const sourceId = "script-boundary-source";
+  const rawContent = "老师明确说：持续输出不等于日更。";
+  const extracted = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: rawContent,
+    analyzedAt: "2026-08-26T12:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000301",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "持续输出是否等于日更？", derivation: "explicit", anchors: [{ quote: rawContent }] },
+        claim: { content: "持续输出不等于日更。", anchors: [{ quote: "持续输出不等于日更" }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const analysis = {
+    ...extracted,
+    nonce: 2,
+    nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+  };
+  const nodeId = analysis.nodes[0]!.id;
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: sourceId,
+    category: "IP原始内容",
+    title: "持续输出认知",
+    rawContent,
+    sourceKind: "直播逐字稿",
+    sourceName: "持续输出.txt",
+    sourceAnalysis: analysis,
+    sourceFinalProof: "final-proof-for-script-boundary-test",
+    sourceLegacyProof: null,
+    tags: [],
+    keywords: [],
+    ipId: ip.id,
+    sourceTier: "高",
+    sourceTierReason: "测试中的已确认原始内容",
+    contentDirection: [],
+    sourcePlatform: "直播逐字稿",
+    sourceUrl: "",
+    note: "",
+    createdAt: "2026-08-26T12:00:00.000Z",
+    extractedAt: analysis.analyzedAt,
+    metrics: null,
+    viralEvaluation: null,
+    usageRecords: [],
+    status: "未使用",
+    trustStatus: null,
+    sourceReference: null,
+    executionTemplate: null,
+    dna: null,
+  }]));
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+
+  let boundaryCalls = 0;
+  let generationCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/ip-boundary/check") {
+      boundaryCalls += 1;
+      return new Response(JSON.stringify({
+        report: {
+          coverage: "PARTIAL",
+          stance: "CONFLICTING",
+          explanation: "该选题与已确认的持续输出观点相反。",
+          matchedNodeIds: [],
+          conflictingNodeIds: [nodeId],
+          supportedParts: ["日更"],
+          missingElements: ["REASONING"],
+        },
+        evidenceNodes: [{
+          nodeId,
+          relation: "conflicting",
+          verificationStatus: "human_confirmed",
+          question: "持续输出是否等于日更？",
+          claim: "持续输出不等于日更。",
+          reasoningSteps: [],
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/script-factory") generationCalls += 1;
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    assert.ok(await view.findByText("立场冲突"));
+    assert.equal(boundaryCalls, 1);
+    assert.equal((view.getByRole("button", { name: "生成完整内容" }) as HTMLButtonElement).disabled, true);
+    assert.equal(generationCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("直接URL审计通过后修改选题会立即让准入结果失效", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "持续输出为什么不等于日更",
+    source: "manual",
+  }, { ...boardResult, topic: "持续输出为什么不等于日更" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/ip-boundary/check") return alignedBoundaryResponse(boundaryNodeId);
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    assert.ok(await view.findByText("认知充分匹配"));
+    const input = view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文");
+    await user.clear(input);
+    await user.type(input, "完全不同的新选题");
+
+    assert.ok(await view.findByText("选题内容已变更，请重新审计"));
+    assert.equal((view.getByRole("button", { name: "生成完整内容" }) as HTMLButtonElement).disabled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("直接URL仅部分覆盖时生成前必须二次确认", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "推荐5个精准减负工具",
+    source: "manual",
+  }, { ...boardResult, topic: "推荐5个精准减负工具" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+
+  let generationCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/ip-boundary/check") return partialBoundaryResponse(boundaryNodeId);
+    if (String(input) === "/api/script-factory") generationCalls += 1;
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    assert.ok(await view.findByText("认知部分覆盖"));
+    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    assert.ok(await view.findByRole("dialog", { name: "认知覆盖不完整" }));
+    assert.equal(generationCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("直接URL读取到损坏认知时不崩溃且保持生成锁定", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "损坏认知不能绕过门禁",
+    source: "manual",
+  }, { ...boardResult, topic: "损坏认知不能绕过门禁" });
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: "damaged-cognition-source",
+    category: "IP原始内容",
+    title: "损坏认知",
+    createdAt: "2026-08-26T12:00:00.000Z",
+    rawContent: "原始内容",
+    sourceAnalysis: { parserVersion: 2, sourceId: "wrong-source" },
+    ipId: ip.id,
+  }]));
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  assert.ok(await view.findByText("部分认知数据损坏，请尝试重新解析相关资料"));
+  assert.ok(view.getByRole("button", { name: "重新读取认知数据" }));
+  assert.equal((view.getByRole("button", { name: "生成完整内容" }) as HTMLButtonElement).disabled, true);
+  assert.notEqual(localStorage.getItem("ipwr:knowledgeEntries"), null, "容错入口不得自动删除原数据");
+});
+
+test("修复损坏认知后点击重新读取会自动重新审计", async () => {
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "修复后应自动重审",
+    source: "manual",
+  }, { ...boardResult, topic: "修复后应自动重审" });
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([{
+    id: "damaged-cognition-source",
+    category: "IP原始内容",
+    title: "损坏认知",
+    createdAt: "2026-08-26T12:00:00.000Z",
+    rawContent: "原始内容",
+    sourceAnalysis: { parserVersion: 2, sourceId: "wrong-source" },
+    ipId: ip.id,
+  }]));
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+
+  let boundaryCalls = 0;
+  let repairedNodeId = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/ip-boundary/check") {
+      boundaryCalls += 1;
+      return alignedBoundaryResponse(repairedNodeId);
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    assert.ok(await view.findByText("部分认知数据损坏，请尝试重新解析相关资料"));
+    localStorage.removeItem("ipwr:knowledgeEntries");
+    repairedNodeId = seedConfirmedBoundarySource(ip.id);
+    await user.click(view.getByRole("button", { name: "重新读取认知数据" }));
+
+    assert.ok(await view.findByText("认知充分匹配"));
+    assert.equal(boundaryCalls, 1);
+    assert.equal((view.getByRole("button", { name: "生成完整内容" }) as HTMLButtonElement).disabled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("URL打开选题B时不会继续展示同一IP选题A的旧草稿内容", { timeout: 5000 }, async () => {
@@ -474,6 +839,7 @@ test("生成失败后也拒绝恢复外层IP与内部结果IP不一致的损坏�
     title: "生成失败后不能恢复跨IP草稿",
     source: "manual",
   }, { ...boardResult, topic: "生成失败后不能恢复跨IP草稿" });
+  const boundaryNodeId = seedConfirmedBoundarySource(activeIP.id);
   const mismatchedResult = {
     ...createCompleteScriptResponse(otherIP.id, otherIP.name, topic.title),
     generationStatus: "partial" as const,
@@ -504,6 +870,9 @@ test("生成失败后也拒绝恢复外层IP与内部结果IP不一致的损坏�
   }), true);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify({ error: "模拟生成失败" }), {
         status: 502,
@@ -558,6 +927,7 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
     title: "为什么聪明人反而越来越焦虑",
     source: "manual",
   }, { ...boardResult, topic: "为什么聪明人反而越来越焦虑" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   let resolveCapturedRequest: (requestBody: Record<string, unknown>) => void = () => {
     throw new Error("请求捕获通道尚未初始化");
@@ -567,6 +937,9 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
   });
 
   globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
     if (String(input) === "/api/script-factory") {
       const requestBody: unknown = JSON.parse(String(init?.body ?? "{}"));
       if (!isRecord(requestBody)) throw new Error("脚本工厂请求体不是对象");
@@ -609,6 +982,78 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
   }
 });
 
+test("关联选题生成期间修改选题会丢弃旧结果且不保存", { timeout: 5000 }, async () => {
+  const originalFetch = globalThis.fetch;
+  const ip = createTopicBoardIPProfile();
+  const boardResult = createValidTopicBoardResult();
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const topic = addEvaluatedTopicAsset({
+    ipId: ip.id,
+    title: "生成期间不能更换选题",
+    source: "manual",
+  }, { ...boardResult, topic: "生成期间不能更换选题" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
+  window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
+
+  let releaseResponse!: () => void;
+  let markRequested!: () => void;
+  const requested = new Promise<void>(resolve => {
+    markRequested = resolve;
+  });
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
+    if (String(input) === "/api/script-factory") {
+      markRequested();
+      return new Promise<Response>(resolve => {
+        releaseResponse = () => resolve(new Response(
+          JSON.stringify(createCompleteScriptResponse(ip.id, ip.name, topic.title)),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ));
+      });
+    }
+    return new Response(JSON.stringify({ results: [], debug: null }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { act, render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(
+      <IPProvider>
+        <ScriptFactoryPage />
+      </IPProvider>,
+    );
+
+    await view.findByDisplayValue(topic.title);
+    const clickGeneration = user.click(await unlockGeneration(view, user));
+    await waitWithTimeout(requested, 3000);
+
+    const input = view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文");
+    await user.clear(input);
+    await user.type(input, "生成期间修改后的新选题");
+    assert.ok(await view.findByText("选题内容已变更，请重新审计"));
+
+    await act(async () => {
+      releaseResponse();
+    });
+    await clickGeneration;
+
+    await waitFor(() => assert.equal(getScriptAssets(ip.id).length, 0));
+    assert.equal(view.queryByText("先给出反常识判断"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("关联选题生成期间切换IP会停止保存并给出明确提示", { timeout: 5000 }, async () => {
   const originalFetch = globalThis.fetch;
   const ip = createTopicBoardIPProfile();
@@ -622,6 +1067,7 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
     title: "切换IP时不能误存",
     source: "manual",
   }, { ...boardResult, topic: "切换IP时不能误存" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
 
   let releaseResponse!: () => void;
@@ -630,6 +1076,9 @@ test("关联选题生成期间切换IP会停止保存并给出明确提示", { t
     markRequested = resolve;
   });
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
     if (String(input) === "/api/script-factory") {
       markRequested();
       return new Promise<Response>(resolve => {
@@ -697,9 +1146,13 @@ test("接口返回的脚本IP与请求IP不一致时停止保存", async () => {
     title: "接口IP错配不能保存",
     source: "manual",
   }, { ...boardResult, topic: "接口IP错配不能保存" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
 
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(createCompleteScriptResponse("ip-wrong", "错误IP", topic.title)), {
         status: 200,
@@ -746,6 +1199,7 @@ test("部分成功草稿保存topicId并在刷新后恢复选题关联", async (
     title: "部分成功也要保留关联",
     source: "manual",
   }, { ...boardResult, topic: "部分成功也要保留关联" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   const partialResponse = {
     ...createCompleteScriptResponse(ip.id, ip.name, topic.title),
@@ -758,6 +1212,9 @@ test("部分成功草稿保存topicId并在刷新后恢复选题关联", async (
   };
 
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(partialResponse), {
         status: 200,
@@ -850,9 +1307,13 @@ test("生成前选题状态失效时不调用接口也不保存脚本", async ()
     title: "生成前被废弃的选题",
     source: "manual",
   }, { ...boardResult, topic: "生成前被废弃的选题" });
+  const boundaryNodeId = seedConfirmedBoundarySource(ip.id);
   window.history.replaceState({}, "", `/script-factory?topicId=${encodeURIComponent(topic.id)}`);
   let scriptFactoryCalls = 0;
   globalThis.fetch = async (input) => {
+    if (String(input) === "/api/ip-boundary/check") {
+      return alignedBoundaryResponse(boundaryNodeId);
+    }
     if (String(input) === "/api/script-factory") scriptFactoryCalls += 1;
     return new Response(JSON.stringify({ results: [], debug: null }), {
       status: 200,
