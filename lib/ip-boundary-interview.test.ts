@@ -4,6 +4,79 @@ import { NextRequest } from "next/server";
 
 const interviewModulePath = "./ip-boundary-interview";
 const interviewRoutePath = "../app/api/ip-boundary/interview/questions/route";
+const interviewExtractRoutePath = "../app/api/ip-boundary/interview/extract/route";
+
+const INTERVIEW_QUESTION = "老师，关于停止学习这个话题，您的真实判断是什么？";
+const INTERVIEW_ANSWER = "  我认为停止学习能消化知识，因为大脑需要空白期，比如我去年闭关一个月后效率更高了。\n";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function requestInterviewExtraction() {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "stop",
+        message: {
+          content: JSON.stringify({
+            nodes: [{
+              nodeRef: "N1",
+              question: {
+                content: "为什么停止学习能帮助消化知识？",
+                derivation: "inferred",
+                anchors: [{ quote: "停止学习能消化知识" }],
+              },
+              claim: {
+                content: "停止学习能消化知识。",
+                anchors: [{ quote: "停止学习能消化知识" }],
+              },
+              reasoning: {
+                status: "complete",
+                steps: [{
+                  order: 1,
+                  content: "大脑需要空白期。",
+                  anchors: [{ quote: "大脑需要空白期" }],
+                }],
+              },
+              evidence: [{
+                type: "case",
+                content: "去年闭关一个月后效率更高。",
+                anchors: [{ quote: "我去年闭关一个月后效率更高了" }],
+              }],
+              concepts: [],
+            }],
+            aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+          }),
+        },
+      }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    const { POST } = await import(interviewExtractRoutePath);
+    return await POST(new NextRequest("http://localhost/api/ip-boundary/interview/extract", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-DeepSeek-Key": "test-key",
+      },
+      body: JSON.stringify({
+        activeIPId: "ip-interview-extract",
+        topicId: "topic-interview-extract",
+        interviewId: "interview-extract-v1",
+        rawInteraction: [{
+          questionId: "question-claim",
+          question: INTERVIEW_QUESTION,
+          answer: INTERVIEW_ANSWER,
+        }],
+      }),
+    }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
 
 test("NONE访谈拒绝带预设立场的问题并在重试后报告INVALID_RESPONSE", async () => {
   const { generateInterviewQuestions } = await import(interviewModulePath);
@@ -100,4 +173,51 @@ test("访谈问题接口缺少activeIPId时在调用AI前返回403", async () =>
   ));
 
   assert.equal(response.status, 403);
+});
+
+test("访谈提取接口把一段口语回答拆成观点、推理和亲历案例", async () => {
+  const response = await requestInterviewExtraction();
+  assert.equal(response.status, 200);
+  const payload: unknown = await response.json();
+  assert.ok(isRecord(payload));
+  assert.ok(Array.isArray(payload.candidates));
+  assert.equal(payload.candidates.length, 1);
+
+  const candidate: unknown = payload.candidates[0];
+  assert.ok(isRecord(candidate));
+  assert.ok(isRecord(candidate.node));
+  assert.ok(isRecord(candidate.node.claim));
+  assert.equal(candidate.node.claim.content, "停止学习能消化知识。");
+  assert.ok(isRecord(candidate.node.reasoning));
+  assert.ok(Array.isArray(candidate.node.reasoning.steps));
+  assert.equal(candidate.node.reasoning.steps.length, 1);
+  assert.ok(isRecord(candidate.node.reasoning.steps[0]));
+  assert.equal(candidate.node.reasoning.steps[0].content, "大脑需要空白期。");
+  assert.ok(Array.isArray(candidate.node.evidence));
+  assert.equal(candidate.node.evidence.length, 1);
+  assert.ok(isRecord(candidate.node.evidence[0]));
+  assert.equal(candidate.node.evidence[0].type, "case");
+  assert.equal(candidate.node.evidence[0].content, "去年闭关一个月后效率更高。");
+});
+
+test("访谈候选节点强引用保留完整问答原文的InterviewSource", async () => {
+  const response = await requestInterviewExtraction();
+  assert.equal(response.status, 200);
+  const payload: unknown = await response.json();
+  assert.ok(isRecord(payload));
+  assert.ok(isRecord(payload.source));
+  assert.equal(payload.source.ipId, "ip-interview-extract");
+  assert.equal(payload.source.topicId, "topic-interview-extract");
+  assert.equal(payload.source.interviewId, "interview-extract-v1");
+  assert.deepEqual(payload.source.rawInteraction, [{
+    questionId: "question-claim",
+    question: INTERVIEW_QUESTION,
+    answer: INTERVIEW_ANSWER,
+  }]);
+  assert.equal(typeof payload.source.id, "string");
+  assert.ok(typeof payload.source.timestamp === "string" && !Number.isNaN(Date.parse(payload.source.timestamp)));
+
+  assert.ok(Array.isArray(payload.candidates));
+  assert.ok(isRecord(payload.candidates[0]));
+  assert.equal(payload.candidates[0].sourceId, payload.source.id);
 });

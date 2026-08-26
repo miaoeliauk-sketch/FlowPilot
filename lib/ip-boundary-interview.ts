@@ -1,4 +1,6 @@
 import type { MissingElement } from "./ip-boundary-engine";
+import type { CognitionNodeV2 } from "./types";
+import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 
 export type InterviewCoverage = "NONE" | "PARTIAL";
 export type InterviewPanelState =
@@ -46,6 +48,58 @@ export interface GenerateInterviewQuestionsInput {
   missingElements: MissingElement[];
   contextNodes: InterviewContextNode[];
   callModel: (request: InterviewQuestionModelRequest) => Promise<unknown>;
+}
+
+export interface InterviewRawInteraction {
+  questionId: string;
+  question: string;
+  answer: string;
+}
+
+export interface InterviewSource {
+  id: string;
+  ipId: string;
+  topicId: string;
+  interviewId: string;
+  rawInteraction: InterviewRawInteraction[];
+  timestamp: string;
+}
+
+export interface InterviewCandidateNode {
+  sourceId: string;
+  node: CognitionNodeV2;
+}
+
+export interface InterviewExtractionModelRequest {
+  rawInteraction: InterviewRawInteraction[];
+  answerText: string;
+  instruction: string;
+}
+
+export interface ExtractInterviewSourceInput {
+  activeIPId: string;
+  topicId: string;
+  interviewId: string;
+  rawInteraction: InterviewRawInteraction[];
+  sourceId: string;
+  timestamp: string;
+  callModel: (request: InterviewExtractionModelRequest) => Promise<unknown>;
+  createNodeId?: () => string;
+}
+
+export interface InterviewExtractionResult {
+  source: InterviewSource;
+  candidates: InterviewCandidateNode[];
+}
+
+export class InterviewExtractionError extends Error {
+  readonly code: "EMPTY_LOGIC_WARNING" | "INVALID_EXTRACTION";
+
+  constructor(code: "EMPTY_LOGIC_WARNING" | "INVALID_EXTRACTION", message: string) {
+    super(message);
+    this.name = "InterviewExtractionError";
+    this.code = code;
+  }
 }
 
 export class InterviewQuestionGenerationError extends Error {
@@ -140,4 +194,48 @@ export async function generateInterviewQuestions(
   }
 
   throw new InterviewQuestionGenerationError();
+}
+
+export async function extractInterviewSource(
+  input: ExtractInterviewSourceInput,
+): Promise<InterviewExtractionResult> {
+  const source: InterviewSource = {
+    id: input.sourceId,
+    ipId: input.activeIPId,
+    topicId: input.topicId,
+    interviewId: input.interviewId,
+    rawInteraction: input.rawInteraction.map(item => ({ ...item })),
+    timestamp: input.timestamp,
+  };
+  const answerText = source.rawInteraction.map(item => item.answer).join("\n\n");
+  const candidate = await input.callModel({
+    rawInteraction: source.rawInteraction.map(item => ({ ...item })),
+    answerText,
+    instruction: "只从老师回答原文提取V2认知节点。观点、推理和案例必须分别锚定回答中的逐字片段；不得把AI问题当作老师观点，不得补充外部知识。",
+  });
+  if (!isRecord(candidate) || !Array.isArray(candidate.nodes) || candidate.nodes.length === 0) {
+    throw new InterviewExtractionError(
+      "EMPTY_LOGIC_WARNING",
+      "回答中暂未提取到明确观点，请补充您的判断、原因或案例。",
+    );
+  }
+
+  try {
+    const analysis = buildIPSourceAnalysisV2({
+      sourceId: source.id,
+      sourceContent: answerText,
+      analyzedAt: source.timestamp,
+      candidate,
+      createId: input.createNodeId,
+    });
+    return {
+      source,
+      candidates: analysis.nodes.map(node => ({ sourceId: analysis.sourceId, node })),
+    };
+  } catch (error) {
+    throw new InterviewExtractionError(
+      "INVALID_EXTRACTION",
+      error instanceof Error ? error.message : "访谈提取结果未通过证据校验",
+    );
+  }
 }

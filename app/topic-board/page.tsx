@@ -34,6 +34,7 @@ import {
   type BoundaryEvidenceNode,
 } from "@/lib/ip-boundary-ui";
 import { InterviewPanel } from "@/components/ip-boundary/InterviewPanel";
+import type { ExistingClaim } from "@/components/ip-boundary/InterviewExtractionAudit";
 import type { InterviewPanelState, InterviewQuestion } from "@/lib/ip-boundary-interview";
 
 // ── Constants ──
@@ -499,6 +500,7 @@ export default function TopicBoardPage() {
   const [boundaryTopicAssetId, setBoundaryTopicAssetId] = useState<string | null>(null);
   const [pendingGenerateAsset, setPendingGenerateAsset] = useState<TopicAsset | null>(null);
   const [interviewSession, setInterviewSession] = useState<InterviewSession | null>(null);
+  const [interviewExistingClaims, setInterviewExistingClaims] = useState<ExistingClaim[]>([]);
 
   // 参考知识：选题输入停止变化800ms后自动检索，不是实时每个按键都查
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
@@ -522,6 +524,7 @@ export default function TopicBoardPage() {
     setBoundaryTopicAssetId(null);
     setPendingGenerateAsset(null);
     setInterviewSession(null);
+    setInterviewExistingClaims([]);
   }, [activeIP?.id]);
 
   useEffect(() => {
@@ -534,6 +537,7 @@ export default function TopicBoardPage() {
     setBoundaryTopicAssetId(null);
     setPendingGenerateAsset(null);
     setInterviewSession(null);
+    setInterviewExistingClaims([]);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const requestSeq = knowledgeRequestSeqRef.current + 1;
     knowledgeRequestSeqRef.current = requestSeq;
@@ -577,6 +581,12 @@ export default function TopicBoardPage() {
       setBoundaryMessage("认知库读取失败，本次没有获得可信的边界结论。请先检查知识库数据。");
       return;
     }
+    setInterviewExistingClaims(bundle.sources.flatMap(source => source.analysis.nodes
+      .filter(node => node.reviewStatus === "human_confirmed")
+      .map(node => ({
+        nodeId: node.id,
+        content: node.humanRevision?.claim ?? node.claim.content,
+      }))));
     if (bundle.sources.length === 0) {
       if (bundle.unregisteredV1) {
         setBoundaryStatus("upgrade_required");
@@ -1049,6 +1059,7 @@ export default function TopicBoardPage() {
               topicId={interviewSession.topicId}
               interviewId={interviewSession.interviewId}
               questions={interviewSession.questions}
+              existingClaims={interviewExistingClaims}
               state={interviewSession.state}
               errorMessage={interviewSession.errorMessage}
             />
