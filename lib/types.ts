@@ -1,5 +1,6 @@
 import type { TopicBoardResult, TopicEvaluationSummary } from "./topic-board-contract";
 import type { ScriptDirectorProfileId } from "./script-director-profile";
+import type { ContentAdaptationRecord } from "./content-adaptation";
 
 // ── IP风格改写引擎：口播逐字稿样本库 + 风格学习机制 ──
 // 注：原 StyleProfile / AIMemory / TrainingSource 三个接口是早期"AI人格训练"功能
@@ -540,6 +541,7 @@ export interface HotMaterialAnalysis {
   ipFitTier: "高度匹配" | "中度匹配" | "低度匹配" | null;
   ipFitReason: string;
   dna: ViralDNA;
+  contentAdaptation?: ContentAdaptationRecord | null;
   createdAt: string;
   addedToKnowledgeBase: boolean;
   knowledgeEntryId: string | null;

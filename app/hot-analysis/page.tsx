@@ -10,6 +10,7 @@ import {
   getHotAnalysisKnowledgeGroupsByAnalysisId,
   getScriptAssetsReadOnly,
   getVideoReviewsReadOnly,
+  updateHotAnalysisContentAdaptationStrict,
 } from "@/lib/ip-store";
 import type { HotAnalysisKnowledgeGroup } from "@/lib/ip-store";
 import {
@@ -23,6 +24,14 @@ import {
   deriveKnowledgeTrustStatus,
 } from "@/lib/knowledge-effect-reference";
 import type { KnowledgeEffectReferenceIndex } from "@/lib/knowledge-effect-reference";
+import {
+  CONTENT_TRACKS,
+  createContentAdaptationRecord,
+  type ContentAdaptationReviewAction,
+  type EditableContentAdaptationProfile,
+  type ContentAdaptationRecord,
+} from "@/lib/content-adaptation";
+import { CONTENT_PURPOSES } from "@/lib/content-purpose";
 import { Icon } from "@/components/ui/icon";
 import { Select } from "@/components/ui/select";
 
@@ -56,6 +65,210 @@ function TierTag({ label }: { label: string }) {
   return <span className="rounded-full px-2 py-0.5 text-[10.5px] font-bold" style={{ background: c.bg, color: c.text }}>{label}</span>;
 }
 
+function splitAdaptationTags(value: string): string[] {
+  return Array.from(new Set(value.split(/[、，,]/).map(item => item.trim()).filter(Boolean))).slice(0, 3);
+}
+
+function cloneEditableAdaptationProfile(
+  profile: EditableContentAdaptationProfile,
+): EditableContentAdaptationProfile {
+  return {
+    ...profile,
+    fineTags: [...profile.fineTags],
+    audienceTags: [...profile.audienceTags],
+    reasons: { ...profile.reasons },
+  };
+}
+
+function ContentAdaptationSummary({ record, ipName, onReview }: {
+  record: ContentAdaptationRecord;
+  ipName?: string;
+  onReview: (action: ContentAdaptationReviewAction) => void;
+}) {
+  const current = record.current;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<EditableContentAdaptationProfile | null>(
+    current ? cloneEditableAdaptationProfile(current.contentProfile) : null,
+  );
+  const [fineTagsText, setFineTagsText] = useState(
+    current ? current.contentProfile.fineTags.join("、") : "",
+  );
+  const [audienceTagsText, setAudienceTagsText] = useState(
+    current ? current.contentProfile.audienceTags.join("、") : "",
+  );
+  useEffect(() => {
+    setEditing(false);
+    setDraft(record.current
+      ? cloneEditableAdaptationProfile(record.current.contentProfile)
+      : null);
+    setFineTagsText(record.current?.contentProfile.fineTags.join("、") ?? "");
+    setAudienceTagsText(record.current?.contentProfile.audienceTags.join("、") ?? "");
+  }, [record.updatedAt]);
+
+  function resetDraft() {
+    if (!record.current) return;
+    setDraft(cloneEditableAdaptationProfile(record.current.contentProfile));
+    setFineTagsText(record.current.contentProfile.fineTags.join("、"));
+    setAudienceTagsText(record.current.contentProfile.audienceTags.join("、"));
+  }
+
+  if (!current) {
+    return (
+      <div className="rounded-[12px] border border-[#E5E4DE] bg-[#F7F6F2] p-4">
+        <div className="text-[12px] font-bold text-[#666]">内容适配（已人工删除）</div>
+        <p className="mt-1 text-[11.5px] text-[#888]">AI原始判断仍保留在历史记录中。</p>
+        <details className="mt-2 text-[11.5px] text-[#666]">
+          <summary className="cursor-pointer font-semibold">查看AI原始判断（不可覆盖）</summary>
+          <p className="mt-1">主要赛道：{record.aiOriginal.contentProfile.primaryTrack}</p>
+          <p>目标人群：{record.aiOriginal.contentProfile.targetAudience}</p>
+          <p>主要目的：{record.aiOriginal.contentProfile.primaryPurpose}</p>
+        </details>
+      </div>
+    );
+  }
+  const profile = current.contentProfile;
+  const currentHeading = record.reviewStatus === "ai_prefill"
+    ? "内容适配（AI预填）"
+    : record.reviewStatus === "human_confirmed"
+      ? "当前采用结果（人工确认）"
+      : "当前采用结果（人工修改）";
+  return (
+    <section className="space-y-3" aria-label="内容适配与IP匹配">
+      <div className="rounded-[12px] border border-[#DDE8C5] bg-[#FAFCF5] p-4">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[12px] font-bold text-[#4E6C25]">{currentHeading}</div>
+          {!editing && (
+            <button type="button" onClick={() => { resetDraft(); setEditing(true); }} className="text-[11.5px] font-semibold text-[#639922]">编辑内容适配</button>
+          )}
+        </div>
+        {editing && draft ? (
+          <div className="grid gap-2 text-[11.5px] sm:grid-cols-2">
+            <label>主要赛道
+              <select aria-label="主要赛道" value={draft.primaryTrack ?? ""} onChange={event => setDraft(previous => {
+                if (!previous) return previous;
+                const primaryTrack = event.target.value
+                  ? event.target.value as typeof previous.primaryTrack
+                  : null;
+                return {
+                  ...previous,
+                  primaryTrack,
+                  secondaryTrack: primaryTrack && previous.secondaryTrack !== primaryTrack
+                    ? previous.secondaryTrack
+                    : null,
+                  reasons: { ...previous.reasons, track: primaryTrack ? previous.reasons.track : null },
+                };
+              })} className="mt-1 w-full rounded border px-2 py-1.5">
+                <option value="">删除赛道判断</option>
+                {CONTENT_TRACKS.map(track => <option key={track} value={track}>{track}</option>)}
+              </select>
+            </label>
+            <label>辅助赛道
+              <select aria-label="辅助赛道" value={draft.secondaryTrack ?? ""} onChange={event => setDraft(previous => previous ? {
+                ...previous,
+                secondaryTrack: event.target.value ? event.target.value as typeof previous.secondaryTrack : null,
+              } : previous)} className="mt-1 w-full rounded border px-2 py-1.5">
+                <option value="">无</option>
+                {CONTENT_TRACKS.filter(track => track !== draft.primaryTrack).map(track => <option key={track} value={track}>{track}</option>)}
+              </select>
+            </label>
+            <label>细分标签
+              <input aria-label="细分标签" value={fineTagsText} onChange={event => {
+                setFineTagsText(event.target.value);
+                setDraft(previous => previous ? { ...previous, fineTags: splitAdaptationTags(event.target.value) } : previous);
+              }} className="mt-1 w-full rounded border px-2 py-1.5" />
+            </label>
+            <label>目标人群
+              <input aria-label="目标人群" value={draft.targetAudience ?? ""} onChange={event => setDraft(previous => previous ? {
+                ...previous,
+                targetAudience: event.target.value || null,
+                reasons: { ...previous.reasons, audience: event.target.value ? previous.reasons.audience : null },
+              } : previous)} className="mt-1 w-full rounded border px-2 py-1.5" />
+            </label>
+            <label>人群标签
+              <input aria-label="人群标签" value={audienceTagsText} onChange={event => {
+                setAudienceTagsText(event.target.value);
+                setDraft(previous => previous ? { ...previous, audienceTags: splitAdaptationTags(event.target.value) } : previous);
+              }} className="mt-1 w-full rounded border px-2 py-1.5" />
+            </label>
+            <label>主要目的
+              <select aria-label="主要目的" value={draft.primaryPurpose ?? ""} onChange={event => setDraft(previous => {
+                if (!previous) return previous;
+                const primaryPurpose = event.target.value
+                  ? event.target.value as typeof previous.primaryPurpose
+                  : null;
+                return {
+                  ...previous,
+                  primaryPurpose,
+                  secondaryPurpose: primaryPurpose && previous.secondaryPurpose !== primaryPurpose
+                    ? previous.secondaryPurpose
+                    : null,
+                  reasons: { ...previous.reasons, purpose: primaryPurpose ? previous.reasons.purpose : null },
+                };
+              })} className="mt-1 w-full rounded border px-2 py-1.5">
+                <option value="">删除目的判断</option>
+                {CONTENT_PURPOSES.map(purpose => <option key={purpose} value={purpose}>{purpose}</option>)}
+              </select>
+            </label>
+            <label>辅助目的
+              <select aria-label="辅助目的" value={draft.secondaryPurpose ?? ""} onChange={event => setDraft(previous => previous ? {
+                ...previous,
+                secondaryPurpose: event.target.value ? event.target.value as typeof previous.secondaryPurpose : null,
+              } : previous)} className="mt-1 w-full rounded border px-2 py-1.5">
+                <option value="">无</option>
+                {CONTENT_PURPOSES.filter(purpose => purpose !== draft.primaryPurpose).map(purpose => <option key={purpose} value={purpose}>{purpose}</option>)}
+              </select>
+            </label>
+            <label className="sm:col-span-2">赛道判断依据
+              <input aria-label="赛道判断依据" value={draft.reasons.track ?? ""} onChange={event => setDraft(previous => previous ? { ...previous, reasons: { ...previous.reasons, track: event.target.value || null } } : previous)} className="mt-1 w-full rounded border px-2 py-1.5" />
+            </label>
+            <label className="sm:col-span-2">目标人群判断依据
+              <input aria-label="目标人群判断依据" value={draft.reasons.audience ?? ""} onChange={event => setDraft(previous => previous ? { ...previous, reasons: { ...previous.reasons, audience: event.target.value || null } } : previous)} className="mt-1 w-full rounded border px-2 py-1.5" />
+            </label>
+            <label className="sm:col-span-2">内容目的判断依据
+              <input aria-label="内容目的判断依据" value={draft.reasons.purpose ?? ""} onChange={event => setDraft(previous => previous ? { ...previous, reasons: { ...previous.reasons, purpose: event.target.value || null } } : previous)} className="mt-1 w-full rounded border px-2 py-1.5" />
+            </label>
+            <div className="flex gap-2 sm:col-span-2">
+              <button type="button" onClick={() => onReview({ type: "modify", contentProfile: draft })} className="rounded bg-[#1C1C1B] px-3 py-1.5 font-semibold text-white">保存人工修改</button>
+              <button type="button" onClick={() => { resetDraft(); setEditing(false); }} className="rounded border px-3 py-1.5 text-[#666]">取消编辑</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-1 text-[12px] leading-5 text-[#444]">
+              <p>主要赛道：{profile.primaryTrack ?? "已删除"}</p>
+              {profile.secondaryTrack && <p>辅助赛道：{profile.secondaryTrack}</p>}
+              <p>细分标签：{profile.fineTags.length > 0 ? profile.fineTags.join("、") : "已删除"}</p>
+              <p>目标人群：{profile.targetAudience ?? "已删除"}</p>
+              <p>人群标签：{profile.audienceTags.length > 0 ? profile.audienceTags.join("、") : "已删除"}</p>
+              <p>主要目的：{profile.primaryPurpose ?? "已删除"}</p>
+              {profile.secondaryPurpose && <p>辅助目的：{profile.secondaryPurpose}</p>}
+            </div>
+            <details className="mt-2 text-[11.5px] text-[#666]">
+              <summary className="cursor-pointer font-semibold">AI原始判断（不可覆盖）</summary>
+              <p className="mt-1">主要赛道：{record.aiOriginal.contentProfile.primaryTrack}</p>
+              <p>目标人群：{record.aiOriginal.contentProfile.targetAudience}</p>
+              <p>主要目的：{record.aiOriginal.contentProfile.primaryPurpose}</p>
+            </details>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {record.reviewStatus === "ai_prefill" && <button type="button" onClick={() => onReview({ type: "confirm" })} className="rounded border border-[#BFD59F] px-3 py-1.5 text-[11.5px] font-semibold text-[#4E6C25]">确认AI预填</button>}
+              <button type="button" onClick={() => onReview({ type: "remove" })} className="rounded border border-[#D8B1B1] px-3 py-1.5 text-[11.5px] text-[#A32D2D]">删除当前内容适配</button>
+            </div>
+          </>
+        )}
+      </div>
+      {record.ipFitStatus === "needs_refresh" ? (
+        <div className="rounded-[12px] border border-[#E7D8A2] bg-[#FFFDF6] p-4 text-[12px] font-semibold text-[#7A5C00]">IP匹配需重新判断</div>
+      ) : current.ipFit && (
+        <div className="rounded-[12px] border border-[#E5E4DE] bg-[#F7F6F2] p-4">
+          <div className="mb-1 text-[11px] font-bold text-[#666]">与当前IP「{ipName ?? "未命名IP"}」的匹配度</div>
+          <div className="flex items-center gap-2"><TierTag label={current.ipFit.tier} /></div>
+          <p className="mt-1 text-[12px] leading-5 text-[#444]">{current.ipFit.reason}</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ════════════════════ Tab1 素材雷达 ════════════════════
 // 标题模式的 5 项诊断
 interface TitleScoreItem { score: number; reason: string }
@@ -84,6 +297,7 @@ interface MethodCard {
   aiUsage?: string;
   example?: string;
   unsuitableCases?: string;
+  generatedFrom?: "fallback_content" | "content_adaptation_ip_fit";
 }
 
 interface AnalyzeResult {
@@ -256,7 +470,7 @@ function compactKeywords(parts: Array<string | undefined | null>): string[] {
   return Array.from(new Set(parts.flatMap(part => (part ?? "").split(/[、，,。\s#｜|/]+/)).map(s => s.trim()).filter(Boolean))).slice(0, 8);
 }
 
-function normalizeMethodCards(rawCards: unknown, result: AnalyzeResult, inputRaw: string, ipName?: string): MethodCard[] {
+function normalizeMethodCards(rawCards: unknown, result: AnalyzeResult, inputRaw: string): MethodCard[] {
   const parsedCards = Array.isArray(rawCards) ? rawCards : [];
   const normalized = parsedCards.map((card: any) => ({
     name: String(card.name ?? card.title ?? "").trim(),
@@ -293,6 +507,7 @@ function normalizeMethodCards(rawCards: unknown, result: AnalyzeResult, inputRaw
       aiUsage: "当用户输入类似选题时，先判断痛点是否具体，再帮助补出人群、场景和结果承诺。",
       example: title,
       unsuitableCases: "纯情绪表达、没有具体用户问题或没有可验证经验的内容不适合使用。",
+      generatedFrom: "fallback_content",
     },
     {
       name: `${needLayer}拆解法`,
@@ -305,6 +520,7 @@ function normalizeMethodCards(rawCards: unknown, result: AnalyzeResult, inputRaw
       aiUsage: "用于把一个有价值的观点扩展成更完整的口播结构。",
       example: title,
       unsuitableCases: "只适合展示氛围、不需要解释逻辑的内容不适合强行拆解。",
+      generatedFrom: "fallback_content",
     },
     {
       name: `${hookType}开头法`,
@@ -317,25 +533,39 @@ function normalizeMethodCards(rawCards: unknown, result: AnalyzeResult, inputRaw
       aiUsage: "生成脚本时优先用它压缩开场，让主题更快进入用户痛点。",
       example: evidence,
       unsuitableCases: "严肃通知、纯信息公告不适合过度制造冲突。",
+      generatedFrom: "fallback_content",
     },
   ];
 
-  if (ipName || result.ipFitTier) {
-    cards.push({
-      name: `${ipName || "IP"}价值表达法`,
-      targetCategory: "定位方法库",
-      summary: "把内容价值和账号身份绑定，让用户知道这个观点为什么应该由这个IP来说。",
-      evidenceQuote: result.ipFitReason || evidence,
-      coreMethod: "用专业经验、身份背景或长期观察支撑观点，增强信任感。",
-      applicableScenes: ["个人IP内容", "服务型IP", "专业经验表达"],
-      triggerKeywords: compactKeywords([ipName, "IP定位", "信任感", "专业经验", title]),
-      aiUsage: "用于判断选题是否符合当前IP，以及如何把观点讲得更像这个账号。",
-      example: title,
-      unsuitableCases: "和账号定位无关的娱乐化内容不适合强绑定专业身份。",
-    });
-  }
-
   return cards;
+}
+
+function syncContentAdaptationIPMethodCard(
+  cards: MethodCard[],
+  result: AnalyzeResult,
+  inputRaw: string,
+  ipName: string | undefined,
+  record: ContentAdaptationRecord,
+): MethodCard[] {
+  const hadGeneratedIPCard = cards.some(card => card.generatedFrom === "content_adaptation_ip_fit");
+  const withoutPreviousIPCard = cards.filter(card => card.generatedFrom !== "content_adaptation_ip_fit");
+  const usesFallbackCards = withoutPreviousIPCard.some(card => card.generatedFrom === "fallback_content");
+  const ipFit = record.ipFitStatus === "current" ? record.current?.ipFit : null;
+  if (!ipName || !ipFit || (!usesFallbackCards && !hadGeneratedIPCard)) return withoutPreviousIPCard;
+  const title = result.title || inputRaw.slice(0, 24) || "当前内容";
+  return [...withoutPreviousIPCard, {
+    name: `${ipName}价值表达法`,
+    targetCategory: "定位方法库",
+    summary: "把内容价值和账号身份绑定，让用户知道这个观点为什么应该由这个IP来说。",
+    evidenceQuote: ipFit.reason,
+    coreMethod: "用专业经验、身份背景或长期观察支撑观点，增强信任感。",
+    applicableScenes: ["个人IP内容", "服务型IP", "专业经验表达"],
+    triggerKeywords: compactKeywords([ipName, "IP定位", "信任感", "专业经验", title]),
+    aiUsage: "用于判断选题是否符合当前IP，以及如何把观点讲得更像这个账号。",
+    example: title,
+    unsuitableCases: "和账号定位无关的娱乐化内容不适合强绑定专业身份。",
+    generatedFrom: "content_adaptation_ip_fit",
+  }];
 }
 
 function buildOriginalContentMetadata(inputRaw: string, analysisId: string, sourceUrl: string) {
@@ -387,6 +617,7 @@ function RadarTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
+  const [contentAdaptation, setContentAdaptation] = useState<ContentAdaptationRecord | null>(null);
   const [added, setAdded] = useState(false);
   const [caseAdded, setCaseAdded] = useState(false);
   const [casePrecheck, setCasePrecheck] = useState<KnowledgeIntakePrecheckAssessment | null>(null);
@@ -401,6 +632,21 @@ function RadarTab() {
   const [lastAnalysisId, setLastAnalysisId] = useState<string | null>(null);
   const previousActiveIPId = useRef<string | null | undefined>(undefined);
   const analysisRequestSequence = useRef(0);
+
+  function invalidateCurrentAnalysis() {
+    analysisRequestSequence.current += 1;
+    setLoading(false);
+    setError(null);
+    setResult(null);
+    setContentAdaptation(null);
+    setLastAnalysisId(null);
+    setCasePrecheck(null);
+    setMethodPrechecks(null);
+    setMethodDecisions([]);
+    setAdded(false);
+    setCaseAdded(false);
+    setAddedCount(0);
+  }
 
   function refreshHistory() {
     const scopedHistory = getHotAnalyses().filter(item =>
@@ -430,6 +676,7 @@ function RadarTab() {
     analysisRequestSequence.current += 1;
     setLoading(false);
     setResult(null);
+    setContentAdaptation(null);
     setLastAnalysisId(null);
     setCasePrecheck(null);
     setMethodPrechecks(null);
@@ -443,7 +690,7 @@ function RadarTab() {
   async function handleAnalyze() {
     if (!inputRaw.trim()) { setError("请提供要分析的内容"); return; }
     const requestSequence = ++analysisRequestSequence.current;
-    setLoading(true); setError(null); setResult(null); setAdded(false); setCaseAdded(false); setAddedCount(0); setCasePrecheck(null); setMethodPrechecks(null); setMethodDecisions([]);
+    setLoading(true); setError(null); setResult(null); setContentAdaptation(null); setLastAnalysisId(null); setAdded(false); setCaseAdded(false); setAddedCount(0); setCasePrecheck(null); setMethodPrechecks(null); setMethodDecisions([]);
     try {
       const res = await apiFetch("/api/hot-analysis/analyze", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -473,13 +720,48 @@ function RadarTab() {
         setError(typeof data.error === "string" && data.error ? data.error : "AI请求失败");
         return;
       }
-      const normalizedResult = {
+      const baseResult = {
         ...data,
         mode: data.mode ?? inputType,
-        methodCards: normalizeMethodCards(data.methodCards, data as AnalyzeResult, inputRaw, activeIP?.name),
+        methodCards: normalizeMethodCards(data.methodCards, data as AnalyzeResult, inputRaw),
       } as AnalyzeResult;
-      setResult(normalizedResult);
-
+      const adaptationKey = `hot-analysis-${requestSequence}`;
+      const adaptationResponse = await apiFetch("/api/content-adaptation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [{ key: adaptationKey, content: inputRaw }],
+          ipContext: activeIP ? {
+            id: activeIP.id,
+            name: activeIP.name,
+            positioning: activeIP.positioning,
+            audience: activeIP.audience,
+            contentDirection: activeIP.contentDirection,
+          } : null,
+        }),
+      });
+      if (requestSequence !== analysisRequestSequence.current) return;
+      const adaptationData = await adaptationResponse.json() as Record<string, any>;
+      if (requestSequence !== analysisRequestSequence.current) return;
+      if (!adaptationResponse.ok || !Array.isArray(adaptationData.items) || !adaptationData.items[0]) {
+        throw new Error(typeof adaptationData.error === "string" && adaptationData.error
+          ? adaptationData.error
+          : "内容适配分析失败，请重试");
+      }
+      const adaptationRecord = createContentAdaptationRecord(
+        adaptationData.items[0],
+        new Date().toISOString(),
+      );
+      const normalizedResult = {
+        ...baseResult,
+        methodCards: syncContentAdaptationIPMethodCard(
+          baseResult.methodCards,
+          baseResult,
+          inputRaw,
+          activeIP?.name,
+          adaptationRecord,
+        ),
+      };
       // ── 存历史：标题模式用空骨架的 evaluation/dna，其余按响应存 ──
       const isTitle = normalizedResult.mode === "title";
       const saved = addHotAnalysis({
@@ -489,13 +771,47 @@ function RadarTab() {
         worthLearning: normalizeWorthLearning(normalizedResult.worthLearning), worthLearningReason: normalizedResult.worthLearningReason,
         ipId: activeIP?.id ?? null, ipFitTier: normalizeIPFitTier(normalizedResult.ipFitTier), ipFitReason: normalizedResult.ipFitReason,
         dna: isTitle ? EMPTY_DNA : (normalizedResult.dna ?? EMPTY_DNA),
+        contentAdaptation: adaptationRecord,
       });
+      if (requestSequence !== analysisRequestSequence.current) return;
+      setResult(normalizedResult);
+      setContentAdaptation(adaptationRecord);
       setLastAnalysisId(saved.id);
       refreshHistory();
-    } catch {
-      if (requestSequence === analysisRequestSequence.current) setError("AI请求失败");
+    } catch (analysisError) {
+      if (requestSequence === analysisRequestSequence.current) {
+        setError(analysisError instanceof Error ? analysisError.message : "AI请求失败");
+      }
     } finally {
       if (requestSequence === analysisRequestSequence.current) setLoading(false);
+    }
+  }
+
+  function handleContentAdaptationReview(action: ContentAdaptationReviewAction) {
+    if (!contentAdaptation || !lastAnalysisId) return;
+    try {
+      const saved = updateHotAnalysisContentAdaptationStrict(lastAnalysisId, action);
+      if (!saved.contentAdaptation) throw new Error("内容适配保存后回读校验失败");
+      const updated = saved.contentAdaptation;
+      setContentAdaptation(updated);
+      setResult(currentResult => currentResult ? {
+        ...currentResult,
+        methodCards: syncContentAdaptationIPMethodCard(
+          currentResult.methodCards,
+          currentResult,
+          inputRaw,
+          activeIP?.name,
+          updated,
+        ),
+      } : currentResult);
+      setMethodPrechecks(null);
+      setMethodDecisions([]);
+      setError(null);
+      refreshHistory();
+    } catch (reviewError) {
+      setError(reviewError instanceof Error
+        ? reviewError.message
+        : "内容适配修改保存失败，请重试");
     }
   }
 
@@ -718,36 +1034,40 @@ function RadarTab() {
       <Card>
         <div className="mb-3 flex flex-wrap gap-2">
           {([["transcript", "口播逐字稿"], ["copy", "文案"], ["title", "标题"]] as const).map(([id, label]) => (
-            <button key={id} onClick={() => setInputType(id)} className="rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold"
+            <button key={id} onClick={() => {
+              if (id === inputType) return;
+              invalidateCurrentAnalysis();
+              setInputType(id);
+            }} className="rounded-full px-3.5 py-1.5 text-[12.5px] font-semibold"
               style={inputType === id ? { background: "#1C1C1B", color: "#fff" } : { background: "#F2F1ED", color: "#888" }}>{label}</button>
           ))}
         </div>
-        <textarea value={inputRaw} onChange={e => setInputRaw(e.target.value)}
+        <textarea value={inputRaw} onChange={e => { invalidateCurrentAnalysis(); setInputRaw(e.target.value); }}
           placeholder={isTitleMode
             ? "粘贴要诊断的标题（一句话，通常不超过30字）"
             : "粘贴内容…（链接没法自动抓取，麻烦把逐字稿/文案粘进来，链接可以填在下面当来源记录）"}
           rows={isTitleMode ? 2 : 6}
           className="w-full resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[13.5px] leading-6 outline-none focus:border-[#639922]" />
-        <input value={sourceUrl} onChange={e => setSourceUrl(e.target.value)} placeholder="来源链接（可选，仅作引用记录）" className="mt-2.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
+        <input value={sourceUrl} onChange={e => { invalidateCurrentAnalysis(); setSourceUrl(e.target.value); }} placeholder="来源链接（可选，仅作引用记录）" className="mt-2.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2 text-[13px]" />
 
         {/* 真实互动数据只对逐字稿/文案模式有意义，标题模式隐藏这一块 */}
         {!isTitleMode && (
           <div className="mt-3 rounded-[12px] bg-[#F7F6F2] p-3">
             <label className="flex items-center gap-2 text-[12.5px] font-semibold text-[#555]">
-              <input type="checkbox" checked={hasMetrics} onChange={e => setHasMetrics(e.target.checked)} />
+              <input type="checkbox" checked={hasMetrics} onChange={e => { invalidateCurrentAnalysis(); setHasMetrics(e.target.checked); }} />
               我知道这条内容的真实互动数据（不填的话，评级只看内容质量，不代表已验证的真实传播表现）
             </label>
             {hasMetrics && (
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <input value={likes} onChange={e => setLikes(e.target.value.replace(/\D/g, ""))} placeholder="点赞" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
-                <input value={comments} onChange={e => setComments(e.target.value.replace(/\D/g, ""))} placeholder="评论" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
-                <input value={shares} onChange={e => setShares(e.target.value.replace(/\D/g, ""))} placeholder="转发" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
-                <input value={favorites} onChange={e => setFavorites(e.target.value.replace(/\D/g, ""))} placeholder="收藏" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
+                <input value={likes} onChange={e => { invalidateCurrentAnalysis(); setLikes(e.target.value.replace(/\D/g, "")); }} placeholder="点赞" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
+                <input value={comments} onChange={e => { invalidateCurrentAnalysis(); setComments(e.target.value.replace(/\D/g, "")); }} placeholder="评论" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
+                <input value={shares} onChange={e => { invalidateCurrentAnalysis(); setShares(e.target.value.replace(/\D/g, "")); }} placeholder="转发" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
+                <input value={favorites} onChange={e => { invalidateCurrentAnalysis(); setFavorites(e.target.value.replace(/\D/g, "")); }} placeholder="收藏" className="rounded-[8px] border border-[#E5E4DE] bg-white px-2.5 py-1.5 text-[12.5px]" />
               </div>
             )}
             {hasMetrics && (
               <label className="mt-2 flex items-center gap-2 text-[11.5px] text-[#666]">
-                <input type="checkbox" checked={aboveAvg} onChange={e => setAboveAvg(e.target.checked)} />
+                <input type="checkbox" checked={aboveAvg} onChange={e => { invalidateCurrentAnalysis(); setAboveAvg(e.target.checked); }} />
                 播放量明显高于账号平均水平
               </label>
             )}
@@ -768,8 +1088,9 @@ function RadarTab() {
           <div className="flex flex-wrap items-center gap-2">
             <TitleGradeBadge grade={result.titleEvaluation.titleDiagnosisGrade} />
             <span className="text-[12px] text-[#888]">标题结构「{result.titleStructure || "未识别"}」</span>
-            {result.ipFitTier && <TierTag label={result.ipFitTier} />}
           </div>
+
+          {contentAdaptation && <ContentAdaptationSummary record={contentAdaptation} ipName={activeIP?.name} onReview={handleContentAdaptationReview} />}
 
           <div className="rounded-[10px] bg-[#F7F6F2] p-3">
             <div className="mb-1 text-[11px] font-bold text-[#666]">诊断结论</div>
@@ -791,15 +1112,6 @@ function RadarTab() {
                 <ScoreBar score={result.titleEvaluation.painPointClarity.score} label="用户痛点清晰度" />
                 {result.titleEvaluation.painPointClarity.painPoint && <p className="mt-1 pl-[100px] text-[11.5px] leading-5 text-[#333]">🎯 指向人群：{result.titleEvaluation.painPointClarity.painPoint}</p>}
                 {result.titleEvaluation.painPointClarity.reason && <p className="mt-0.5 pl-[100px] text-[11.5px] leading-5 text-[#666]">{result.titleEvaluation.painPointClarity.reason}</p>}
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="w-[92px] flex-shrink-0 text-[11.5px] text-[#666]">IP 匹配度</span>
-                <div className="flex-1">
-                  {result.titleEvaluation.ipFit.tier
-                    ? <TierTag label={result.titleEvaluation.ipFit.tier} />
-                    : <span className="text-[11.5px] text-[#BBB]">未提供 IP 信息</span>}
-                  {result.titleEvaluation.ipFit.reason && <p className="mt-1 text-[11.5px] leading-5 text-[#666]">{result.titleEvaluation.ipFit.reason}</p>}
-                </div>
               </div>
               <div className="flex items-start gap-2 border-t border-[#F0EFE9] pt-3">
                 <span className="w-[92px] flex-shrink-0 text-[11.5px] font-bold text-[#1C1C1B]">是否值得补全</span>
@@ -829,9 +1141,10 @@ function RadarTab() {
             <GradeBadge grade={result.evaluation.grade} />
             <span className="text-[12px] text-[#888]">钩子评分 {result.evaluation.hookScore.total}/50</span>
             <TierTag label={result.worthLearning} />
-            {result.ipFitTier && <TierTag label={result.ipFitTier} />}
             {!result.hasRealMetrics && <span className="text-[11px] text-[#BBB]">（未验证真实传播表现）</span>}
           </div>
+
+          {contentAdaptation && <ContentAdaptationSummary record={contentAdaptation} ipName={activeIP?.name} onReview={handleContentAdaptationReview} />}
 
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <div className="rounded-[10px] bg-[#F7F6F2] p-3">
@@ -851,12 +1164,6 @@ function RadarTab() {
               <div className="mb-1 text-[11px] font-bold text-[#666]">是否值得学习</div>
               <p className="text-[12px] leading-5 text-[#444]">{result.worthLearningReason}</p>
             </div>
-            {result.ipFitTier && (
-              <div className="rounded-[10px] bg-[#F7F6F2] p-3 sm:col-span-2">
-                <div className="mb-1 text-[11px] font-bold text-[#666]">与当前IP「{activeIP?.name}」的匹配度</div>
-                <p className="text-[12px] leading-5 text-[#444]">{result.ipFitReason}</p>
-              </div>
-            )}
           </div>
 
           <div className="rounded-[10px] bg-[#F7F6F2] p-3">

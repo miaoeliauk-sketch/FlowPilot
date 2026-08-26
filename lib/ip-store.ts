@@ -24,6 +24,12 @@ import {
   type CompleteManualReviewInput,
 } from "./review-workflow";
 import { isIPSourceAnalysisSnapshot } from "./ip-source-analysis-v2";
+import {
+  applyContentAdaptationReview,
+  restoreContentAdaptationRecord,
+  type ContentAdaptationReviewAction,
+  type ContentAdaptationRecord,
+} from "./content-adaptation";
 
 const KEY_IPS = "ipwr:ips_v2";
 const KEY_ACTIVE_IP = "ipwr:activeIpId";
@@ -2593,9 +2599,67 @@ export function getHotAnalyses(): HotMaterialAnalysis[] {
 
 export function addHotAnalysis(input: Omit<HotMaterialAnalysis, "id" | "createdAt" | "addedToKnowledgeBase" | "knowledgeEntryId">): HotMaterialAnalysis {
   const all = readJSON<HotMaterialAnalysis[]>(KEY_HOT_ANALYSES, []);
+  if (input.contentAdaptation) {
+    const restored = restoreContentAdaptationRecord(input.contentAdaptation);
+    if (restored.status !== "valid") throw new Error("内容适配记录不完整，爆款分析未保存");
+  }
   const entry: HotMaterialAnalysis = { ...input, id: genId(), createdAt: new Date().toISOString(), addedToKnowledgeBase: false, knowledgeEntryId: null };
-  writeJSON(KEY_HOT_ANALYSES, [...all, entry]);
+  writeJSONStrict(KEY_HOT_ANALYSES, [...all, entry], "爆款分析保存失败");
   return entry;
+}
+
+export function updateHotAnalysisContentAdaptationStrict(
+  analysisId: string,
+  action: ContentAdaptationReviewAction,
+): HotMaterialAnalysis {
+  if (typeof action !== "object" || action === null || Array.isArray(action)) {
+    throw new Error("只能通过人工审核动作更新内容适配");
+  }
+  const actionKeys = Object.keys(action);
+  const allowedKeys = action.type === "modify"
+    ? ["type", "contentProfile"]
+    : action.type === "refresh_ip_fit"
+      ? ["type", "ipFit"]
+      : action.type === "confirm" || action.type === "remove"
+        ? ["type"]
+        : [];
+  if (
+    allowedKeys.length === 0
+    || actionKeys.length !== allowedKeys.length
+    || actionKeys.some(key => !allowedKeys.includes(key))
+  ) {
+    throw new Error("只能通过人工审核动作更新内容适配");
+  }
+  const all = readJSON<HotMaterialAnalysis[]>(KEY_HOT_ANALYSES, []);
+  const matches = all.filter(item => item.id === analysisId);
+  if (matches.length !== 1) {
+    throw new Error(matches.length === 0
+      ? "找不到对应的爆款分析记录"
+      : "爆款分析编号重复，已拒绝保存内容适配");
+  }
+  const stored = restoreContentAdaptationRecord(matches[0]?.contentAdaptation);
+  if (stored.status !== "valid") throw new Error("原内容适配记录不完整，已拒绝更新");
+  const updatedRecord = applyContentAdaptationReview(
+    stored.record,
+    action,
+    new Date().toISOString(),
+  );
+  const next = all.map(item => item.id === analysisId
+    ? { ...item, contentAdaptation: updatedRecord }
+    : item);
+  writeJSONStrict(KEY_HOT_ANALYSES, next, "内容适配保存失败");
+  const readback = readJSON<HotMaterialAnalysis[]>(KEY_HOT_ANALYSES, [])
+    .filter(item => item.id === analysisId);
+  const readbackRecord = readback[0]?.contentAdaptation;
+  const readbackRestored = restoreContentAdaptationRecord(readbackRecord);
+  if (
+    readback.length !== 1
+    || readbackRestored.status !== "valid"
+    || JSON.stringify(readbackRestored.record) !== JSON.stringify(updatedRecord)
+  ) {
+    throw new Error("内容适配写入已执行，但回读校验异常，请重新加载后核对");
+  }
+  return readback[0]!;
 }
 
 export function deleteHotAnalysis(id: string): void {

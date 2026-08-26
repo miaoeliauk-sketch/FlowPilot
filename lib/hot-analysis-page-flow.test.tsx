@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
-import { addKnowledgeEntry, getKnowledgeEntries } from "./ip-store";
+import {
+  addKnowledgeEntry,
+  getKnowledgeEntries,
+  updateHotAnalysisContentAdaptationStrict,
+} from "./ip-store";
 import { createTopicBoardIPProfile } from "./topic-board-contract.fixture";
 
 function installBrowserEnvironment() {
@@ -119,12 +123,40 @@ function analysisResponse(methodCards: unknown[] = []) {
   };
 }
 
+function contentAdaptationResponse() {
+  return {
+    items: [{
+      key: "hot-analysis-1",
+      contentProfile: {
+        primaryTrack: "生活方式",
+        secondaryTrack: "知识科普",
+        fineTags: ["装修避坑", "空间审美"],
+        targetAudience: "准备装修且担心预算浪费的城市家庭",
+        audienceTags: ["装修家庭", "品质居住"],
+        primaryPurpose: "知识教育",
+        secondaryPurpose: "信任建立",
+        reasons: {
+          track: "内容围绕装修材料、比例和空间审美展开",
+          audience: "正文解决准备装修人群的材料选择误区",
+          purpose: "通过解释判断方法提供知识并建立专业信任",
+        },
+      },
+      ipFit: {
+        tier: "高度匹配",
+        reason: "内容赛道、人群和当前IP的装修定位一致",
+      },
+    }],
+  };
+}
+
 async function renderAnalyzedPage(
   inputRaw: string,
   response = analysisResponse(),
   options: { switchToIPId?: string } = {},
 ) {
-  globalThis.fetch = async () => Response.json(response);
+  globalThis.fetch = async input => String(input).includes("/api/content-adaptation")
+    ? Response.json(contentAdaptationResponse())
+    : Response.json(response);
   const { fireEvent, render, screen } = await import("@testing-library/react");
   const { IPProvider, useIP } = await import("./ip-context");
   const { default: HotAnalysisPage } = await import("../app/hot-analysis/page");
@@ -142,6 +174,135 @@ async function renderAnalyzedPage(
   await screen.findByText("反常识装修案例");
   return { fireEvent, screen };
 }
+
+test("爆款分析先展示并保存内容自身适配，再单独展示当前IP匹配", async () => {
+  const { screen } = await renderAnalyzedPage(
+    "很多人以为只要购买最贵的材料就能获得高级感，但真正决定质感的是比例、光线和留白。",
+  );
+
+  const adaptationHeading = await screen.findByText("内容适配（AI预填）");
+  const ipFitHeading = screen.getByText("与当前IP「案例老师」的匹配度");
+  assert.ok(adaptationHeading.compareDocumentPosition(ipFitHeading) & Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(screen.getAllByText("主要赛道：生活方式").length >= 2);
+  assert.ok(screen.getByText("细分标签：装修避坑、空间审美"));
+  assert.ok(screen.getAllByText("目标人群：准备装修且担心预算浪费的城市家庭").length >= 2);
+  assert.ok(screen.getAllByText("主要目的：知识教育").length >= 2);
+  assert.ok(screen.getByText("内容赛道、人群和当前IP的装修定位一致"));
+
+  const histories = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]") as Array<{
+    contentAdaptation?: {
+      aiOriginal?: { contentProfile?: { primaryTrack?: string } };
+      current?: { contentProfile?: { primaryTrack?: string } };
+      reviewStatus?: string;
+      revisions?: unknown[];
+    };
+  }>;
+  assert.equal(histories.length, 1);
+  assert.equal(histories[0]?.contentAdaptation?.aiOriginal?.contentProfile?.primaryTrack, "生活方式");
+  assert.equal(histories[0]?.contentAdaptation?.current?.contentProfile?.primaryTrack, "生活方式");
+  assert.equal(histories[0]?.contentAdaptation?.reviewStatus, "ai_prefill");
+  assert.deepEqual(histories[0]?.contentAdaptation?.revisions, []);
+});
+
+test("爆款分析历史严格写入失败时不展示未落盘结果且允许重试", async () => {
+  globalThis.fetch = async input => String(input).includes("/api/content-adaptation")
+    ? Response.json(contentAdaptationResponse())
+    : Response.json(analysisResponse());
+  const { fireEvent, render, screen } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const { default: HotAnalysisPage } = await import("../app/hot-analysis/page");
+  render(<IPProvider><HotAnalysisPage /></IPProvider>);
+  const input = await screen.findByPlaceholderText(/粘贴内容/);
+  fireEvent.change(input, {
+    target: { value: "这是一段用于验证爆款分析历史严格写入失败的完整内容。" },
+  });
+
+  const storagePrototype = Object.getPrototypeOf(localStorage) as Storage;
+  const originalSetItem = storagePrototype.setItem;
+  storagePrototype.setItem = function setItem(key: string, value: string) {
+    if (key === "ipwr:hotAnalyses") throw new Error("模拟爆款分析历史存储失败");
+    return originalSetItem.call(this, key, value);
+  };
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "分析完整内容" }));
+    await screen.findByText(/爆款分析保存失败/);
+    assert.equal(screen.queryByText("反常识装修案例"), null);
+    assert.equal(screen.queryByText("内容适配（AI预填）"), null);
+    assert.deepEqual(JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]"), []);
+    assert.ok(screen.getByRole("button", { name: "分析完整内容" }));
+    assert.equal((input as HTMLTextAreaElement).value, "这是一段用于验证爆款分析历史严格写入失败的完整内容。");
+  } finally {
+    storagePrototype.setItem = originalSetItem;
+  }
+});
+
+test("爆款内容适配允许人工修改或删除且始终保留AI原始判断和修改记录", async () => {
+  const { fireEvent, screen } = await renderAnalyzedPage(
+    "很多人以为只要购买最贵的材料就能获得高级感，但真正决定质感的是比例、光线和留白。",
+  );
+  await screen.findByText("内容适配（AI预填）");
+  assert.ok(screen.getByText("案例老师价值表达法"));
+
+  fireEvent.click(screen.getByRole("button", { name: "编辑内容适配" }));
+  // 选择原辅助赛道时，界面必须自动消除主、辅赛道冲突，不能生成无效记录。
+  fireEvent.change(screen.getByLabelText("主要赛道"), { target: { value: "知识科普" } });
+  const fineTagsInput = screen.getByLabelText("细分标签") as HTMLInputElement;
+  fireEvent.change(fineTagsInput, { target: { value: "商业决策、" } });
+  assert.equal(fineTagsInput.value, "商业决策、");
+  fireEvent.change(fineTagsInput, { target: { value: "商业决策、预算管理" } });
+  fireEvent.change(screen.getByLabelText("目标人群"), { target: { value: "需要控制装修投入的企业经营者" } });
+  fireEvent.change(screen.getByLabelText("主要目的"), { target: { value: "线索获客" } });
+  fireEvent.change(screen.getByLabelText("赛道判断依据"), { target: { value: "人工认为重点是经营预算决策" } });
+  fireEvent.change(screen.getByLabelText("目标人群判断依据"), { target: { value: "内容可服务需要管理投入产出的经营者" } });
+  fireEvent.change(screen.getByLabelText("内容目的判断依据"), { target: { value: "用专业判断吸引潜在咨询客户" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存人工修改" }));
+
+  await screen.findByText("当前采用结果（人工修改）");
+  assert.ok(screen.getByText("IP匹配需重新判断"));
+  assert.equal(screen.queryByText("案例老师价值表达法"), null);
+  let histories = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]") as Array<{
+    contentAdaptation?: {
+      aiOriginal?: { contentProfile?: { primaryTrack?: string } };
+      current?: { contentProfile?: { primaryTrack?: string; targetAudience?: string } } | null;
+      reviewStatus?: string;
+      revisions?: Array<{ action?: string }>;
+    };
+  }>;
+  assert.equal(histories[0]?.contentAdaptation?.aiOriginal?.contentProfile?.primaryTrack, "生活方式");
+  assert.equal(histories[0]?.contentAdaptation?.current?.contentProfile?.primaryTrack, "知识科普");
+  assert.equal(histories[0]?.contentAdaptation?.current?.contentProfile?.targetAudience, "需要控制装修投入的企业经营者");
+  assert.equal(histories[0]?.contentAdaptation?.reviewStatus, "human_modified");
+  assert.deepEqual(histories[0]?.contentAdaptation?.revisions?.map(item => item.action), ["modify"]);
+
+  fireEvent.click(screen.getByRole("button", { name: "删除当前内容适配" }));
+  await screen.findByText("内容适配（已人工删除）");
+  assert.ok(screen.getByText("AI原始判断仍保留在历史记录中。"));
+  histories = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]") as typeof histories;
+  assert.equal(histories[0]?.contentAdaptation?.aiOriginal?.contentProfile?.primaryTrack, "生活方式");
+  assert.equal(histories[0]?.contentAdaptation?.current, null);
+  assert.equal(histories[0]?.contentAdaptation?.reviewStatus, "human_removed");
+  assert.deepEqual(histories[0]?.contentAdaptation?.revisions?.map(item => item.action), ["modify", "remove"]);
+});
+
+test("底层更新入口拒绝调用方替换AI原始判断和既有审核历史", async () => {
+  await renderAnalyzedPage("这条内容先生成一份合法的AI内容适配记录。");
+  const histories = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]") as Array<{
+    id: string;
+    contentAdaptation: {
+      aiOriginal: { contentProfile: { primaryTrack: string; secondaryTrack: string | null } };
+      current: { contentProfile: { primaryTrack: string; secondaryTrack: string | null } };
+    };
+  }>;
+  const forged = structuredClone(histories[0]!.contentAdaptation);
+  forged.aiOriginal.contentProfile.primaryTrack = "财经商业";
+  forged.current.contentProfile.primaryTrack = "财经商业";
+  assert.throws(
+    () => updateHotAnalysisContentAdaptationStrict(histories[0]!.id, forged as never),
+    /只能通过人工审核动作更新内容适配/,
+  );
+  const readback = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]") as typeof histories;
+  assert.equal(readback[0]?.contentAdaptation.aiOriginal.contentProfile.primaryTrack, "生活方式");
+});
 
 test("切换IP时立即清空旧分析结果和全部入库前检查面板", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([activeIP, otherIP]));
@@ -203,6 +364,77 @@ test("分析请求进行中切换IP后旧响应永久失效且不会写回历史
   assert.equal(document.body.textContent?.includes("反常识装修案例"), false);
   const histories = JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]") as unknown[];
   assert.equal(histories.length, 0);
+});
+
+test("内容适配响应解析期间切换IP后旧结果不会展示或写回", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([activeIP, otherIP]));
+  let resolveAdaptationJson: ((value: ReturnType<typeof contentAdaptationResponse>) => void) | undefined;
+  let markAdaptationStarted: (() => void) | undefined;
+  const adaptationStarted = new Promise<void>(resolve => { markAdaptationStarted = resolve; });
+  const adaptationJson = new Promise<ReturnType<typeof contentAdaptationResponse>>(resolve => {
+    resolveAdaptationJson = resolve;
+  });
+  globalThis.fetch = async input => {
+    if (!String(input).includes("/api/content-adaptation")) return Response.json(analysisResponse());
+    return { ok: true, json: () => {
+      markAdaptationStarted?.();
+      return adaptationJson;
+    } } as Response;
+  };
+  const { act, fireEvent, render, screen } = await import("@testing-library/react");
+  const { IPProvider, useIP } = await import("./ip-context");
+  const { default: HotAnalysisPage } = await import("../app/hot-analysis/page");
+  function SwitchIPButton() {
+    const { switchIP } = useIP();
+    return <button onClick={() => switchIP(otherIP.id)}>测试切换IP</button>;
+  }
+  render(<IPProvider><SwitchIPButton /><HotAnalysisPage /></IPProvider>);
+  fireEvent.change(await screen.findByPlaceholderText(/粘贴内容/), {
+    target: { value: "适配响应解析期间切换IP，旧结果不能写回。" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "分析完整内容" }));
+  await adaptationStarted;
+  fireEvent.click(screen.getByRole("button", { name: "测试切换IP" }));
+  await act(async () => {
+    resolveAdaptationJson?.(contentAdaptationResponse());
+    await adaptationJson;
+  });
+
+  assert.equal(document.body.textContent?.includes("反常识装修案例"), false);
+  assert.equal(JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]").length, 0);
+});
+
+test("等待内容适配结果时修改正文会使旧请求失效且零写入", async () => {
+  let resolveAdaptationJson: ((value: ReturnType<typeof contentAdaptationResponse>) => void) | undefined;
+  let markAdaptationStarted: (() => void) | undefined;
+  const adaptationStarted = new Promise<void>(resolve => { markAdaptationStarted = resolve; });
+  const adaptationJson = new Promise<ReturnType<typeof contentAdaptationResponse>>(resolve => {
+    resolveAdaptationJson = resolve;
+  });
+  globalThis.fetch = async input => {
+    if (!String(input).includes("/api/content-adaptation")) return Response.json(analysisResponse());
+    return { ok: true, json: () => {
+      markAdaptationStarted?.();
+      return adaptationJson;
+    } } as Response;
+  };
+  const { act, fireEvent, render, screen } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const { default: HotAnalysisPage } = await import("../app/hot-analysis/page");
+  render(<IPProvider><HotAnalysisPage /></IPProvider>);
+  const input = await screen.findByPlaceholderText(/粘贴内容/);
+  fireEvent.change(input, { target: { value: "请求发起时的旧正文。" } });
+  fireEvent.click(screen.getByRole("button", { name: "分析完整内容" }));
+  await adaptationStarted;
+  fireEvent.change(input, { target: { value: "用户刚刚修改的新正文。" } });
+  await act(async () => {
+    resolveAdaptationJson?.(contentAdaptationResponse());
+    await adaptationJson;
+  });
+
+  assert.equal((input as HTMLTextAreaElement).value, "用户刚刚修改的新正文。");
+  assert.equal(document.body.textContent?.includes("反常识装修案例"), false);
+  assert.equal(JSON.parse(localStorage.getItem("ipwr:hotAnalyses") ?? "[]").length, 0);
 });
 
 test("收录爆款案例先展示全库检查结果并经人工确认后才保存", async () => {
@@ -329,7 +561,7 @@ test("爆款案例严格保存失败时如实提示且不会显示已收录", as
 });
 
 test("标题模式同样先展示检查结果并通过统一入口保存未验证方法卡", async () => {
-  globalThis.fetch = async () => Response.json({
+  const titleResponse = {
     mode: "title",
     title: "贵材料不等于高级感",
     author: "",
@@ -354,7 +586,10 @@ test("标题模式同样先展示检查结果并通过统一入口保存未验�
       titleDiagnosisGrade: "A",
       overallSummary: "用价格误区制造反常识冲突。",
     },
-  });
+  };
+  globalThis.fetch = async input => String(input).includes("/api/content-adaptation")
+    ? Response.json(contentAdaptationResponse())
+    : Response.json(titleResponse);
   const { fireEvent, render, screen } = await import("@testing-library/react");
   const { IPProvider } = await import("./ip-context");
   const { default: HotAnalysisPage } = await import("../app/hot-analysis/page");
