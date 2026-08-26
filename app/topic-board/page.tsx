@@ -7,6 +7,8 @@ import {
   getTopicAssets,
   recordKnowledgeUsage,
   getLatestPersonas,
+  saveTopicAssetContentAdaptationStrict,
+  updateTopicAssetContentAdaptationStrict,
   updateTopicAssetStatus,
 } from "@/lib/ip-store";
 import { IPProfile, KnowledgeEntry, TopicAsset, TopicAssetStatus } from "@/lib/types";
@@ -17,6 +19,15 @@ import { getNormalizedCategory, isGlobalMethodCategory, isIPKnowledgeCategory } 
 import { buildTopicReviewRequestPayload } from "@/lib/topic-review-request";
 import { TopicBoardContractError, type TopicBoardResult } from "@/lib/topic-board-contract";
 import { saveTopicBoardEvaluation, TopicBoardOwnershipError } from "@/lib/topic-board-history";
+import {
+  type ContentAdaptationAssessment,
+  type ContentAdaptationRecord,
+  type ContentAdaptationReviewAction,
+} from "@/lib/content-adaptation";
+import {
+  TopicContentAdaptationPanel,
+  type TopicContentAdaptationStatus,
+} from "@/components/topic-board/TopicContentAdaptationPanel";
 import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
 import { getTopicCalibrationSamples } from "@/lib/topic-calibration-store";
 import { getLearningEligibleVideoReviews } from "@/lib/review-traceability";
@@ -493,6 +504,9 @@ export default function TopicBoardPage() {
   const [error, setError] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
   const [result, setResult] = useState<TopicBoardResult | null>(null);
+  const [contentAdaptation, setContentAdaptation] = useState<ContentAdaptationRecord | null>(null);
+  const [contentAdaptationStatus, setContentAdaptationStatus] = useState<TopicContentAdaptationStatus>("idle");
+  const [contentAdaptationTopicAssetId, setContentAdaptationTopicAssetId] = useState<string | null>(null);
   const [topicHistory, setTopicHistory] = useState<TopicAsset[]>([]);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
@@ -516,6 +530,14 @@ export default function TopicBoardPage() {
   const [knowledgeDataError, setKnowledgeDataError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knowledgeRequestSeqRef = useRef(0);
+  const contentAdaptationRequestSeqRef = useRef(0);
+
+  function invalidateContentAdaptation() {
+    contentAdaptationRequestSeqRef.current += 1;
+    setContentAdaptation(null);
+    setContentAdaptationStatus("idle");
+    setContentAdaptationTopicAssetId(null);
+  }
 
   function replaceTemporaryCognition(next: EphemeralCognitionContext | null) {
     const previous = temporaryCognitionRef.current;
@@ -529,11 +551,15 @@ export default function TopicBoardPage() {
   }
 
   useEffect(() => {
+    contentAdaptationRequestSeqRef.current += 1;
     boundaryRequestSeqRef.current += 1;
     interviewRequestSeqRef.current += 1;
     activeIPIdRef.current = activeIP?.id ?? null;
     setTopicHistory(activeIP ? getTopicAssets(activeIP.id) : []);
     setResult(null);
+    setContentAdaptation(null);
+    setContentAdaptationStatus("idle");
+    setContentAdaptationTopicAssetId(null);
     setSaveNotice(null);
     setBoundaryStatus("idle");
     setBoundaryReport(null);
@@ -547,6 +573,10 @@ export default function TopicBoardPage() {
   }, [activeIP?.id]);
 
   useEffect(() => {
+    contentAdaptationRequestSeqRef.current += 1;
+    setContentAdaptation(null);
+    setContentAdaptationStatus("idle");
+    setContentAdaptationTopicAssetId(null);
     boundaryRequestSeqRef.current += 1;
     interviewRequestSeqRef.current += 1;
     setBoundaryStatus("idle");
@@ -869,6 +899,82 @@ export default function TopicBoardPage() {
     }
   }
 
+  function startTopicContentAdaptation(asset: TopicAsset, requestIP: IPProfile) {
+    const requestSeq = contentAdaptationRequestSeqRef.current + 1;
+    contentAdaptationRequestSeqRef.current = requestSeq;
+    setContentAdaptation(null);
+    setContentAdaptationStatus("loading");
+    setContentAdaptationTopicAssetId(asset.id);
+    void (async () => {
+      try {
+        const response = await apiFetch("/api/content-adaptation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: [{ key: asset.id, content: asset.title }],
+            ipContext: {
+              id: requestIP.id,
+              name: requestIP.name,
+              positioning: requestIP.positioning,
+              audience: requestIP.audience,
+              contentDirection: requestIP.contentDirection,
+            },
+          }),
+        });
+        const responseBody = await response.json() as Record<string, unknown>;
+        if (
+          requestSeq !== contentAdaptationRequestSeqRef.current
+          || activeIPIdRef.current !== requestIP.id
+        ) return;
+        if (!response.ok || !Array.isArray(responseBody.items) || !responseBody.items[0]) {
+          throw new Error("内容适配分析失败");
+        }
+        const assessment = responseBody.items[0] as ContentAdaptationAssessment;
+        const generatedAt = new Date().toISOString();
+        const saved = saveTopicAssetContentAdaptationStrict({
+          topicAssetId: asset.id,
+          activeIPId: requestIP.id,
+          expectedTitle: asset.title,
+          assessment,
+          generatedAt,
+        });
+        if (
+          requestSeq !== contentAdaptationRequestSeqRef.current
+          || activeIPIdRef.current !== requestIP.id
+        ) return;
+        setContentAdaptation(saved.contentAdaptation ?? null);
+        setContentAdaptationStatus(saved.contentAdaptation ? "available" : "unavailable");
+        setTopicHistory(getTopicAssets(requestIP.id));
+      } catch {
+        if (
+          requestSeq === contentAdaptationRequestSeqRef.current
+          && activeIPIdRef.current === requestIP.id
+        ) {
+          setContentAdaptation(null);
+          setContentAdaptationStatus("unavailable");
+        }
+      }
+    })();
+  }
+
+  function handleContentAdaptationReview(action: ContentAdaptationReviewAction) {
+    if (!activeIP || !contentAdaptationTopicAssetId || !contentAdaptation) return;
+    try {
+      const saved = updateTopicAssetContentAdaptationStrict({
+        topicAssetId: contentAdaptationTopicAssetId,
+        activeIPId: activeIP.id,
+        action,
+        changedAt: new Date().toISOString(),
+      });
+      setContentAdaptation(saved.contentAdaptation ?? null);
+      setContentAdaptationStatus(saved.contentAdaptation ? "available" : "unavailable");
+      setTopicHistory(getTopicAssets(activeIP.id));
+      setError(null);
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : "内容适配修改失败");
+    }
+  }
+
   async function handleSubmit() {
     if (!topic.trim()) { setError("请输入选题内容"); return; }
     const requestIP = activeIP;
@@ -884,6 +990,7 @@ export default function TopicBoardPage() {
       setError("认知底座加载异常，请先重新加载。");
       return;
     }
+    invalidateContentAdaptation();
     setError(null); setSaveNotice(null); setResult(null); setLoading(true); setPhase(1);
     setExpanded({});
 
@@ -940,6 +1047,7 @@ export default function TopicBoardPage() {
       );
       if (currentIPId === requestIP.id) {
         setResult(saved.boardResult);
+        startTopicContentAdaptation(saved, requestIP);
         void runBoundaryAudit(saved, requestIP);
       }
     } catch (err) {
@@ -959,7 +1067,11 @@ export default function TopicBoardPage() {
       return;
     }
     setError(null);
+    contentAdaptationRequestSeqRef.current += 1;
     setResult(asset.boardResult);
+    setContentAdaptation(asset.contentAdaptation ?? null);
+    setContentAdaptationStatus(asset.contentAdaptation ? "available" : "idle");
+    setContentAdaptationTopicAssetId(asset.id);
     if (activeIP && asset.ipId === activeIP.id) void runBoundaryAudit(asset, activeIP);
   }
 
@@ -1046,7 +1158,7 @@ export default function TopicBoardPage() {
       <div className="mb-6 rounded-[20px] border border-[#E5E4DE] bg-white p-5">
         <label className="mb-2.5 block text-[13px] font-semibold text-[#8A8A86]">输入你的选题</label>
         <div className="flex flex-col gap-3 md:flex-row">
-          <textarea value={topic} onChange={e => setTopic(e.target.value)}
+          <textarea value={topic} onChange={e => { invalidateContentAdaptation(); setTopic(e.target.value); }}
             placeholder={`例如：${DEMO_TOPIC}`}
             className="min-h-[52px] flex-1 resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"/>
           <button onClick={handleSubmit} disabled={loading || !activeIP}
@@ -1062,7 +1174,7 @@ export default function TopicBoardPage() {
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           {EXAMPLES.map(ex => (
-            <button key={ex} onClick={() => setTopic(ex)}
+            <button key={ex} onClick={() => { invalidateContentAdaptation(); setTopic(ex); }}
               className="rounded-full bg-[#F4F4F2] px-3 py-1.5 text-[12px] text-[#8A8A86] hover:text-[#1C1C1B]">{ex}</button>
           ))}
         </div>
@@ -1150,6 +1262,13 @@ export default function TopicBoardPage() {
             loading={knowledgeLoading}
             searched={knowledgeSearched}
             label="本次选题分析参考了"
+          />
+
+          <TopicContentAdaptationPanel
+            record={contentAdaptation}
+            status={contentAdaptationStatus}
+            ipName={activeIP?.name ?? null}
+            onReview={handleContentAdaptationReview}
           />
 
           {isBlockedResult ? (

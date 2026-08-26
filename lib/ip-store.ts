@@ -26,7 +26,9 @@ import {
 import { isIPSourceAnalysisSnapshot } from "./ip-source-analysis-v2";
 import {
   applyContentAdaptationReview,
+  createContentAdaptationRecord,
   restoreContentAdaptationRecord,
+  type ContentAdaptationAssessment,
   type ContentAdaptationReviewAction,
   type ContentAdaptationRecord,
 } from "./content-adaptation";
@@ -579,21 +581,24 @@ const TOPIC_STATUS_TRANSITIONS: Record<TopicAssetStatus, TopicAssetManualStatus[
   "已废弃": [],
 };
 
-type StoredTopicAsset = Omit<TopicAsset, "boardResult" | "evaluationSummary" | "updatedAt"> & {
+type StoredTopicAsset = Omit<TopicAsset, "boardResult" | "evaluationSummary" | "contentAdaptation" | "updatedAt"> & {
   boardResult?: unknown;
   evaluationSummary?: unknown;
+  contentAdaptation?: unknown;
   updatedAt?: string;
 };
 
 function normalizeTopicAsset(asset: StoredTopicAsset): TopicAsset {
   const {
     boardResult: storedBoardResult,
+    contentAdaptation: storedContentAdaptation,
     evaluationSummary: _storedEvaluationSummary,
     ...baseAsset
   } = asset;
   const updatedAt = asset.updatedAt ?? asset.createdAt;
   const normalized: TopicAsset = {
     ...baseAsset,
+    contentAdaptation: restoreContentAdaptationRecord(storedContentAdaptation).record,
     updatedAt,
   };
 
@@ -757,6 +762,103 @@ export function updateTopicAssetStatus(
   all[index] = updated;
   writeJSON(KEY_TOPIC_ASSETS, all);
   return updated;
+}
+
+interface SaveTopicAssetContentAdaptationInput {
+  topicAssetId: string;
+  activeIPId: string;
+  expectedTitle: string;
+  assessment: ContentAdaptationAssessment;
+  generatedAt: string;
+}
+
+interface UpdateTopicAssetContentAdaptationInput {
+  topicAssetId: string;
+  activeIPId: string;
+  action: ContentAdaptationReviewAction;
+  changedAt: string;
+}
+
+function readTopicAssetForContentAdaptationStrict(
+  topicAssetId: string,
+  activeIPId: string,
+): { rawAssets: unknown[]; index: number; asset: TopicAsset } {
+  const rawAssets = readStoredArrayStrict(KEY_TOPIC_ASSETS, "选题库");
+  const matches = rawAssets
+    .map((rawAsset, index) => ({ rawAsset, index }))
+    .filter(({ rawAsset }) => (
+      typeof rawAsset === "object"
+      && rawAsset !== null
+      && !Array.isArray(rawAsset)
+      && (rawAsset as { id?: unknown }).id === topicAssetId
+    ));
+  if (matches.length !== 1) {
+    throw new Error(matches.length === 0 ? "没有找到对应选题" : "选题编号重复，已拒绝保存内容适配");
+  }
+  const [{ rawAsset, index }] = matches;
+  const asset = normalizeTopicAsset(rawAsset as StoredTopicAsset);
+  if (asset.ipId !== activeIPId) throw new Error("选题不属于当前IP，已拒绝保存内容适配");
+  if (!asset.boardResult || asset.status !== "已评估") {
+    throw new Error("选题尚未完成有效评估，已拒绝保存内容适配");
+  }
+  return { rawAssets, index, asset };
+}
+
+function writeTopicAssetContentAdaptationStrict(
+  rawAssets: unknown[],
+  index: number,
+  asset: TopicAsset,
+): TopicAsset {
+  const nextAssets = [...rawAssets];
+  nextAssets[index] = asset;
+  writeJSONStrict(KEY_TOPIC_ASSETS, nextAssets, "内容适配保存失败");
+  const persisted = readTopicAssetForContentAdaptationStrict(asset.id, asset.ipId).asset;
+  if (JSON.stringify(persisted.contentAdaptation) !== JSON.stringify(asset.contentAdaptation)) {
+    throw new Error("内容适配保存后回读校验失败");
+  }
+  return persisted;
+}
+
+export function saveTopicAssetContentAdaptationStrict(
+  input: SaveTopicAssetContentAdaptationInput,
+): TopicAsset {
+  const { rawAssets, index, asset } = readTopicAssetForContentAdaptationStrict(
+    input.topicAssetId,
+    input.activeIPId,
+  );
+  if (asset.title !== input.expectedTitle || asset.boardResult?.topic !== input.expectedTitle) {
+    throw new Error("选题内容已经变化，旧的内容适配结果未保存");
+  }
+  if (input.assessment.key !== asset.id) {
+    throw new Error("内容适配结果与选题编号不匹配，已拒绝保存");
+  }
+  if (asset.contentAdaptation) {
+    throw new Error("这条选题已经存在内容适配记录，已拒绝覆盖");
+  }
+  const contentAdaptation = createContentAdaptationRecord(input.assessment, input.generatedAt);
+  return writeTopicAssetContentAdaptationStrict(rawAssets, index, {
+    ...asset,
+    contentAdaptation,
+  });
+}
+
+export function updateTopicAssetContentAdaptationStrict(
+  input: UpdateTopicAssetContentAdaptationInput,
+): TopicAsset {
+  const { rawAssets, index, asset } = readTopicAssetForContentAdaptationStrict(
+    input.topicAssetId,
+    input.activeIPId,
+  );
+  if (!asset.contentAdaptation) throw new Error("这条选题没有可修改的内容适配记录");
+  const contentAdaptation = applyContentAdaptationReview(
+    asset.contentAdaptation,
+    input.action,
+    input.changedAt,
+  );
+  return writeTopicAssetContentAdaptationStrict(rawAssets, index, {
+    ...asset,
+    contentAdaptation,
+  });
 }
 
 export function deleteTopicAsset(id: string): void {

@@ -95,6 +95,7 @@ export interface TopicAsset {
   status: TopicAssetStatus;
   evaluationSummary?: TopicEvaluationSummary;
   boardResult?: TopicBoardResult;
+  contentAdaptation?: ContentAdaptationRecord | null;
   evaluationIssue?: TopicAssetEvaluationIssue;
   createdAt: string;
   updatedAt: string;

@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   addTopicAsset,
+  addEvaluatedTopicAsset,
   getTopicAsset,
   getTopicAssets,
+  saveTopicAssetContentAdaptationStrict,
   TopicAssetUpdateError,
+  updateTopicAssetContentAdaptationStrict,
   updateTopicAssetEvaluation,
   updateTopicAssetStatus,
 } from "./ip-store";
+import type { ContentAdaptationAssessment } from "./content-adaptation";
 import { TopicBoardContractError } from "./topic-board-contract";
 import { createValidTopicBoardResult } from "./topic-board-contract.fixture";
 
@@ -25,6 +29,137 @@ class MemoryStorage implements Storage {
 const storage = new MemoryStorage();
 Object.defineProperty(globalThis, "window", { configurable: true, value: globalThis });
 Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+
+function createContentAdaptationAssessment(key: string): ContentAdaptationAssessment {
+  return {
+    key,
+    contentProfile: {
+      primaryTrack: "财经商业",
+      secondaryTrack: "职场成长",
+      fineTags: ["商业机会", "职业选择"],
+      targetAudience: "正在判断职业机会的职场人",
+      audienceTags: ["职场人", "机会判断"],
+      primaryPurpose: "信任建立",
+      secondaryPurpose: "流量增长",
+      reasons: {
+        track: "选题围绕机会判断和商业趋势展开。",
+        audience: "内容直接服务于正在做职业选择的人。",
+        purpose: "通过可验证的判断方法建立专业信任。",
+      },
+    },
+    ipFit: {
+      tier: "高度匹配",
+      reason: "与当前IP的商业洞察定位和目标人群一致。",
+    },
+  };
+}
+
+test("内容适配通过受控入口单独补写并保留原评分结果", () => {
+  storage.clear();
+  const boardResult = createValidTopicBoardResult();
+  const asset = addEvaluatedTopicAsset({
+    ipId: boardResult.ipId,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+  const evaluatedAt = asset.evaluationSummary?.evaluatedAt;
+  const topicUpdatedAt = asset.updatedAt;
+
+  const saved = saveTopicAssetContentAdaptationStrict({
+    topicAssetId: asset.id,
+    activeIPId: asset.ipId,
+    expectedTitle: asset.title,
+    assessment: createContentAdaptationAssessment(asset.id),
+    generatedAt: "2026-08-26T20:00:00.000Z",
+  });
+
+  assert.equal(saved.contentAdaptation?.key, asset.id);
+  assert.equal(saved.contentAdaptation?.reviewStatus, "ai_prefill");
+  assert.equal(saved.boardResult?.aiBaseScore, boardResult.aiBaseScore);
+  assert.equal(saved.boardResult?.evidenceAdjustment, boardResult.evidenceAdjustment);
+  assert.equal(saved.boardResult?.confidenceLevel, boardResult.confidenceLevel);
+  assert.equal(saved.evaluationSummary?.evaluatedAt, evaluatedAt);
+  assert.equal(saved.updatedAt, topicUpdatedAt);
+  assert.equal(getTopicAsset(asset.id)?.contentAdaptation?.aiOriginal.contentProfile.primaryTrack, "财经商业");
+
+  const reviewed = updateTopicAssetContentAdaptationStrict({
+    topicAssetId: asset.id,
+    activeIPId: asset.ipId,
+    action: { type: "confirm" },
+    changedAt: "2026-08-26T20:01:00.000Z",
+  });
+  assert.equal(reviewed.contentAdaptation?.reviewStatus, "human_confirmed");
+  assert.equal(
+    reviewed.contentAdaptation?.aiOriginal.contentProfile.targetAudience,
+    "正在判断职业机会的职场人",
+  );
+  assert.equal(reviewed.contentAdaptation?.revisions.length, 1);
+  assert.equal(reviewed.evaluationSummary?.evaluatedAt, evaluatedAt);
+  assert.equal(reviewed.updatedAt, topicUpdatedAt);
+});
+
+test("内容适配受控入口拒绝跨IP、错编号和覆盖已有记录", () => {
+  storage.clear();
+  const boardResult = createValidTopicBoardResult();
+  const asset = addEvaluatedTopicAsset({
+    ipId: boardResult.ipId,
+    title: boardResult.topic,
+    source: "manual",
+  }, boardResult);
+
+  assert.throws(() => saveTopicAssetContentAdaptationStrict({
+    topicAssetId: asset.id,
+    activeIPId: "ip-other",
+    expectedTitle: asset.title,
+    assessment: createContentAdaptationAssessment(asset.id),
+    generatedAt: "2026-08-26T20:00:00.000Z",
+  }), /不属于当前IP/);
+  assert.throws(() => saveTopicAssetContentAdaptationStrict({
+    topicAssetId: asset.id,
+    activeIPId: asset.ipId,
+    expectedTitle: asset.title,
+    assessment: createContentAdaptationAssessment("topic-wrong"),
+    generatedAt: "2026-08-26T20:00:00.000Z",
+  }), /编号不匹配/);
+
+  saveTopicAssetContentAdaptationStrict({
+    topicAssetId: asset.id,
+    activeIPId: asset.ipId,
+    expectedTitle: asset.title,
+    assessment: createContentAdaptationAssessment(asset.id),
+    generatedAt: "2026-08-26T20:00:00.000Z",
+  });
+  assert.throws(() => saveTopicAssetContentAdaptationStrict({
+    topicAssetId: asset.id,
+    activeIPId: asset.ipId,
+    expectedTitle: asset.title,
+    assessment: createContentAdaptationAssessment(asset.id),
+    generatedAt: "2026-08-26T20:02:00.000Z",
+  }), /拒绝覆盖/);
+});
+
+test("损坏的历史内容适配被隔离但不阻断选题评估读取", () => {
+  storage.clear();
+  const boardResult = createValidTopicBoardResult();
+  storage.setItem("ipwr:topicAssets", JSON.stringify([{
+    id: "topic-with-broken-adaptation",
+    ipId: boardResult.ipId,
+    title: boardResult.topic,
+    source: "manual",
+    status: "已评估",
+    boardResult,
+    contentAdaptation: {
+      key: "topic-with-broken-adaptation",
+      reviewStatus: "human_modified",
+    },
+    createdAt: "2026-08-26T19:00:00.000Z",
+    updatedAt: "2026-08-26T19:00:00.000Z",
+  }]));
+
+  const restored = getTopicAsset("topic-with-broken-adaptation");
+  assert.equal(restored?.boardResult?.topic, boardResult.topic);
+  assert.equal(restored?.contentAdaptation, null);
+});
 
 test("旧选题补齐更新时间，新选题同时写入创建和更新时间", () => {
   storage.clear();

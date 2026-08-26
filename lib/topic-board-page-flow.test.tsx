@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
-import { addKnowledgeEntry, getKnowledgeEntries } from "./ip-store";
+import { addKnowledgeEntry, getKnowledgeEntries, getTopicAssets } from "./ip-store";
 import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 import { addVideoReviewForSource } from "./review-traceability";
 import { createValidTopicBoardResult } from "./topic-board-contract.fixture";
@@ -238,6 +238,310 @@ test("知识只被检索展示时不写入选题使用记录", async () => {
 
   assert.equal(usageCountAfterSearch, 0);
   assert.equal(statusAfterSearch, "未使用");
+});
+
+test("董事会主评估先完成展示，内容适配随后异步补充且先描述内容再判断IP匹配", { timeout: 9000 }, async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  let releaseAdaptation!: () => void;
+  const adaptationGate = new Promise<void>(resolve => { releaseAdaptation = resolve; });
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "/api/topic-review") {
+        return new Response(JSON.stringify(createValidTopicBoardResult()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (String(input) === "/api/content-adaptation") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as {
+          items?: Array<{ key?: string }>;
+        };
+        await adaptationGate;
+        return new Response(JSON.stringify({
+          items: [{
+            key: request.items?.[0]?.key,
+            contentProfile: {
+              primaryTrack: "财经商业",
+              secondaryTrack: "职场成长",
+              fineTags: ["商业机会", "职业选择"],
+              targetAudience: "正在判断职业机会的职场人",
+              audienceTags: ["职场人", "机会判断"],
+              primaryPurpose: "信任建立",
+              secondaryPurpose: "知识教育",
+              reasons: {
+                track: "选题围绕商业机会判断展开。",
+                audience: "问题直接面向正在做职业选择的人。",
+                purpose: "用判断框架建立专业信任。",
+              },
+            },
+            ipFit: {
+              tier: "高度匹配",
+              reason: "与水木然的商业洞察定位和目标人群一致。",
+            },
+          }],
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const { act, cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const user = userEvent.setup({ document });
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+
+    await user.click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText("评估已保存到水木然的选题库。", {}, { timeout: 7000 });
+    assert.ok(page.getByText("小白决策建议"));
+    assert.ok(page.getByText("内容适配正在异步生成，不影响选题评估"));
+
+    await act(async () => {
+      releaseAdaptation();
+      await adaptationGate;
+    });
+    await page.findByText(/目标人群：正在判断职业机会的职场人/);
+    const section = page.getByRole("region", { name: "内容适配与IP匹配" });
+    const sectionText = section.textContent ?? "";
+    assert.ok(sectionText.indexOf("内容本身") < sectionText.indexOf("与当前IP"));
+    assert.match(sectionText, /财经商业/);
+    assert.match(sectionText, /高度匹配/);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("内容适配生成失败不阻断选题评估和保存", { timeout: 9000 }, async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/topic-review") {
+        return new Response(JSON.stringify(createValidTopicBoardResult()), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (String(input) === "/api/content-adaptation") {
+        return new Response(JSON.stringify({ error: "模拟辅助判断失败" }), { status: 502, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const { cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    await userEvent.setup({ document }).click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText("评估已保存到水木然的选题库。", {}, { timeout: 7000 });
+    await page.findByText("内容适配暂不可用，不影响选题评估");
+    assert.ok(page.getByText("小白决策建议"));
+    assert.equal(getTopicAssets(SHUIMURAN.id).length, 1);
+    assert.equal(getTopicAssets(SHUIMURAN.id)[0]?.contentAdaptation, null);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("修改选题后等待中的旧内容适配失效且不写入历史选题", { timeout: 9000 }, async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  let releaseAdaptation!: () => void;
+  const adaptationGate = new Promise<void>(resolve => { releaseAdaptation = resolve; });
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "/api/topic-review") return new Response(JSON.stringify(createValidTopicBoardResult()), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (String(input) === "/api/content-adaptation") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as { items: Array<{ key: string }> };
+        await adaptationGate;
+        return new Response(JSON.stringify({ items: [{ key: request.items[0]?.key, contentProfile: { primaryTrack: "财经商业", secondaryTrack: null, fineTags: ["旧选题", "迟到结果"], targetAudience: "旧选题人群", audienceTags: ["旧人群", "旧判断"], primaryPurpose: "知识教育", secondaryPurpose: null, reasons: { track: "旧结果", audience: "旧结果", purpose: "旧结果" } }, ipFit: { tier: "高度匹配", reason: "旧结果不应回写" } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    await userEvent.setup({ document }).click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText("内容适配正在异步生成，不影响选题评估", {}, { timeout: 7000 });
+    fireEvent.change(page.getByRole("textbox"), { target: { value: "这是已经切换的新选题" } });
+    await act(async () => { releaseAdaptation(); await adaptationGate; await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.equal(page.queryByText(/旧选题人群/), null);
+    assert.equal(page.queryByRole("region", { name: "内容适配与IP匹配" }), null);
+    assert.equal(getTopicAssets(SHUIMURAN.id)[0]?.contentAdaptation, null);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("切换IP后等待中的旧内容适配失效且不跨IP回写", { timeout: 9000 }, async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  let releaseAdaptation!: () => void;
+  const adaptationGate = new Promise<void>(resolve => { releaseAdaptation = resolve; });
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN, SHIKONG]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "/api/topic-review") return new Response(JSON.stringify(createValidTopicBoardResult()), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (String(input) === "/api/content-adaptation") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as { items: Array<{ key: string }> };
+        await adaptationGate;
+        return new Response(JSON.stringify({ items: [{ key: request.items[0]?.key, contentProfile: { primaryTrack: "财经商业", secondaryTrack: null, fineTags: ["旧IP", "迟到结果"], targetAudience: "旧IP目标人群", audienceTags: ["旧IP", "旧人群"], primaryPurpose: "知识教育", secondaryPurpose: null, reasons: { track: "旧IP", audience: "旧IP", purpose: "旧IP" } }, ipFit: { tier: "高度匹配", reason: "旧IP结果" } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const { act, cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const AppLayout = (await import("../components/layout/AppLayout")).default;
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const user = userEvent.setup({ document });
+    const page = render(<IPProvider><AppLayout><TopicBoardPage /></AppLayout></IPProvider>);
+    await user.click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText("内容适配正在异步生成，不影响选题评估", {}, { timeout: 7000 });
+    const currentIPButton = (await page.findByText("当前操盘IP")).closest("button");
+    assert.ok(currentIPButton);
+    await user.click(currentIPButton);
+    await user.click(page.getByRole("button", { name: /设计师石空/ }));
+    await page.findByText(/评估背景：当前操盘IP为设计师石空/);
+    await act(async () => { releaseAdaptation(); await adaptationGate; await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.equal(page.queryByText(/旧IP目标人群/), null);
+    assert.equal(getTopicAssets(SHUIMURAN.id)[0]?.contentAdaptation, null);
+    assert.equal(getTopicAssets(SHIKONG.id).length, 0);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("重新评估后迟到的旧适配结果不能覆盖新结果", { timeout: 15000 }, async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  let adaptationCount = 0;
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "/api/topic-review") return new Response(JSON.stringify(createValidTopicBoardResult()), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (String(input) === "/api/content-adaptation") {
+        adaptationCount += 1;
+        const thisRequest = adaptationCount;
+        const request = JSON.parse(String(init?.body ?? "{}")) as { items: Array<{ key: string }> };
+        if (thisRequest === 1) await firstGate;
+        const label = thisRequest === 1 ? "迟到旧结果" : "当前新结果";
+        return new Response(JSON.stringify({ items: [{ key: request.items[0]?.key, contentProfile: { primaryTrack: "财经商业", secondaryTrack: null, fineTags: [label, "机会判断"], targetAudience: `${label}目标人群`, audienceTags: [label, "职场人"], primaryPurpose: "知识教育", secondaryPurpose: null, reasons: { track: label, audience: label, purpose: label } }, ipFit: { tier: "高度匹配", reason: `${label}匹配说明` } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const { act, cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const user = userEvent.setup({ document });
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    await user.click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText("内容适配正在异步生成，不影响选题评估", {}, { timeout: 7000 });
+    await user.click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText(/目标人群：当前新结果目标人群/, {}, { timeout: 7000 });
+    await act(async () => { releaseFirst(); await firstGate; await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.equal(page.queryByText(/迟到旧结果目标人群/), null);
+    assert.ok(page.getByText(/目标人群：当前新结果目标人群/));
+    const assets = getTopicAssets(SHUIMURAN.id);
+    assert.equal(assets.length, 2);
+    assert.equal(assets.filter(asset => asset.contentAdaptation).length, 1);
+    assert.equal(assets[0]?.contentAdaptation?.current?.contentProfile.targetAudience, "当前新结果目标人群");
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("人工修改内容适配后保留AI原始判断和修改记录", { timeout: 9000 }, async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  let cleanupPage: (() => void) | undefined;
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async (input, init) => {
+      if (String(input) === "/api/topic-review") return new Response(JSON.stringify(createValidTopicBoardResult()), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (String(input) === "/api/content-adaptation") {
+        const request = JSON.parse(String(init?.body ?? "{}")) as { items: Array<{ key: string }> };
+        return new Response(JSON.stringify({ items: [{ key: request.items[0]?.key, contentProfile: { primaryTrack: "财经商业", secondaryTrack: null, fineTags: ["商业机会", "职业选择"], targetAudience: "AI判断的目标人群", audienceTags: ["职场人", "机会判断"], primaryPurpose: "信任建立", secondaryPurpose: null, reasons: { track: "商业机会选题", audience: "面向职场人", purpose: "建立专业信任" } }, ipFit: { tier: "高度匹配", reason: "符合当前IP定位" } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const { cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const user = userEvent.setup({ document });
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    await user.click(page.getByRole("button", { name: "召开董事会" }));
+    await page.findByText(/目标人群：AI判断的目标人群/, {}, { timeout: 7000 });
+    await user.click(page.getByRole("button", { name: "编辑内容适配" }));
+    const audienceInput = page.getByRole("textbox", { name: "目标人群" });
+    await user.clear(audienceInput);
+    await user.type(audienceInput, "人工修正后的目标人群");
+    await user.click(page.getByRole("button", { name: "保存人工修改" }));
+    await page.findByText(/目标人群：人工修正后的目标人群/);
+    const stored = getTopicAssets(SHUIMURAN.id)[0]?.contentAdaptation;
+    assert.equal(stored?.reviewStatus, "human_modified");
+    assert.equal(stored?.aiOriginal.contentProfile.targetAudience, "AI判断的目标人群");
+    assert.equal(stored?.current?.contentProfile.targetAudience, "人工修正后的目标人群");
+    assert.equal(stored?.revisions.at(-1)?.action, "modify");
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
 });
 
 test("切换IP后立即清空上一IP已经显示的知识", { timeout: 5000 }, async () => {
