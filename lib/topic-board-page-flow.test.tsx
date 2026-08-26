@@ -741,7 +741,7 @@ async function renderBoundaryAuditScenario(report: {
   conflictingNodeIds: string[];
   supportedParts: string[];
   missingElements: Array<"CLAIM" | "REASONING" | "CASE" | "DATA" | "DETAIL">;
-}, boundaryFetcher?: (init?: RequestInit) => Promise<Response>) {
+}, boundaryFetcher?: (init?: RequestInit) => Promise<Response>, interviewFetcher?: (init?: RequestInit) => Promise<Response>) {
   const restoreBrowser = installBrowserEnvironment();
   const originalFetch = globalThis.fetch;
   let cleanupPage: (() => void) | undefined;
@@ -841,6 +841,9 @@ async function renderBoundaryAuditScenario(report: {
           headers: { "Content-Type": "application/json" },
         });
       }
+      if (String(input) === "/api/ip-boundary/interview/questions" && interviewFetcher) {
+        return interviewFetcher(init);
+      }
       return new Response(JSON.stringify({ results: [], debug: null }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -873,6 +876,65 @@ async function renderBoundaryAuditScenario(report: {
     throw error;
   }
 }
+
+test("认知真空可开启访谈且切换选题会重置当前会话", async () => {
+  let resolveQuestions: ((response: Response) => void) | undefined;
+  const questionRequest: {
+    current: { topicId: string; interviewId: string } | null;
+  } = { current: null };
+  const questionResponse = new Promise<Response>(resolve => {
+    resolveQuestions = resolve;
+  });
+  const scenario = await renderBoundaryAuditScenario({
+    coverage: "NONE",
+    stance: "UNDETERMINED",
+    explanation: "当前认知库没有涉及该主题。",
+    matchedNodeIds: [],
+    conflictingNodeIds: [],
+    supportedParts: [],
+    missingElements: ["CLAIM"],
+  }, undefined, async init => {
+    const requestBody: unknown = JSON.parse(String(init?.body));
+    assert.ok(typeof requestBody === "object" && requestBody !== null);
+    assert.ok("topicId" in requestBody && typeof requestBody.topicId === "string");
+    assert.ok("interviewId" in requestBody && typeof requestBody.interviewId === "string");
+    questionRequest.current = {
+      topicId: requestBody.topicId,
+      interviewId: requestBody.interviewId,
+    };
+    return questionResponse;
+  });
+
+  try {
+    const interviewButton = scenario.page.getByRole("button", { name: "开启认知访谈" });
+    await scenario.user.click(interviewButton);
+    assert.ok(await scenario.page.findByText("正在生成中立访谈问题…"));
+
+    resolveQuestions?.(new Response(JSON.stringify({
+      activeIPId: SHUIMURAN.id,
+      topicId: questionRequest.current?.topicId,
+      interviewId: questionRequest.current?.interviewId,
+      questions: [{
+        id: "question-1",
+        missingElement: "CLAIM",
+        content: "关于这个话题，您的核心主张是什么？",
+        basedOnNodeIds: [],
+      }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const answer = await scenario.page.findByRole("textbox", { name: "访谈回答" });
+    await scenario.user.type(answer, "这是我对当前选题的真实判断。 ");
+    const topicInput = scenario.page.getByPlaceholderText(/例如：/);
+    await scenario.user.clear(topicInput);
+    await scenario.user.type(topicInput, "这是一个新的页面内选题");
+
+    assert.equal(scenario.page.queryByRole("complementary", { name: "认知访谈" }), null);
+  } finally {
+    scenario.restore();
+  }
+});
 
 test("立场冲突时页面展示认知警告并禁止进入脚本生成", async () => {
   const scenario = await renderBoundaryAuditScenario({

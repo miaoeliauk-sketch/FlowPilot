@@ -33,6 +33,8 @@ import {
   parseBoundaryCheckUIResponse,
   type BoundaryEvidenceNode,
 } from "@/lib/ip-boundary-ui";
+import { InterviewPanel } from "@/components/ip-boundary/InterviewPanel";
+import type { InterviewPanelState, InterviewQuestion } from "@/lib/ip-boundary-interview";
 
 // ── Constants ──
 const PHASES = [
@@ -58,6 +60,15 @@ const EXAMPLES = [
   "一个专业服务最容易被用户误解的地方是什么？",
   "新手开始一件事时，最应该避开的误区是什么？",
 ];
+
+interface InterviewSession {
+  activeIPId: string;
+  topicId: string;
+  interviewId: string;
+  state: InterviewPanelState;
+  questions: InterviewQuestion[];
+  errorMessage: string | null;
+}
 
 function levelColor(s: number) {
   return s >= 90 ? "#3DA876" : s >= 80 ? "#639922" : s >= 70 ? "#C99A1E" : "#E0608E";
@@ -480,12 +491,14 @@ export default function TopicBoardPage() {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
   const boundaryRequestSeqRef = useRef(0);
+  const interviewRequestSeqRef = useRef(0);
   const [boundaryStatus, setBoundaryStatus] = useState<BoundaryAuditStatus>("idle");
   const [boundaryReport, setBoundaryReport] = useState<BoundaryReport | null>(null);
   const [boundaryEvidence, setBoundaryEvidence] = useState<BoundaryEvidenceNode[]>([]);
   const [boundaryMessage, setBoundaryMessage] = useState<string | null>(null);
   const [boundaryTopicAssetId, setBoundaryTopicAssetId] = useState<string | null>(null);
   const [pendingGenerateAsset, setPendingGenerateAsset] = useState<TopicAsset | null>(null);
+  const [interviewSession, setInterviewSession] = useState<InterviewSession | null>(null);
 
   // 参考知识：选题输入停止变化800ms后自动检索，不是实时每个按键都查
   const [knowledgeRefs, setKnowledgeRefs] = useState<KnowledgeRef[]>([]);
@@ -497,6 +510,7 @@ export default function TopicBoardPage() {
 
   useEffect(() => {
     boundaryRequestSeqRef.current += 1;
+    interviewRequestSeqRef.current += 1;
     activeIPIdRef.current = activeIP?.id ?? null;
     setTopicHistory(activeIP ? getTopicAssets(activeIP.id) : []);
     setResult(null);
@@ -507,16 +521,19 @@ export default function TopicBoardPage() {
     setBoundaryMessage(null);
     setBoundaryTopicAssetId(null);
     setPendingGenerateAsset(null);
+    setInterviewSession(null);
   }, [activeIP?.id]);
 
   useEffect(() => {
     boundaryRequestSeqRef.current += 1;
+    interviewRequestSeqRef.current += 1;
     setBoundaryStatus("idle");
     setBoundaryReport(null);
     setBoundaryEvidence([]);
     setBoundaryMessage(null);
     setBoundaryTopicAssetId(null);
     setPendingGenerateAsset(null);
+    setInterviewSession(null);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const requestSeq = knowledgeRequestSeqRef.current + 1;
     knowledgeRequestSeqRef.current = requestSeq;
@@ -549,6 +566,8 @@ export default function TopicBoardPage() {
     setBoundaryEvidence([]);
     setBoundaryMessage(null);
     setPendingGenerateAsset(null);
+    interviewRequestSeqRef.current += 1;
+    setInterviewSession(null);
 
     let bundle: ReturnType<typeof boundarySourceBundle>;
     try {
@@ -616,6 +635,71 @@ export default function TopicBoardPage() {
     if (!activeIP || !boundaryTopicAssetId) return;
     const asset = getTopicAssets(activeIP.id).find(item => item.id === boundaryTopicAssetId);
     if (asset?.boardResult) void runBoundaryAudit(asset, activeIP);
+  }
+
+  async function startBoundaryInterview() {
+    if (!activeIP || !boundaryTopicAssetId || boundaryStatus !== "ready" || !boundaryReport) return;
+    if (boundaryReport.coverage !== "NONE" && boundaryReport.coverage !== "PARTIAL") return;
+    const asset = getTopicAssets(activeIP.id).find(item => item.id === boundaryTopicAssetId);
+    if (!asset) return;
+
+    const requestSeq = interviewRequestSeqRef.current + 1;
+    interviewRequestSeqRef.current = requestSeq;
+    const activeIPId = activeIP.id;
+    const topicId = asset.id;
+    const interviewId = crypto.randomUUID();
+    setInterviewSession({
+      activeIPId,
+      topicId,
+      interviewId,
+      state: "generating_questions",
+      questions: [],
+      errorMessage: null,
+    });
+
+    try {
+      const response = await apiFetch("/api/ip-boundary/interview/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId,
+          topicId,
+          interviewId,
+          topic: asset.title,
+          coverage: boundaryReport.coverage,
+          missingElements: boundaryReport.missingElements,
+          contextNodes: boundaryReport.coverage === "NONE"
+            ? []
+            : boundaryEvidence
+                .filter(node => node.relation === "matched" && node.verificationStatus === "human_confirmed")
+                .map(node => ({ nodeId: node.nodeId, claim: node.claim })),
+        }),
+      });
+      const raw: unknown = await response.json();
+      if (interviewRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== activeIPId) return;
+      if (!response.ok || typeof raw !== "object" || raw === null) throw new Error("访谈问题生成失败，请重试。");
+      const result = raw as Partial<InterviewSession>;
+      if (result.activeIPId !== activeIPId || result.topicId !== topicId || result.interviewId !== interviewId || !Array.isArray(result.questions)) {
+        throw new Error("访谈会话归属不一致，请重新开启。");
+      }
+      setInterviewSession({
+        activeIPId,
+        topicId,
+        interviewId,
+        state: "answering",
+        questions: result.questions,
+        errorMessage: null,
+      });
+    } catch (interviewError) {
+      if (interviewRequestSeqRef.current !== requestSeq || activeIPIdRef.current !== activeIPId) return;
+      setInterviewSession(current => current && current.interviewId === interviewId
+        ? {
+            ...current,
+            state: "question_error",
+            errorMessage: interviewError instanceof Error ? interviewError.message : "访谈问题生成失败，请重试。",
+          }
+        : current);
+    }
   }
 
   function retryKnowledgeData() {
@@ -955,7 +1039,20 @@ export default function TopicBoardPage() {
             message={boundaryMessage}
             activeIPId={activeIP?.id ?? null}
             onRetry={boundaryStatus === "timeout" ? retryBoundaryAudit : undefined}
+            onStartInterview={boundaryStatus === "ready" ? startBoundaryInterview : undefined}
           />
+
+          {interviewSession && (
+            <InterviewPanel
+              key={`${interviewSession.activeIPId}:${interviewSession.topicId}:${interviewSession.interviewId}`}
+              activeIPId={interviewSession.activeIPId}
+              topicId={interviewSession.topicId}
+              interviewId={interviewSession.interviewId}
+              questions={interviewSession.questions}
+              state={interviewSession.state}
+              errorMessage={interviewSession.errorMessage}
+            />
+          )}
 
           {/* 安全合规官一票否决横幅 */}
           {isBlockedResult && (

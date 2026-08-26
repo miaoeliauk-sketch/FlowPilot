@@ -44,6 +44,7 @@ export function BoundaryAuditPanel({
   evidenceNodes,
   message,
   onRetry,
+  onStartInterview,
   activeIPId,
 }: {
   status: BoundaryAuditStatus;
@@ -51,6 +52,7 @@ export function BoundaryAuditPanel({
   evidenceNodes: BoundaryEvidenceNode[];
   message?: string | null;
   onRetry?: () => void;
+  onStartInterview?: () => void;
   activeIPId?: string | null;
 }) {
   if (status === "idle") return null;
@@ -141,7 +143,20 @@ export function BoundaryAuditPanel({
       )}
 
       {action === "intercept" && report.coverage === "NONE" && (
-        <a href={intakeHref} className="mt-4 inline-flex rounded-full bg-[#1C1C1B] px-3 py-1.5 text-[12px] font-bold text-white">导入资料</a>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <a href={intakeHref} className="inline-flex rounded-full bg-[#1C1C1B] px-3 py-1.5 text-[12px] font-bold text-white">导入资料</a>
+          {onStartInterview && (
+            <button type="button" onClick={onStartInterview} className="rounded-full border border-[#8E78D6] bg-white px-3 py-1.5 text-[12px] font-bold text-[#5D45A7]">
+              开启认知访谈
+            </button>
+          )}
+        </div>
+      )}
+
+      {report.coverage === "PARTIAL" && onStartInterview && (
+        <button type="button" onClick={onStartInterview} className="mt-4 rounded-full border border-[#8E78D6] bg-white px-3 py-1.5 text-[12px] font-bold text-[#5D45A7]">
+          开启认知访谈
+        </button>
       )}
     </section>
   );
