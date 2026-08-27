@@ -6,7 +6,7 @@ export type CognitionGraphVisualRole = "claim-primary" | "reasoning-path" | "cas
 
 export interface CognitionGraphNode {
   id: string;
-  sourceNodeId: string;
+  sourceCognitionNodeId: string;
   kind: CognitionGraphNodeKind;
   type: CognitionGraphNodeType;
   visualRole: CognitionGraphVisualRole;
@@ -74,7 +74,7 @@ export function bridgeCognitionGraph(cognitionNodes: CognitionNodeV2[]): Cogniti
     const claimId = `${cognitionNode.id}:claim`;
     nodes.push({
       id: claimId,
-      sourceNodeId: cognitionNode.id,
+      sourceCognitionNodeId: cognitionNode.id,
       kind: "CLAIM",
       type: "claimNode",
       visualRole: "claim-primary",
@@ -92,7 +92,7 @@ export function bridgeCognitionGraph(cognitionNodes: CognitionNodeV2[]): Cogniti
         const reasoningId = `${cognitionNode.id}:reasoning:${step.order}`;
         nodes.push({
           id: reasoningId,
-          sourceNodeId: cognitionNode.id,
+          sourceCognitionNodeId: cognitionNode.id,
           kind: "REASONING",
           type: "reasoningNode",
           visualRole: "reasoning-path",
@@ -112,7 +112,7 @@ export function bridgeCognitionGraph(cognitionNodes: CognitionNodeV2[]): Cogniti
         const caseId = `${cognitionNode.id}:case:${index + 1}`;
         nodes.push({
           id: caseId,
-          sourceNodeId: cognitionNode.id,
+          sourceCognitionNodeId: cognitionNode.id,
           kind: "CASE",
           type: "caseNode",
           visualRole: "case-evidence",

@@ -106,7 +106,7 @@ function installBrowserEnvironment() {
 function seedCognitionGraphData() {
   const ip = createTopicBoardIPProfile();
   const sourceId = "cognition-graph-source";
-  const rawContent = "持续输出来自问题深化。机械日更不能替代问题深化。基金定投需要长期纪律。";
+  const rawContent = "持续输出来自问题深化。真实问题会产生新的判断。持续复盘会形成可复用案例。比如每周整理咨询记录。机械日更不能替代问题深化。基金定投需要长期纪律。";
   let idSequence = 400;
   const extracted = buildIPSourceAnalysisV2({
     sourceId,
@@ -119,8 +119,19 @@ function seedCognitionGraphData() {
           nodeRef: "N1",
           question: { content: "持续输出依靠什么？", derivation: "explicit", anchors: [{ quote: "持续输出来自问题深化" }] },
           claim: { content: "持续输出来自问题深化。", anchors: [{ quote: "持续输出来自问题深化" }] },
-          reasoning: { status: "not_provided", steps: [] },
-          evidence: [],
+          reasoning: {
+            status: "complete",
+            steps: [
+              { order: 1, content: "真实问题会产生新的判断。", anchors: [{ quote: "真实问题会产生新的判断" }] },
+              { order: 2, content: "持续复盘会形成可复用案例。", anchors: [{ quote: "持续复盘会形成可复用案例" }] },
+            ],
+          },
+          evidence: [{
+            type: "case",
+            content: "比如每周整理咨询记录。",
+            verificationStatus: "unverified",
+            anchors: [{ quote: "比如每周整理咨询记录" }],
+          }],
           concepts: [],
         },
         {
@@ -184,9 +195,9 @@ test("认知图谱页面首次审计发送完整候选范围并渲染全量报�
     resolveAudit(new Response(JSON.stringify({
       results: [{
         nodeId: nodeIds[0],
-        relation: "RELATED",
+        relation: "CONFLICTING",
         lexicalScore: 0.72,
-        reason: "讨论同一持续输出方法。",
+        reason: "新观点把日更当成必要条件，与问题驱动的存量观点冲突。",
         quote: "持续输出来自问题深化",
       }, {
         nodeId: nodeIds[1],
@@ -227,6 +238,8 @@ test("认知图谱页面首次审计发送完整候选范围并渲染全量报�
     assert.equal(requestBodies[0]!.activeIPId, ip.id);
     assert.equal("candidateNodeIds" in requestBodies[0]!, false);
     assert.ok(Array.isArray(requestBodies[0]!.sources));
+    assert.equal(view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').length, 4);
+    assert.equal(view.container.querySelectorAll('[data-audit-status="UNRELATED"]').length, 2);
   } finally {
     cleanupPage?.();
     globalThis.fetch = originalFetch;
@@ -302,6 +315,8 @@ test("重新审计只发送未检查节点并按编号合并回原有全量结�
     });
     fireEvent.click(view.getByRole("button", { name: "开始关联审计" }));
     assert.ok(await view.findByText("原有相关理由"));
+    assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
+    assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 1);
     const reauditButton = view.getByRole("button", { name: "重新审计未检查节点" });
     fireEvent.click(reauditButton);
     fireEvent.click(reauditButton);
@@ -326,6 +341,9 @@ test("重新审计只发送未检查节点并按编号合并回原有全量结�
     assert.ok(view.getByText("原有相关理由"));
     assert.ok(view.getByText("节点编号：" + nodeIds[2]));
     assert.equal(view.queryByText("本次未检查"), null);
+    assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
+    assert.equal(view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').length, 1);
+    assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 0);
     assert.deepEqual(requestBodies[1]!.candidateNodeIds, [nodeIds[1]]);
   } finally {
     cleanupPage?.();
@@ -458,6 +476,64 @@ test("输入从A切到B再回A时允许重新审计且丢弃旧A结果", async (
     await new Promise(resolve => setTimeout(resolve, 0));
     assert.equal(view.queryByText("旧A迟到结果"), null);
     assert.ok(view.getByText("新A请求结果"));
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("重新发起全量审计时清除旧高亮且失败后保持普通图谱", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  const { nodeIds } = seedCognitionGraphData();
+  const retryResolver: { current: ((response: Response) => void) | null } = { current: null };
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      return new Response(JSON.stringify({
+        results: [
+          { nodeId: nodeIds[0], relation: "CONFLICTING", lexicalScore: 0.8, reason: "首次确认冲突", quote: "持续输出来自问题深化" },
+          { nodeId: nodeIds[1], relation: "UNRELATED", lexicalScore: 0.1, reason: "无直接关联", quote: "机械日更不能替代问题深化" },
+          { nodeId: nodeIds[2], relation: "UNRELATED", lexicalScore: 0, reason: "属于其他主题", quote: "基金定投需要长期纪律" },
+        ],
+        truncated: false,
+        candidateCountBeforeTruncation: 3,
+        assessedCandidateCount: 3,
+        auditScope: "full",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Promise<Response>(resolve => {
+      retryResolver.current = resolve;
+    });
+  };
+
+  let cleanupPage: (() => void) | undefined;
+  try {
+    const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
+    const { cleanup, fireEvent, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
+
+    fireEvent.change(await view.findByLabelText("待审观点"), {
+      target: { value: "测试新请求清除旧高亮" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "开始关联审计" }));
+    assert.ok(await view.findByText("首次确认冲突"));
+    assert.equal(view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').length, 4);
+
+    fireEvent.click(view.getByRole("button", { name: "开始关联审计" }));
+    assert.ok(view.getByRole("button", { name: "正在关联审计……" }));
+    assert.equal(view.container.querySelectorAll("[data-audit-status]").length, 0);
+    if (!retryResolver.current) throw new Error("重试请求尚未发出");
+    retryResolver.current(new Response(JSON.stringify({ error: "模拟语义层失败" }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    assert.ok(await view.findByText("语义审计暂时失败，请稍后重试。"));
+    assert.equal(view.container.querySelectorAll("[data-audit-status]").length, 0);
   } finally {
     cleanupPage?.();
     globalThis.fetch = originalFetch;

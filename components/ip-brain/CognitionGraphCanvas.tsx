@@ -13,13 +13,22 @@ import {
 import "@xyflow/react/dist/style.css";
 import { memo, useMemo } from "react";
 
+import type { AssociationAuditNodeResult } from "../../lib/cognition-association-audit";
 import type {
   CognitionGraphEdge,
   CognitionGraphNode,
 } from "../../lib/cognition-graph-bridge";
 
+type CognitionGraphAuditStatus = AssociationAuditNodeResult["relation"];
+
+export type CognitionGraphCanvasNode = Omit<CognitionGraphNode, "data"> & {
+  data: CognitionGraphNode["data"] & {
+    auditStatus?: CognitionGraphAuditStatus;
+  };
+};
+
 interface CognitionGraphCanvasProps {
-  nodes: CognitionGraphNode[];
+  nodes: CognitionGraphCanvasNode[];
   edges: CognitionGraphEdge[];
   height?: number;
 }
@@ -27,6 +36,7 @@ interface CognitionGraphCanvasProps {
 type CanvasNodeData = {
   label: string;
   content: string;
+  auditStatus?: CognitionGraphAuditStatus;
 };
 
 type CanvasNode = Node<CanvasNodeData, CognitionGraphNode["type"]>;
@@ -40,14 +50,42 @@ function NodeHandles() {
   );
 }
 
+function auditVisualClasses(
+  auditStatus: CognitionGraphAuditStatus | undefined,
+  defaultClasses: string,
+): string {
+  if (auditStatus === "CONFLICTING") {
+    return "motion-safe:animate-[pulse_900ms_ease-out_1] border-[#DC2626] bg-[#FEF2F2] text-[#991B1B]";
+  }
+  if (auditStatus === "RELATED") {
+    return "border-[#16A34A] bg-[#F0FDF4] text-[#166534] ring-2 ring-[#86EFAC]";
+  }
+  return `${defaultClasses}${auditStatus === "UNASSESSED" ? " opacity-50" : ""}`;
+}
+
+function NodeContent({ data }: { data: CanvasNodeData }) {
+  return (
+    <>
+      <NodeHandles />
+      {data.auditStatus === "CONFLICTING" && (
+        <span aria-label="认知冲突" className="mr-1">!</span>
+      )}
+      {data.label}
+    </>
+  );
+}
+
 function ClaimNode({ data }: NodeProps<CanvasNode>) {
   return (
     <div
       data-node-type="claim"
-      className="relative min-w-[180px] rounded-md border-2 border-[#B96514] bg-[#F3A04C] px-4 py-3 font-semibold text-[#2B1605] shadow-sm"
+      data-audit-status={data.auditStatus}
+      className={`relative min-w-[180px] rounded-md border-2 px-4 py-3 font-semibold shadow-sm ${auditVisualClasses(
+        data.auditStatus,
+        "border-[#B96514] bg-[#F3A04C] text-[#2B1605]",
+      )}`}
     >
-      <NodeHandles />
-      {data.label}
+      <NodeContent data={data} />
     </div>
   );
 }
@@ -56,10 +94,13 @@ function ReasoningNode({ data }: NodeProps<CanvasNode>) {
   return (
     <div
       data-node-type="reasoning"
-      className="relative min-w-[180px] rounded-full border border-[#7DD3FC] bg-[#E0F2FE] px-5 py-3 text-[#0C4A6E]"
+      data-audit-status={data.auditStatus}
+      className={`relative min-w-[180px] rounded-full border px-5 py-3 ${auditVisualClasses(
+        data.auditStatus,
+        "border-[#7DD3FC] bg-[#E0F2FE] text-[#0C4A6E]",
+      )}`}
     >
-      <NodeHandles />
-      {data.label}
+      <NodeContent data={data} />
     </div>
   );
 }
@@ -68,10 +109,13 @@ function CaseNode({ data }: NodeProps<CanvasNode>) {
   return (
     <div
       data-node-type="case"
-      className="relative flex min-h-[112px] min-w-[112px] max-w-[160px] items-center justify-center rounded-full border-2 border-dashed border-[#86EFAC] bg-[#DCFCE7] px-4 py-3 text-center text-[#166534]"
+      data-audit-status={data.auditStatus}
+      className={`relative flex min-h-[112px] min-w-[112px] max-w-[160px] items-center justify-center rounded-full border-2 border-dashed px-4 py-3 text-center ${auditVisualClasses(
+        data.auditStatus,
+        "border-[#86EFAC] bg-[#DCFCE7] text-[#166534]",
+      )}`}
     >
-      <NodeHandles />
-      {data.label}
+      <NodeContent data={data} />
     </div>
   );
 }

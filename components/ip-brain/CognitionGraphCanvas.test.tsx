@@ -42,7 +42,7 @@ function graphFixture(): CognitionGraph {
     nodes: [
       {
         id: "node-1:claim",
-        sourceNodeId: "node-1",
+        sourceCognitionNodeId: "node-1",
         kind: "CLAIM",
         type: "claimNode",
         visualRole: "claim-primary",
@@ -52,7 +52,7 @@ function graphFixture(): CognitionGraph {
       },
       {
         id: "node-1:reasoning:1",
-        sourceNodeId: "node-1",
+        sourceCognitionNodeId: "node-1",
         kind: "REASONING",
         type: "reasoningNode",
         visualRole: "reasoning-path",
@@ -62,7 +62,7 @@ function graphFixture(): CognitionGraph {
       },
       {
         id: "node-1:reasoning:2",
-        sourceNodeId: "node-1",
+        sourceCognitionNodeId: "node-1",
         kind: "REASONING",
         type: "reasoningNode",
         visualRole: "reasoning-path",
@@ -72,7 +72,7 @@ function graphFixture(): CognitionGraph {
       },
       {
         id: "node-1:case:1",
-        sourceNodeId: "node-1",
+        sourceCognitionNodeId: "node-1",
         kind: "CASE",
         type: "caseNode",
         visualRole: "case-evidence",
@@ -231,6 +231,82 @@ test("认知图谱画布稳定渲染四个节点和点阵背景", async () => {
       assert.ok(node.querySelector(".react-flow__handle.source"));
       assert.ok(node.querySelector(".react-flow__handle.target"));
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("同一认知节点拆出的视觉节点同步呈现冲突高亮", async () => {
+  const { CognitionGraphCanvas } = await import(canvasModulePath);
+  const { cleanup, render, waitFor } = await import("@testing-library/react");
+  const graph = graphFixture();
+  const conflictingNodes = graph.nodes.map(node => ({
+    ...node,
+    data: { ...node.data, auditStatus: "CONFLICTING" as const },
+  }));
+
+  try {
+    const view = render(
+      <CognitionGraphCanvas nodes={conflictingNodes} edges={graph.edges} height={500} />,
+    );
+
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').length, 4);
+    });
+    view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').forEach((node) => {
+      assert.match(node.className, /border-\[#DC2626\]/u);
+      assert.match(node.className, /bg-\[#FEF2F2\]/u);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("相关认知节点呈现绿色反馈", async () => {
+  const { CognitionGraphCanvas } = await import(canvasModulePath);
+  const { cleanup, render, waitFor } = await import("@testing-library/react");
+  const graph = graphFixture();
+  const relatedNodes = graph.nodes.map(node => ({
+    ...node,
+    data: { ...node.data, auditStatus: "RELATED" as const },
+  }));
+
+  try {
+    const view = render(
+      <CognitionGraphCanvas nodes={relatedNodes} edges={graph.edges} height={500} />,
+    );
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
+    });
+    view.container.querySelectorAll('[data-audit-status="RELATED"]').forEach((node) => {
+      assert.match(node.className, /border-\[#16A34A\]/u);
+      assert.match(node.className, /ring-2/u);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("本次未检查的认知节点降低透明度且不冒充无关结论", async () => {
+  const { CognitionGraphCanvas } = await import(canvasModulePath);
+  const { cleanup, render, waitFor } = await import("@testing-library/react");
+  const graph = graphFixture();
+  const unassessedNodes = graph.nodes.map(node => ({
+    ...node,
+    data: { ...node.data, auditStatus: "UNASSESSED" as const },
+  }));
+
+  try {
+    const view = render(
+      <CognitionGraphCanvas nodes={unassessedNodes} edges={graph.edges} height={500} />,
+    );
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 4);
+    });
+    view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').forEach((node) => {
+      assert.match(node.className, /opacity-50/u);
+      assert.doesNotMatch(node.className, /border-\[#DC2626\]|border-\[#16A34A\]/u);
+    });
   } finally {
     cleanup();
   }

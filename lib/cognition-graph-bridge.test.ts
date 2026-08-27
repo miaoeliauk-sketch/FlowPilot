@@ -73,7 +73,9 @@ test("一个观点、两步推理和一个案例被桥接为四个可区分的�
     [claimNode.visualRole, reasoningNodes[0]!.visualRole, caseNode.visualRole],
     ["claim-primary", "reasoning-path", "case-evidence"],
   );
-  assert.equal(claimNode.sourceNodeId, cognition.id);
+  graph.nodes.forEach((node) => {
+    assert.equal(node.sourceCognitionNodeId, cognition.id);
+  });
 
   assert.deepEqual(
     graph.edges.map(edge => [edge.id, edge.source, edge.target]),

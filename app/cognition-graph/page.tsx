@@ -118,6 +118,21 @@ export default function CognitionGraphPage() {
     }
   }, [activeIP]);
   const graph = useMemo(() => bridgeCognitionGraph(cognition.nodes), [cognition.nodes]);
+  const graphWithAuditStatus = useMemo(() => {
+    const statusByCognitionNodeId = new Map(
+      report?.results.map(result => [result.nodeId, result.relation]) ?? [],
+    );
+    return {
+      nodes: graph.nodes.map(node => ({
+        ...node,
+        data: {
+          ...node.data,
+          auditStatus: statusByCognitionNodeId.get(node.sourceCognitionNodeId),
+        },
+      })),
+      edges: graph.edges,
+    };
+  }, [graph, report]);
 
   useEffect(() => {
     requestSequenceRef.current += 1;
@@ -139,6 +154,10 @@ export default function CognitionGraphPage() {
     requestSequenceRef.current = requestSequence;
     inFlightAuditKeysRef.current.set(auditKey, requestSequence);
     const requestIPId = activeIP.id;
+    if (!candidateNodeIds) {
+      reportRef.current = null;
+      setReport(null);
+    }
     setAuditLoading(true);
     setError(null);
     try {
@@ -253,7 +272,7 @@ export default function CognitionGraphPage() {
 
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
         <div className="overflow-hidden rounded-[18px] border border-[#E5E4DE] bg-white p-3">
-          <CognitionGraphCanvas nodes={graph.nodes} edges={graph.edges} />
+          <CognitionGraphCanvas nodes={graphWithAuditStatus.nodes} edges={graphWithAuditStatus.edges} />
         </div>
         <div>
           {report
