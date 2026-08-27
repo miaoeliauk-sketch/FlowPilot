@@ -8,22 +8,16 @@ import {
   checkTopic,
 } from "@/lib/ip-boundary-engine";
 import {
-  buildIPSourceAnalysisProofClaims,
-  buildIPSourceFinalProofClaims,
-  digestIPSourceAnalysisProofClaims,
-  digestIPSourceFinalProofClaims,
   getIPSourceAnalysisProofSecret,
-  verifyIPSourceFinalProof,
 } from "@/lib/ip-source-analysis-proof";
-import { verifyFinalizedIPSourceLedger } from "@/lib/ip-source-ledger";
 import {
   parseStoredIPSourceAnalysis,
-  toV1CompatibleItems,
 } from "@/lib/ip-source-analysis-v2";
 import { StructuredDeepSeekError } from "@/lib/structured-deepseek";
 import { DeepSeekRequestPayloadTooLargeError } from "@/lib/deepseek";
 import type { BoundaryEvidenceNode } from "@/lib/ip-boundary-ui";
 import { verifyEphemeralCognitionProof } from "@/lib/ip-boundary-interview-proof";
+import { verifyPersistentCognitionSources } from "@/lib/ip-cognition-source-verification";
 
 const MAX_SOURCES = 50;
 
@@ -95,45 +89,12 @@ export async function POST(request: NextRequest) {
 
   try {
     const secret = await getIPSourceAnalysisProofSecret();
-    const confirmedNodes: BoundaryNodeContext[] = [];
+    const verifiedSources = await verifyPersistentCognitionSources(sources, activeIPId);
+    if (!verifiedSources.ok) return securityFailure();
+    const confirmedNodes: BoundaryNodeContext[] = verifiedSources.nodes.map(toBoundaryNode);
     const seenNodeIds = new Set<string>();
     const ephemeralNodeIds = new Set<string>();
-
-    for (const rawSource of sources) {
-      if (!isRecord(rawSource)) return securityFailure();
-      const sourceId = typeof rawSource.sourceId === "string" ? rawSource.sourceId.trim() : "";
-      const rawContent = typeof rawSource.rawContent === "string" ? rawSource.rawContent : "";
-      const finalProof = typeof rawSource.finalProof === "string" ? rawSource.finalProof.trim() : "";
-      if (!sourceId || !rawContent.trim() || !finalProof) return securityFailure();
-
-      const parsed = parseStoredIPSourceAnalysis(rawSource.analysis, rawContent, sourceId);
-      if (!parsed.ok || parsed.version !== 2) return securityFailure();
-      const contextItems = toV1CompatibleItems(parsed.analysis);
-      const finalClaims = buildIPSourceFinalProofClaims({
-        ipId: activeIPId,
-        analysis: parsed.analysis,
-        contextItems,
-      });
-      if (!verifyIPSourceFinalProof(finalProof, finalClaims, secret)) return securityFailure();
-      const analysisClaims = buildIPSourceAnalysisProofClaims({
-        ipId: activeIPId,
-        analysis: parsed.analysis,
-      });
-      if (!await verifyFinalizedIPSourceLedger({
-        sourceId,
-        ipId: activeIPId,
-        nonce: parsed.analysis.nonce,
-        digest: digestIPSourceAnalysisProofClaims(analysisClaims),
-        finalDigest: digestIPSourceFinalProofClaims(finalClaims),
-      })) return securityFailure();
-
-      for (const node of parsed.analysis.nodes) {
-        if (node.reviewStatus !== "human_confirmed") continue;
-        if (seenNodeIds.has(node.id)) return securityFailure();
-        seenNodeIds.add(node.id);
-        confirmedNodes.push(toBoundaryNode(node));
-      }
-    }
+    verifiedSources.nodes.forEach(node => seenNodeIds.add(node.id));
 
     if (hasTemporaryContext) {
       const temporary = body.temporaryContext;

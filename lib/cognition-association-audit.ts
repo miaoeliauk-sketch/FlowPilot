@@ -20,6 +20,10 @@ export interface AssociationAuditReport {
   assessedCandidateCount: number;
 }
 
+export interface AssociationAuditResponse extends AssociationAuditReport {
+  auditScope: "full" | "subset";
+}
+
 function authoritativeClaim(node: CognitionNodeV2): string {
   return node.humanRevision?.claim?.trim() || node.claim.content.trim();
 }
