@@ -41,6 +41,7 @@ test("无有效链接时在下载前返回明确提示", async () => {
   }));
   const body = await response.json();
   assert.equal(response.status, 400);
+  assert.equal(body.errorCode, "link_parse_failed");
   assert.match(body.error, /没有识别到抖音视频链接/);
 });
 

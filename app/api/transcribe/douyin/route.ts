@@ -111,7 +111,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "请求内容不是有效的JSON。" }, { status: 400 });
   }
   const validationError = validateDouyinTranscriptionRequest(payload);
-  if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
+  if (validationError) {
+    return NextResponse.json({
+      error: validationError,
+      ...(validationError.startsWith("没有识别到抖音视频链接")
+        ? { errorCode: "link_parse_failed" }
+        : {}),
+    }, { status: 400 });
+  }
   try {
     return NextResponse.json(await runBridge(JSON.stringify(payload)));
   } catch (error) {

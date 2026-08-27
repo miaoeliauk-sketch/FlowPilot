@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   extractDouyinLinks,
+  getDouyinTranscriptionFailureMessage,
   validateDouyinTranscriptionRequest,
 } from "./douyin-transcription";
 
@@ -31,4 +32,11 @@ test("限制单批数量并校验转写密钥", () => {
   assert.match(validateDouyinTranscriptionRequest({ linksText: "https://v.douyin.com/a/", mode: "local", cookiesFromBrowser: "unknown" }) ?? "", /浏览器/);
   assert.match(validateDouyinTranscriptionRequest({ linksText: "https://v.douyin.com/a/", mode: "api", apiKey: "key", apiBaseUrl: "file:///tmp/key" }) ?? "", /HTTP/);
   assert.match(validateDouyinTranscriptionRequest(null) ?? "", /请求内容不完整/);
+});
+
+test("未知失败状态使用固定安全提示而不展示接口原文", () => {
+  assert.equal(
+    getDouyinTranscriptionFailureMessage("unknown_failure", "接口原始提示"),
+    "抖音链接处理失败，请稍后重试。",
+  );
 });

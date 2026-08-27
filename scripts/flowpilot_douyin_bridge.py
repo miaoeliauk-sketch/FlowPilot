@@ -67,6 +67,48 @@ def health() -> dict:
     }
 
 
+def is_cookie_required_error(error: Exception) -> bool:
+    message = str(error).lower()
+    if any(
+        negative in message
+        for negative in (
+            "不需要登录",
+            "无需登录",
+            "does not require login",
+            "cookies are not needed",
+        )
+    ):
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "fresh cookies",
+            "cookies are needed",
+            "cookies required",
+            "login required",
+            "sign in to confirm",
+            "必须提供 cookies",
+            "必须提供cookie",
+            "请登录后重试",
+            "必须登录后才能",
+        )
+    )
+
+
+def is_audio_conversion_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "ffmpeg",
+            "音频转码",
+            "音频转换",
+            "postprocessing",
+            "post-processing",
+        )
+    )
+
+
 def process(payload: dict) -> dict:
     tool = load_tool()
     links = tool.extract_douyin_links(str(payload.get("linksText", "")))
@@ -102,6 +144,34 @@ def process(payload: dict) -> dict:
                     cookies_from_browser=cookies_browser,
                     cookies_file="",
                 )
+            except Exception as error:
+                cookie_required = is_cookie_required_error(error)
+                conversion_failed = not cookie_required and is_audio_conversion_error(error)
+                results.append(
+                    {
+                        "sourceUrl": link,
+                        "title": f"抖音链接{index + 1}",
+                        "status": "error",
+                        "errorCode": (
+                            "cookie_required"
+                            if cookie_required
+                            else "audio_conversion_failed"
+                            if conversion_failed
+                            else "download_failed"
+                        ),
+                        "text": "",
+                        "message": (
+                            "该视频需要登录信息才能下载，请选择Chrome、Safari等浏览器登录信息后重试。"
+                            if cookie_required
+                            else "视频已下载，但音频转换失败，请检查本机FFmpeg后重试。"
+                            if conversion_failed
+                            else "视频下载失败，请检查网络或稍后重试。"
+                        ),
+                    }
+                )
+                continue
+
+            try:
                 text, segments = tool.transcribe_dispatch(audio_path, mode, args)
                 formatted = tool.format_timestamped_text(segments, fallback_text=text).strip()
                 results.append(
@@ -119,8 +189,9 @@ def process(payload: dict) -> dict:
                         "sourceUrl": link,
                         "title": f"抖音链接{index + 1}",
                         "status": "error",
+                        "errorCode": "transcription_failed",
                         "text": "",
-                        "message": "下载或转写失败，请检查链接、登录状态和所选转写方式。",
+                        "message": "音频已下载，但转写失败，请检查所选转写方式或稍后重试。",
                     }
                 )
             finally:

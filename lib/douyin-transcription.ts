@@ -1,4 +1,30 @@
 export type DouyinTranscriptionMode = "local" | "api" | "bailian";
+export type DouyinTranscriptionFailureCode =
+  | "link_parse_failed"
+  | "cookie_required"
+  | "download_failed"
+  | "audio_conversion_failed"
+  | "transcription_failed";
+
+const FAILURE_MESSAGES: Record<DouyinTranscriptionFailureCode, string> = {
+  link_parse_failed: "没有识别到抖音视频链接，请检查分享文案或链接后重试。",
+  cookie_required: "该视频需要登录信息才能下载，请选择Chrome、Safari等浏览器登录信息后重试。",
+  download_failed: "视频下载失败，请检查网络或稍后重试。",
+  audio_conversion_failed: "视频已下载，但音频转换失败，请检查本机FFmpeg后重试。",
+  transcription_failed: "音频已下载，但转写失败，请检查所选转写方式或稍后重试。",
+};
+
+export const DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE = "抖音链接处理失败，请稍后重试。";
+
+export function getDouyinTranscriptionFailureMessage(
+  errorCode: string | undefined,
+  fallback: string,
+): string {
+  if (!errorCode) return fallback;
+  return Object.prototype.hasOwnProperty.call(FAILURE_MESSAGES, errorCode)
+    ? FAILURE_MESSAGES[errorCode as DouyinTranscriptionFailureCode]
+    : DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE;
+}
 
 export interface DouyinTranscriptionRequest {
   linksText: string;
@@ -17,6 +43,7 @@ export interface DouyinTranscriptResult {
   title: string;
   status: "success" | "error";
   text: string;
+  errorCode?: DouyinTranscriptionFailureCode;
   message?: string;
 }
 

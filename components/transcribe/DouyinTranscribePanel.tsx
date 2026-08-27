@@ -7,6 +7,10 @@ import type {
   DouyinTranscriptionMode,
   DouyinTranscriptionRequest,
 } from "@/lib/douyin-transcription";
+import {
+  DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE,
+  getDouyinTranscriptionFailureMessage,
+} from "@/lib/douyin-transcription";
 import type { TranscriptSource } from "@/lib/transcription-source";
 
 interface DouyinTranscribePanelProps {
@@ -17,6 +21,44 @@ function modeLabel(mode: DouyinTranscriptionMode): string {
   if (mode === "api") return "在线接口";
   if (mode === "bailian") return "阿里云百炼";
   return "本地Whisper";
+}
+
+class DouyinUserFacingError extends Error {}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseTranscriptResult(value: unknown): DouyinTranscriptResult | null {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.sourceUrl !== "string"
+    || typeof value.title !== "string"
+    || (value.status !== "success" && value.status !== "error")
+    || typeof value.text !== "string"
+    || (value.videoId !== undefined && typeof value.videoId !== "string")
+    || (value.message !== undefined && typeof value.message !== "string")
+    || (value.errorCode !== undefined && typeof value.errorCode !== "string")
+  ) {
+    return null;
+  }
+  return value as unknown as DouyinTranscriptResult;
+}
+
+function parseDouyinHealth(value: unknown): DouyinHealth | null {
+  if (!isRecord(value) || !isRecord(value.modes)) return null;
+  if (
+    typeof value.ready !== "boolean"
+    || typeof value.toolDir !== "string"
+    || !Array.isArray(value.missing)
+    || value.missing.some(item => typeof item !== "string")
+    || typeof value.modes.local !== "boolean"
+    || typeof value.modes.api !== "boolean"
+    || typeof value.modes.bailian !== "boolean"
+  ) {
+    return null;
+  }
+  return value as unknown as DouyinHealth;
 }
 
 export function DouyinTranscribePanel({ onDone }: DouyinTranscribePanelProps) {
@@ -38,12 +80,13 @@ export function DouyinTranscribePanel({ onDone }: DouyinTranscribePanelProps) {
     let active = true;
     fetch("/api/transcribe/douyin")
       .then(async response => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error || "无法检查本机转写环境。");
-        return body as DouyinHealth;
+        const body: unknown = await response.json().catch(() => null);
+        const parsedHealth = parseDouyinHealth(body);
+        if (!response.ok || !parsedHealth) throw new Error("无法检查本机转写环境。");
+        return parsedHealth;
       })
       .then(nextHealth => { if (active) setHealth(nextHealth); })
-      .catch(reason => { if (active) setHealthError(reason instanceof Error ? reason.message : "无法检查本机转写环境。"); });
+      .catch(() => { if (active) setHealthError("无法检查本机转写环境。"); });
     return () => { active = false; };
   }, []);
 
@@ -72,14 +115,44 @@ export function DouyinTranscribePanel({ onDone }: DouyinTranscribePanelProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const body = await response.json() as { results?: DouyinTranscriptResult[]; error?: string };
-      if (!response.ok) throw new Error(body.error || "抖音链接转写失败。");
-      setResults(body.results ?? []);
-      if (!(body.results ?? []).some(result => result.status === "success")) {
-        setError(body.results?.[0]?.message || "这批链接都没有转写成功。");
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw new Error(DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE);
+      }
+      if (!isRecord(body)) throw new Error(DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE);
+      if (!response.ok) {
+        const errorCode = typeof body.errorCode === "string" ? body.errorCode : undefined;
+        throw new DouyinUserFacingError(getDouyinTranscriptionFailureMessage(
+          errorCode,
+          DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE,
+        ));
+      }
+      if (!Array.isArray(body.results)) throw new Error(DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE);
+      const parsedResults = body.results.map(parseTranscriptResult);
+      if (parsedResults.some(result => result === null)) {
+        throw new Error(DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE);
+      }
+      const normalizedResults = (parsedResults as DouyinTranscriptResult[]).map(result => result.status === "error"
+        ? {
+          ...result,
+          message: result.errorCode
+            ? getDouyinTranscriptionFailureMessage(
+              result.errorCode,
+              DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE,
+            )
+            : DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE,
+        }
+        : result);
+      setResults(normalizedResults);
+      if (!normalizedResults.some(result => result.status === "success")) {
+        setError(normalizedResults[0]?.message || "这批链接都没有转写成功。");
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "抖音链接转写失败。");
+      setError(reason instanceof DouyinUserFacingError
+        ? reason.message
+        : DOUYIN_TRANSCRIPTION_SAFE_ERROR_MESSAGE);
     } finally {
       setLoading(false);
     }
