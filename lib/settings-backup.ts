@@ -61,7 +61,7 @@ export async function restoreFlowPilotBackup(
   storage: FlowPilotBackupStorage,
   lock?: ContentMasterWriteLock | null,
 ): Promise<number> {
-  if (!data._meta) throw new Error("文件格式不正确，请选择FlowPilot导出的备份文件");
+  if (!data._meta) throw new Error("文件格式不正确，请选择Nicole导出的备份文件");
   const includesContentMasters = CONTENT_MASTER_STORAGE_KEY in data;
   if (includesContentMasters) {
     assertValidContentMasterBackupData(data[CONTENT_MASTER_STORAGE_KEY]);

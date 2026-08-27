@@ -125,7 +125,7 @@ test("新建复盘明确区分内部内容和外部内容并只列出当前IP脚
   const user = userEvent.setup({ document });
   const view = render(<IPProvider><ReviewPage /></IPProvider>);
 
-  assert.ok(await view.findByRole("button", { name: "FlowPilot内部内容" }));
+  assert.ok(await view.findByRole("button", { name: "Nicole内部内容" }));
   assert.ok(view.getByRole("button", { name: "外部或临时内容" }));
   const selector = view.getByLabelText("选择已发布脚本");
   assert.ok(within(selector).getByRole("option", { name: script.title }));

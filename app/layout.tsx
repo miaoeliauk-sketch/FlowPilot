@@ -6,8 +6,8 @@ import { LocalDataSync } from "@/components/LocalDataSync";
 import { isLocalSyncEnabled } from "@/lib/local-sync-contract";
 
 export const metadata: Metadata = {
-  title: "AI IP 操盘工作台",
-  description: "AI+IP 内容创作者的一体化工作台",
+  title: "Nicole｜AI+IP操盘工作台",
+  description: "Nicole AI+IP内容创作者一体化工作台",
 };
 
 export default function RootLayout({

@@ -1655,7 +1655,7 @@ export default function KnowledgeHubPage() {
           </div>
           <h1 className="text-[24px] font-semibold tracking-tight text-[#1C1C1B]">知识库中心</h1>
           <p className="mt-1.5 max-w-[640px] text-[13.5px] leading-6 text-[#8A8A86]">
-            FlowPilot的底层数据中心。AI模块不应凭空生成结论，应优先检索这里积累的真实案例、口播样本、方法论和评论作为依据。
+            Nicole的底层数据中心。AI模块不应凭空生成结论，应优先检索这里积累的真实案例、口播样本、方法论和评论作为依据。
           </p>
         </div>
         <div className="flex rounded-[10px] bg-[#F2F1ED] p-1">

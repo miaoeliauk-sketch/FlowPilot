@@ -212,7 +212,7 @@ function BackupSection() {
         const raw = ev.target?.result as string;
         const data = JSON.parse(raw) as Record<string, unknown>;
         if (!data._meta) {
-          setImportResult({ ok: false, msg: "文件格式不正确，请选择 FlowPilot 导出的备份文件" });
+          setImportResult({ ok: false, msg: "文件格式不正确，请选择Nicole导出的备份文件" });
           return;
         }
         const count = await restoreFlowPilotBackup(data, localStorage);
@@ -314,7 +314,7 @@ function BackupSection() {
 function AboutSection() {
   return (
     <Card>
-      <SectionTitle>关于 FlowPilot</SectionTitle>
+      <SectionTitle>关于Nicole</SectionTitle>
       <div className="space-y-1.5 text-[12.5px] text-[#8A8A86]">
         <p>版本：Desktop Preview 0.1</p>
         <p>定位：AI+IP 内容生产操作系统</p>

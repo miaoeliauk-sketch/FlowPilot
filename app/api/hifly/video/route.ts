@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
   }
 
   const payload = {
-    title: body.title || "FlowPilot生成视频",
+    title: body.title || "Nicole生成视频",
     avatar: body.avatarId,
     voice: body.voiceId,
     content: body.script,

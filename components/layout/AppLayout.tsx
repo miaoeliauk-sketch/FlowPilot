@@ -1,4 +1,5 @@
 "use client";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useRef, useEffect } from "react";
@@ -185,9 +186,16 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <TopicCalibrationSeeder />
       <aside className="flex w-[220px] flex-shrink-0 flex-col p-3 sticky top-0 h-screen gap-1 overflow-y-auto">
         <div className="card mb-3 p-3.5 flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-[10px] text-[13px] font-black" style={{ background: "#C8F04A", color: "#1A1A1A" }}>FP</div>
+          <Image
+            src="/icon.png"
+            alt="Nicole品牌Logo"
+            width={36}
+            height={36}
+            priority
+            className="h-9 w-9 rounded-[10px] object-cover"
+          />
           <div>
-            <div className="text-[14px] font-bold text-[#1A1A1A]">FlowPilot</div>
+            <div className="text-[14px] font-bold text-[#1A1A1A]">Nicole</div>
             <div className="text-[11px] text-[#999]">AI+IP操盘工作台</div>
           </div>
         </div>

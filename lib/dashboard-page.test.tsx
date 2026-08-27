@@ -265,6 +265,14 @@ test("左侧导航按核心生产流程和运营工具分组且不再展示录�
   assert.equal(Boolean(view.queryByRole("link", { name: /录音转逐字稿/ })), false);
 });
 
+test("左侧导航展示Nicole品牌名称和小象Logo", async () => {
+  const view = await renderAppLayout();
+
+  assert.ok(await view.findByText("Nicole", { exact: true }));
+  assert.ok(view.getByRole("img", { name: "Nicole品牌Logo" }));
+  assert.equal(Boolean(view.queryByText("FlowPilot", { exact: true })), false);
+});
+
 test("通用方法库只统计并展示明确全局的方法知识", async () => {
   localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
     knowledgeEntry("global", "明确全局方法", "选题方法库", null),

@@ -351,7 +351,7 @@ export default function Home() {
           )}
           {mounted && totalKnowledge === 0 && (
             <div className="mt-3 rounded-[14px] bg-white p-3.5 text-[12px] text-[#888]">
-              💡 开始使用 FlowPilot 后，这里会展示你的内容生产数据和知识积累趋势。
+              💡 开始使用Nicole后，这里会展示你的内容生产数据和知识积累趋势。
             </div>
           )}
       </div>

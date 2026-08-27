@@ -340,7 +340,7 @@ function DigitalHumanMode() {
     if (!finalScript.trim()) { setError("请输入或选择脚本文案"); return; }
     setVideoLoading(true);
     try {
-      const res = await hiflyFetch("/api/hifly/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ avatarId: finalAvatarId, voiceId: finalVoiceId, script: finalScript, title: videoTitle || "FlowPilot生成视频" }) });
+      const res = await hiflyFetch("/api/hifly/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ avatarId: finalAvatarId, voiceId: finalVoiceId, script: finalScript, title: videoTitle || "Nicole生成视频" }) });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? "视频生成失败"); return; }
       const task: VideoTaskDH = { taskId: data.taskId, status: 1, statusLabel: "等待中", videoUrl: null, coverUrl: null, script: finalScript, title: videoTitle, createdAt: new Date().toISOString() };

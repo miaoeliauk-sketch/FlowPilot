@@ -175,7 +175,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
   async function handleAnalyze() {
     if (!activeIP) { setError("请先选择当前操盘IP"); return; }
     if (reviewSource === "flowpilot" && !selectedScriptId) {
-      setError("请选择这次发布使用的FlowPilot脚本");
+      setError("请选择这次发布使用的Nicole脚本");
       return;
     }
     try {
@@ -316,7 +316,7 @@ function NewReviewTab({ onSaved }: { onSaved: () => void }) {
         <p className="mb-3 text-[11.5px] text-[#999]">来源完整的内部内容可以追溯到原选题；外部内容仍可复盘，但不会进入学习依据。</p>
         <div className="mb-3 flex flex-wrap gap-2">
           {([
-            ["flowpilot", "FlowPilot内部内容"],
+            ["flowpilot", "Nicole内部内容"],
             ["external", "外部或临时内容"],
           ] as const).map(([value, label]) => (
             <button
