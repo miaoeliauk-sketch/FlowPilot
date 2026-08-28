@@ -6,7 +6,15 @@ import { AssociationAuditPanel } from "@/components/ip-brain/AssociationAuditPan
 import { CognitionGraphCanvas } from "@/components/ip-brain/CognitionGraphCanvas";
 import { apiFetch } from "@/lib/api-fetch";
 import type { AssociationAuditResponse } from "@/lib/cognition-association-audit";
-import { bridgeCognitionGraph } from "@/lib/cognition-graph-bridge";
+import { loadDraftCognitionBatches } from "@/lib/cognition-draft-session-store";
+import {
+  bridgeCognitionGraph,
+  bridgeDraftCognitionGraph,
+} from "@/lib/cognition-graph-bridge";
+import {
+  commitDraftCognitionBatch,
+  type CognitionCommitProgress,
+} from "@/lib/cognition-orchestrator";
 import { buildBoundarySourceBundle } from "@/lib/ip-boundary-ui";
 import { useIP } from "@/lib/ip-context";
 import { getKnowledgeEntries } from "@/lib/ip-store";
@@ -99,6 +107,11 @@ export default function CognitionGraphPage() {
   const [report, setReport] = useState<AssociationAuditResponse | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [graphRevision, setGraphRevision] = useState(0);
+  const [committingBatchId, setCommittingBatchId] = useState<string | null>(null);
+  const [commitProgress, setCommitProgress] = useState<CognitionCommitProgress | null>(null);
+  const [commitError, setCommitError] = useState<string | null>(null);
+  const [commitWarning, setCommitWarning] = useState<string | null>(null);
   const requestSequenceRef = useRef(0);
   const reportRef = useRef<AssociationAuditResponse | null>(null);
   const inFlightAuditKeysRef = useRef(new Map<string, number>());
@@ -116,8 +129,56 @@ export default function CognitionGraphPage() {
     } catch {
       return { sources: [], nodes: [], error: "认知底座读取失败，请检查当前IP的知识资料。" };
     }
-  }, [activeIP]);
-  const graph = useMemo(() => bridgeCognitionGraph(cognition.nodes), [cognition.nodes]);
+  }, [activeIP, graphRevision]);
+  const drafts = useMemo(() => {
+    if (!activeIP || typeof window === "undefined") {
+      return { records: [], error: null as string | null };
+    }
+    try {
+      const loaded = loadDraftCognitionBatches(window.sessionStorage, activeIP.id);
+      return {
+        records: loaded.records,
+        error: loaded.errorCode
+          ? "认知草稿读取失败，请刷新页面后重试。"
+          : loaded.corruptedRecordCount > 0
+            ? `发现${loaded.corruptedRecordCount}份损坏的认知草稿，已安全跳过。`
+            : null,
+      };
+    } catch {
+      return { records: [], error: "认知草稿读取失败，请检查浏览器会话存储。" };
+    }
+  }, [activeIP, graphRevision]);
+  const graph = useMemo(() => {
+    const confirmed = bridgeCognitionGraph(cognition.nodes);
+    const confirmedSourceIds = new Set(cognition.sources.map(source => source.sourceId));
+    const visibleDrafts = drafts.records.filter(
+      record => !confirmedSourceIds.has(record.analysis.sourceId),
+    );
+    const confirmedMaxX = confirmed.nodes.reduce(
+      (maximum, node) => Math.max(maximum, node.position.x),
+      -200,
+    );
+    let nextOffsetX = confirmedMaxX + 400;
+    const draftNodes = [] as ReturnType<typeof bridgeDraftCognitionGraph>["nodes"];
+    const draftEdges = [] as ReturnType<typeof bridgeDraftCognitionGraph>["edges"];
+    visibleDrafts.forEach((record) => {
+      const draftGraph = bridgeDraftCognitionGraph(record);
+      const batchMaxX = draftGraph.nodes.reduce(
+        (maximum, node) => Math.max(maximum, node.position.x),
+        0,
+      );
+      draftNodes.push(...draftGraph.nodes.map(node => ({
+        ...node,
+        position: { ...node.position, x: node.position.x + nextOffsetX },
+      })));
+      draftEdges.push(...draftGraph.edges);
+      nextOffsetX += batchMaxX + 400;
+    });
+    return {
+      nodes: [...confirmed.nodes, ...draftNodes],
+      edges: [...confirmed.edges, ...draftEdges],
+    };
+  }, [cognition.nodes, cognition.sources, drafts.records]);
   const graphWithAuditStatus = useMemo(() => {
     const statusByCognitionNodeId = new Map(
       report?.results.map(result => [result.nodeId, result.relation]) ?? [],
@@ -140,7 +201,45 @@ export default function CognitionGraphPage() {
     setReport(null);
     setError(null);
     setAuditLoading(false);
+    setCommittingBatchId(null);
+    setCommitProgress(null);
+    setCommitError(null);
+    setCommitWarning(null);
   }, [activeIP?.id]);
+
+  async function commitDraft(batchId: string) {
+    if (!activeIP || committingBatchId) return;
+    const draft = drafts.records.find(record => record.batchId === batchId);
+    if (!draft) {
+      setCommitError("找不到需要确权的认知草稿，请刷新页面后重试。");
+      return;
+    }
+    const requestedIPId = activeIP.id;
+    setCommittingBatchId(batchId);
+    setCommitProgress("READING_DRAFT");
+    setCommitError(null);
+    setCommitWarning(null);
+    try {
+      const result = await commitDraftCognitionBatch({
+        storage: window.sessionStorage,
+        ipId: requestedIPId,
+        batchId,
+        sourceMetadata: draft.sourceMetadata,
+        onProgress: setCommitProgress,
+      });
+      if (result.status === "COMMITTED_CLEANUP_PENDING") {
+        setCommitWarning("正式认知已保存，建议手动刷新清除草稿。");
+      }
+      reportRef.current = null;
+      setReport(null);
+      setGraphRevision(revision => revision + 1);
+    } catch (cause) {
+      setCommitError(cause instanceof Error ? cause.message : "认知确权失败，请重试。");
+    } finally {
+      setCommittingBatchId(null);
+      setCommitProgress(null);
+    }
+  }
 
   async function runAudit(candidateNodeIds?: string[]) {
     if (!activeIP || !input.trim() || cognition.sources.length === 0) return;
@@ -270,9 +369,48 @@ export default function CognitionGraphPage() {
         </div>
       )}
 
+      {(drafts.error || commitError || commitWarning) && (
+        <div
+          role="alert"
+          className={`rounded-[12px] border px-4 py-3 text-[13px] ${commitWarning
+            ? "border-[#F2D38B] bg-[#FFF9E8] text-[#7A5A13]"
+            : "border-[#F3C6C6] bg-[#FFF5F5] text-[#A32D2D]"}`}
+        >
+          {commitWarning ?? commitError ?? drafts.error}
+        </div>
+      )}
+
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
-        <div className="overflow-hidden rounded-[18px] border border-[#E5E4DE] bg-white p-3">
+        <div className="relative overflow-hidden rounded-[18px] border border-[#E5E4DE] bg-white p-3">
+          {drafts.records.length > 0 && (
+            <div className="mb-3 space-y-2 rounded-[12px] border border-dashed border-[#D8D7D1] bg-[#FAFAF8] p-3">
+              <p className="text-[12px] font-bold text-[#555]">待确权认知草稿</p>
+              {drafts.records.map(draft => (
+                <div key={draft.batchId} className="flex items-center justify-between gap-3 rounded-[10px] bg-white px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-[12px] font-semibold text-[#333]">{draft.sourceMetadata.title}</p>
+                    <p className="text-[11px] text-[#999]">{draft.sourceMetadata.sourceKind}</p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`确认入库：${draft.sourceMetadata.title}`}
+                    disabled={committingBatchId !== null}
+                    onClick={() => void commitDraft(draft.batchId)}
+                    className="shrink-0 rounded-full bg-[#1C1C1B] px-4 py-2 text-[12px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    确认入库
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <CognitionGraphCanvas nodes={graphWithAuditStatus.nodes} edges={graphWithAuditStatus.edges} />
+          {committingBatchId && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 text-[13px] font-semibold text-[#555]">
+              <span>正在固化认知……</span>
+              <span className="sr-only">{commitProgress}</span>
+            </div>
+          )}
         </div>
         <div>
           {report

@@ -1,7 +1,7 @@
 import { createDraftCognitionBatchId } from "./cognition-graph-bridge";
 import { parseStoredIPSourceAnalysis } from "./ip-source-analysis-v2";
 import { calculateSHA256 } from "./sha256";
-import type { IPSourceAnalysisV2 } from "./types";
+import type { IPOriginalSourceKind, IPSourceAnalysisV2 } from "./types";
 
 const STORAGE_KEY_PREFIX = "FP_COGNITION_DRAFT_V1:";
 
@@ -18,6 +18,12 @@ export interface DraftCognitionSessionRecord {
   batchId: string;
   ipId: string;
   rawContent: string;
+  sourceMetadata: {
+    title: string;
+    sourceKind: IPOriginalSourceKind;
+    sourceName: string;
+    sourceUrl: string;
+  };
   analysis: IPSourceAnalysisV2;
   analysisToken: string;
 }
@@ -40,6 +46,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const SOURCE_KINDS = new Set<IPOriginalSourceKind>([
+  "直播逐字稿",
+  "课程内容",
+  "文章",
+  "语音整理",
+  "其他",
+]);
+
+function parseSourceMetadata(value: unknown): DraftCognitionSessionRecord["sourceMetadata"] | null {
+  if (!isRecord(value)
+    || typeof value.title !== "string" || !value.title.trim() || value.title.length > 200
+    || typeof value.sourceKind !== "string"
+    || !SOURCE_KINDS.has(value.sourceKind as IPOriginalSourceKind)
+    || typeof value.sourceName !== "string" || value.sourceName.length > 500
+    || typeof value.sourceUrl !== "string" || value.sourceUrl.length > 2_048) {
+    return null;
+  }
+  return {
+    title: value.title.trim(),
+    sourceKind: value.sourceKind as IPOriginalSourceKind,
+    sourceName: value.sourceName,
+    sourceUrl: value.sourceUrl,
+  };
+}
+
 function draftStorageKey(record: DraftCognitionSessionRecord): string {
   const identity = JSON.stringify([
     record.ipId,
@@ -58,6 +89,9 @@ function parseDraftRecord(value: unknown): DraftCognitionSessionRecord | null {
     || typeof value.analysisToken !== "string" || !value.analysisToken.trim()) {
     return null;
   }
+
+  const sourceMetadata = parseSourceMetadata(value.sourceMetadata);
+  if (!sourceMetadata) return null;
 
   const parsed = parseStoredIPSourceAnalysis(
     value.analysis,
@@ -82,6 +116,7 @@ function parseDraftRecord(value: unknown): DraftCognitionSessionRecord | null {
     batchId: value.batchId,
     ipId: value.ipId,
     rawContent: value.rawContent,
+    sourceMetadata,
     analysis: parsed.analysis,
     analysisToken: value.analysisToken,
   };

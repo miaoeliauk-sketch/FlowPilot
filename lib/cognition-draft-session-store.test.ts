@@ -24,6 +24,12 @@ interface DraftCognitionSessionRecord {
   batchId: string;
   ipId: string;
   rawContent: string;
+  sourceMetadata: {
+    title: string;
+    sourceKind: "课程内容";
+    sourceName: string;
+    sourceUrl: string;
+  };
   analysis: IPSourceAnalysisV2;
   analysisToken: string;
 }
@@ -148,6 +154,12 @@ function makeRecord(input: {
     }),
     ipId: input.ipId,
     rawContent,
+    sourceMetadata: {
+      title: `认知草稿-${input.sourceId}`,
+      sourceKind: "课程内容",
+      sourceName: "",
+      sourceUrl: "",
+    },
     analysis,
     analysisToken: input.token ?? "fake-token-for-test",
   };

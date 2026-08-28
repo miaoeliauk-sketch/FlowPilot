@@ -55,6 +55,7 @@ before(() => {
 beforeEach(() => {
   document.body.innerHTML = "";
   localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 afterEach(async () => {
@@ -63,6 +64,7 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
   document.body.innerHTML = "";
   localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 after(() => {
@@ -309,6 +311,17 @@ test("新增原始内容按V2解析并用分析前生成的同一Source编号完
     await user.type(view.getByPlaceholderText(/粘贴老师的课程/), sourceContent);
     fireEvent.click(view.getByRole("button", { name: "开始理解内容" }));
     await waitFor(() => assert.ok(view.getByText("不要追随已经形成的共识。")));
+    const { loadDraftCognitionBatches } = await import("./cognition-draft-session-store");
+    const initialDrafts = loadDraftCognitionBatches(window.sessionStorage, ip.id).records;
+    assert.equal(initialDrafts.length, 1);
+    assert.equal(initialDrafts[0]?.analysis.sourceId, requestedSourceId);
+    assert.deepEqual(initialDrafts[0]?.sourceMetadata, {
+      title: "非共识选题",
+      sourceKind: "直播逐字稿",
+      sourceName: "",
+      sourceUrl: "",
+    });
+    const initialAnalysisToken = initialDrafts[0]?.analysisToken;
     assert.equal(requestedParserVersion, 2);
     assert.match(requestedSourceId, /^source-/);
     assert.ok(view.getByText("以下内容为AI建议，不是老师原意"));
@@ -317,6 +330,10 @@ test("新增原始内容按V2解析并用分析前生成的同一Source编号完
 
     await user.click(view.getByRole("button", { name: "确认" }));
     await waitFor(() => assert.ok(view.getByText("人工已确认")));
+    const reviewedDrafts = loadDraftCognitionBatches(window.sessionStorage, ip.id).records;
+    assert.equal(reviewedDrafts.length, 1);
+    assert.notEqual(reviewedDrafts[0]?.analysisToken, initialAnalysisToken);
+    assert.equal(reviewedDrafts[0]?.analysis.nodes[0]?.reviewStatus, "human_confirmed");
     await user.click(view.getByRole("button", { name: "继续保存这份原始内容" }));
     await user.click(view.getByRole("button", { name: "确认保存为IP原始内容" }));
     await waitFor(() => assert.ok(view.getByText("IP原始内容已保存")));
@@ -331,6 +348,7 @@ test("新增原始内容按V2解析并用分析前生成的同一Source编号完
     assert.equal(saved[0]?.sourceAnalysis?.parserVersion, 2);
     assert.equal(saved[0]?.sourceAnalysis?.sourceId, requestedSourceId);
     assert.equal(typeof saved[0]?.sourceFinalProof, "string");
+    assert.equal(loadDraftCognitionBatches(window.sessionStorage, ip.id).records.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

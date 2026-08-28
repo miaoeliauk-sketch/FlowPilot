@@ -4,6 +4,8 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 
+import { saveDraftCognitionBatch } from "./cognition-draft-session-store";
+import { createDraftCognitionBatchId } from "./cognition-graph-bridge";
 import { IPProvider } from "./ip-context";
 import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 import { createTopicBoardIPProfile } from "./topic-board-contract.fixture";
@@ -54,6 +56,15 @@ function installBrowserEnvironment() {
     unobserve() {}
     disconnect() {}
   }
+
+  class DOMMatrixReadOnlyMock {
+    readonly m22 = 1;
+  }
+
+  Object.defineProperty(dom.window, "DOMMatrixReadOnly", {
+    configurable: true,
+    value: DOMMatrixReadOnlyMock,
+  });
 
   const browserGlobals: Record<string, unknown> = {
     window: dom.window,
@@ -174,6 +185,54 @@ function seedCognitionGraphData() {
     createdAt: "2026-08-27T09:00:00.000Z",
   }]));
   return { ip, nodeId: analysis.nodes[0]!.id, nodeIds: analysis.nodes.map(node => node.id) };
+}
+
+function seedP5Draft(
+  ipId: string,
+  sourceId: string,
+  title: string,
+  rawContent: string,
+  nodeId: string,
+) {
+  const extracted = buildIPSourceAnalysisV2({
+    sourceId,
+    sourceContent: rawContent,
+    analyzedAt: "2026-08-28T06:03:00.000Z",
+    createId: () => nodeId,
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "老师表达了什么？", derivation: "inferred", anchors: [{ quote: rawContent }] },
+        claim: { content: rawContent, anchors: [{ quote: rawContent }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const analysis = {
+    ...extracted,
+    nonce: 2,
+    nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+  };
+  const batchId = createDraftCognitionBatchId({
+    ipId,
+    sourceId,
+    sourceHash: analysis.sourceHash,
+    analyzedAt: analysis.analyzedAt,
+  });
+  const saved = saveDraftCognitionBatch(window.sessionStorage, {
+    schemaVersion: 1,
+    batchId,
+    ipId,
+    rawContent,
+    sourceMetadata: { title, sourceKind: "课程内容", sourceName: "", sourceUrl: "" },
+    analysis,
+    analysisToken: `fake-token-for-${sourceId}`,
+  });
+  assert.equal(saved.ok, true);
+  return { batchId, sourceId };
 }
 
 test("认知图谱页面首次审计发送完整候选范围并渲染全量报告", async () => {
@@ -574,3 +633,219 @@ for (const scenario of [
     }
   });
 }
+
+test("认知图谱加载多个真实草稿批次并只确权用户选择的一批", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  const ip = createTopicBoardIPProfile({ id: "ip-p5-drafts", name: "P5草稿测试IP" });
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+
+  function seedDraft(sourceId: string, title: string, rawContent: string, nodeId: string) {
+    const extracted = buildIPSourceAnalysisV2({
+      sourceId,
+      sourceContent: rawContent,
+      analyzedAt: `2026-08-28T06:0${sourceId.endsWith("a") ? "1" : "2"}:00.000Z`,
+      createId: () => nodeId,
+      candidate: {
+        nodes: [{
+          nodeRef: "N1",
+          question: { content: "老师表达了什么？", derivation: "inferred", anchors: [{ quote: rawContent }] },
+          claim: { content: rawContent, anchors: [{ quote: rawContent }] },
+          reasoning: { status: "not_provided", steps: [] },
+          evidence: [],
+          concepts: [],
+        }],
+        aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+      },
+    });
+    const analysis = {
+      ...extracted,
+      nonce: 2,
+      nodes: extracted.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" as const })),
+    };
+    const batchId = createDraftCognitionBatchId({
+      ipId: ip.id,
+      sourceId,
+      sourceHash: analysis.sourceHash,
+      analyzedAt: analysis.analyzedAt,
+    });
+    const saved = saveDraftCognitionBatch(window.sessionStorage, {
+      schemaVersion: 1,
+      batchId,
+      ipId: ip.id,
+      rawContent,
+      sourceMetadata: {
+        title,
+        sourceKind: "课程内容",
+        sourceName: "",
+        sourceUrl: "",
+      },
+      analysis,
+      analysisToken: `fake-token-for-${sourceId}`,
+    });
+    assert.equal(saved.ok, true);
+    return { batchId, sourceId };
+  }
+
+  const first = seedDraft(
+    "source-draft-a",
+    "草稿观点A",
+    "持续输出来自真实问题。",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  seedDraft(
+    "source-draft-b",
+    "草稿观点B",
+    "稳定表达来自长期复盘。",
+    "22222222-2222-4222-8222-222222222222",
+  );
+  const finalizedSourceIds: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (url === "/api/ip-source-analysis/finalize") {
+      finalizedSourceIds.push(String(body.sourceId));
+      const analysis = body.analysis as { nonce: number };
+      return Response.json({
+        finalProof: `fake-final-proof-for-${String(body.sourceId)}`,
+        activeIPId: body.activeIPId,
+        sourceId: body.sourceId,
+        nonce: analysis.nonce,
+      });
+    }
+    if (url === "/api/ip-source-analysis/verify") {
+      return Response.json({ verified: true });
+    }
+    throw new Error(`未处理的测试请求：${url}`);
+  };
+
+  let cleanupPage: (() => void) | undefined;
+  try {
+    const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
+    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
+
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 2);
+    });
+    assert.equal(view.getAllByRole("button", { name: /确认入库/u }).length, 2);
+
+    fireEvent.click(view.getByRole("button", { name: "确认入库：草稿观点A" }));
+    assert.ok(view.getByText("正在固化认知……"));
+
+    await waitFor(() => {
+      assert.deepEqual(finalizedSourceIds, [first.sourceId]);
+      assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 1);
+    });
+    assert.equal(view.queryByRole("button", { name: "确认入库：草稿观点A" }), null);
+    assert.ok(view.getByRole("button", { name: "确认入库：草稿观点B" }));
+    assert.ok(view.getByText("持续输出来自真实问题。"));
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("认知图谱确权被服务端拒绝时保留草稿并显示原因", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  const ip = createTopicBoardIPProfile({ id: "ip-p5-rejected", name: "P5拒绝测试IP" });
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  seedP5Draft(
+    ip.id,
+    "source-rejected",
+    "待保留草稿",
+    "这份草稿在终审失败后必须保留。",
+    "33333333-3333-4333-8333-333333333333",
+  );
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), "/api/ip-source-analysis/finalize");
+    return Response.json({ error: "分析凭证已失效，请重新审核" }, { status: 403 });
+  };
+
+  let cleanupPage: (() => void) | undefined;
+  try {
+    const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
+    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
+
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 1);
+    });
+    fireEvent.click(view.getByRole("button", { name: "确认入库：待保留草稿" }));
+
+    assert.ok(await view.findByText("分析凭证已失效，请重新审核"));
+    assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 1);
+    assert.ok(view.getByRole("button", { name: "确认入库：待保留草稿" }));
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("正式认知已保存但草稿清理失败时显示手动刷新警告", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const originalFetch = globalThis.fetch;
+  const ip = createTopicBoardIPProfile({ id: "ip-p5-cleanup", name: "P5清理测试IP" });
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  seedP5Draft(
+    ip.id,
+    "source-cleanup-pending",
+    "清理失败草稿",
+    "正式认知已经保存，但浏览器暂时无法清理草稿。",
+    "44444444-4444-4444-8444-444444444444",
+  );
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (url === "/api/ip-source-analysis/finalize") {
+      const analysis = body.analysis as { nonce: number };
+      return Response.json({
+        finalProof: "fake-final-proof-cleanup-pending",
+        activeIPId: body.activeIPId,
+        sourceId: body.sourceId,
+        nonce: analysis.nonce,
+      });
+    }
+    if (url === "/api/ip-source-analysis/verify") return Response.json({ verified: true });
+    throw new Error(`未处理的测试请求：${url}`);
+  };
+  const storagePrototype = Object.getPrototypeOf(window.sessionStorage) as Storage;
+  const originalRemoveItem = storagePrototype.removeItem;
+  storagePrototype.removeItem = () => {
+    throw new Error("模拟浏览器清理失败");
+  };
+
+  let cleanupPage: (() => void) | undefined;
+  try {
+    const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
+    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
+
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 1);
+    });
+    fireEvent.click(view.getByRole("button", { name: "确认入库：清理失败草稿" }));
+
+    assert.ok(await view.findByText("正式认知已保存，建议手动刷新清除草稿。"));
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 0);
+    });
+  } finally {
+    storagePrototype.removeItem = originalRemoveItem;
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});

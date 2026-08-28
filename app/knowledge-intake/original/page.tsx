@@ -2,6 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
+import {
+  removeDraftsByBatch,
+  saveDraftCognitionBatch,
+} from "@/lib/cognition-draft-session-store";
+import { createDraftCognitionBatchId } from "@/lib/cognition-graph-bridge";
 import { useIP } from "@/lib/ip-context";
 import {
   addIPOriginalSource,
@@ -163,6 +168,38 @@ export default function IPOriginalContentIntakePage() {
     });
   }
 
+  function saveV2Draft(
+    nextAnalysis: Extract<IPSourceAnalysisSnapshot, { parserVersion: 2 }>,
+    nextToken: string,
+    nextIPId: string,
+    nextTitle: string,
+  ): boolean {
+    if (typeof window === "undefined") return false;
+    try {
+      return saveDraftCognitionBatch(window.sessionStorage, {
+        schemaVersion: 1,
+        batchId: createDraftCognitionBatchId({
+          ipId: nextIPId,
+          sourceId: nextAnalysis.sourceId,
+          sourceHash: nextAnalysis.sourceHash,
+          analyzedAt: nextAnalysis.analyzedAt,
+        }),
+        ipId: nextIPId,
+        rawContent,
+        sourceMetadata: {
+          title: nextTitle,
+          sourceKind,
+          sourceName,
+          sourceUrl,
+        },
+        analysis: nextAnalysis,
+        analysisToken: nextToken,
+      }).ok;
+    } catch {
+      return false;
+    }
+  }
+
   async function handleFile(file: File) {
     if (analysisInFlight.current || reviewInFlight.current || saveInFlight.current) return;
     setError("");
@@ -242,6 +279,8 @@ export default function IPOriginalContentIntakePage() {
         ? title.trim()
         : deriveIPOriginalSourceTitle(rawContent, nextAnalysis);
       const nextPrecheck = buildPrecheck(nextAnalysis, nextTitle, requestedSourceId);
+      const draftSaved = nextAnalysis.parserVersion !== 2
+        || saveV2Draft(nextAnalysis, data.analysisToken, requestedIPId, nextTitle);
       setAnalysis(nextAnalysis);
       setAnalysisToken(nextAnalysis.parserVersion === 2 ? data.analysisToken : "");
       setAnalysisIPId(requestedIPId);
@@ -251,6 +290,9 @@ export default function IPOriginalContentIntakePage() {
       setTitle(nextTitle);
       setPrecheck(nextPrecheck);
       setSaveDecision(null);
+      if (!draftSaved) {
+        setError("内容解析成功，但认知草稿暂存失败；请勿关闭页面，并检查浏览器存储空间。");
+      }
     } catch (cause) {
       if (requestSeq === activeRequestSeq.current
         && activeIPIdRef.current === requestedIPId) {
@@ -347,6 +389,18 @@ export default function IPOriginalContentIntakePage() {
         : addIPOriginalSource({ ...sourceInput, analysis });
       if (requestSeq !== activeRequestSeq.current
         || activeIPIdRef.current !== requestedIPId) return;
+      if (analysis.parserVersion === 2 && typeof window !== "undefined") {
+        removeDraftsByBatch(
+          window.sessionStorage,
+          requestedIPId,
+          createDraftCognitionBatchId({
+            ipId: requestedIPId,
+            sourceId: analysis.sourceId,
+            sourceHash: analysis.sourceHash,
+            analyzedAt: analysis.analyzedAt,
+          }),
+        );
+      }
       setSavedId(saved.id);
     } catch (cause) {
       if (requestSeq === activeRequestSeq.current
@@ -429,10 +483,19 @@ export default function IPOriginalContentIntakePage() {
         setError(parsed.ok ? "认知审核返回了错误版本" : parsed.error);
         return;
       }
+      const draftSaved = saveV2Draft(
+        parsed.analysis,
+        data.analysisToken,
+        requestedIPId,
+        title.trim() || deriveIPOriginalSourceTitle(rawContent, parsed.analysis),
+      );
       setAnalysis(parsed.analysis);
       setAnalysisToken(data.analysisToken);
       setPrecheck(buildPrecheck(parsed.analysis, title.trim()));
       setSaveDecision(null);
+      if (!draftSaved) {
+        setError("审核已完成，但认知草稿暂存失败；请勿关闭页面，并检查浏览器存储空间。");
+      }
     } catch (cause) {
       if (requestSeq === activeRequestSeq.current
         && activeIPIdRef.current === requestedIPId) {

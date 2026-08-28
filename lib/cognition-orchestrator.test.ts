@@ -41,6 +41,12 @@ function makeReviewedDraft(): DraftCognitionSessionRecord {
     batchId: createDraftCognitionBatchId({ ipId, sourceId, sourceHash, analyzedAt }),
     ipId,
     rawContent,
+    sourceMetadata: {
+      title: "持续输出来自真实问题",
+      sourceKind: "课程内容",
+      sourceName: "",
+      sourceUrl: "",
+    },
     analysis: {
       parserVersion: 2,
       analyzedAt,
