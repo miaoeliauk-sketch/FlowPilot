@@ -1,4 +1,28 @@
-import type { CognitionNodeV2 } from "./types";
+import type {
+  CognitionNodeV2,
+  IPSourceAnalysisV2,
+  IPSourceAnchor,
+} from "./types";
+import { calculateSHA256 } from "./sha256";
+
+export interface DraftCognitionBatchIdentityInput {
+  ipId: string;
+  sourceId: string;
+  sourceHash: string;
+  analyzedAt: string;
+}
+
+export function createDraftCognitionBatchId(
+  input: DraftCognitionBatchIdentityInput,
+): string {
+  const canonicalFields = JSON.stringify([
+    input.ipId,
+    input.sourceId,
+    input.sourceHash,
+    input.analyzedAt,
+  ]);
+  return `draft-${calculateSHA256(canonicalFields)}`;
+}
 
 export type CognitionGraphNodeKind = "CLAIM" | "REASONING" | "CASE";
 export type CognitionGraphNodeType = "claimNode" | "reasoningNode" | "caseNode";
@@ -30,6 +54,31 @@ export interface CognitionGraphEdge {
 export interface CognitionGraph {
   nodes: CognitionGraphNode[];
   edges: CognitionGraphEdge[];
+}
+
+export interface DraftCognitionBatch {
+  batchId: string;
+  ipId: string;
+  analysis: IPSourceAnalysisV2;
+}
+
+export interface DraftCognitionGraphNode extends Omit<CognitionGraphNode, "data"> {
+  data: CognitionGraphNode["data"] & {
+    isDraft: true;
+    draftProvenance: {
+      batchId: string;
+      ipId: string;
+      sourceId: string;
+      sourceHash: string;
+      analyzedAt: string;
+      originalCognitionNodeId: string;
+      anchors: IPSourceAnchor[];
+    };
+  };
+}
+
+export interface DraftCognitionGraph extends Omit<CognitionGraph, "nodes"> {
+  nodes: DraftCognitionGraphNode[];
 }
 
 function labelOf(content: string): string {
@@ -127,4 +176,55 @@ export function bridgeCognitionGraph(cognitionNodes: CognitionNodeV2[]): Cogniti
   });
 
   return { nodes: calculateLayout(nodes), edges };
+}
+
+function draftAnchorsForNode(
+  graphNode: CognitionGraphNode,
+  cognitionNode: CognitionNodeV2,
+): IPSourceAnchor[] {
+  if (graphNode.kind === "CLAIM") return cognitionNode.claim.anchors;
+  if (graphNode.kind === "REASONING") {
+    return cognitionNode.reasoning.steps
+      .find(step => step.order === graphNode.order)?.anchors ?? [];
+  }
+  return cognitionNode.evidence
+    .filter(item => item.type === "case")[graphNode.order - 1]?.anchors ?? [];
+}
+
+export function bridgeDraftCognitionGraph(
+  batch: DraftCognitionBatch,
+): DraftCognitionGraph {
+  const graph = bridgeCognitionGraph(batch.analysis.nodes);
+  const cognitionById = new Map(batch.analysis.nodes.map(node => [node.id, node]));
+
+  const nodes = graph.nodes.map((node): DraftCognitionGraphNode => {
+    const cognitionNode = cognitionById.get(node.sourceCognitionNodeId);
+    if (!cognitionNode) throw new Error("草稿图节点缺少原始认知节点");
+    const draftSourceCognitionNodeId = `${batch.batchId}:${node.sourceCognitionNodeId}`;
+    return {
+      ...node,
+      id: `${batch.batchId}:${node.id}`,
+      sourceCognitionNodeId: draftSourceCognitionNodeId,
+      data: {
+        ...node.data,
+        isDraft: true,
+        draftProvenance: {
+          batchId: batch.batchId,
+          ipId: batch.ipId,
+          sourceId: batch.analysis.sourceId,
+          sourceHash: batch.analysis.sourceHash,
+          analyzedAt: batch.analysis.analyzedAt,
+          originalCognitionNodeId: cognitionNode.id,
+          anchors: draftAnchorsForNode(node, cognitionNode)
+            .map(anchor => ({ ...anchor })),
+        },
+      },
+    };
+  });
+  const edges = graph.edges.map((item) => edge(
+    `${batch.batchId}:${item.source}`,
+    `${batch.batchId}:${item.target}`,
+  ));
+
+  return { nodes, edges };
 }
