@@ -44,6 +44,13 @@ export interface MetadataRequiredDraft {
   record: LegacyDraftCognitionSessionRecord;
 }
 
+export type LegacyDraftRetentionReason = "conflict" | "delete_failed";
+
+export interface RetainedLegacyDraft {
+  record: LegacyDraftCognitionSessionRecord;
+  retentionReason: LegacyDraftRetentionReason;
+}
+
 export type SaveDraftCognitionBatchResult =
   | { ok: true; key: string }
   | { ok: false; code: "QUOTA_EXCEEDED" | "WRITE_FAILED" };
@@ -61,7 +68,13 @@ export type UpdateDraftSourceMetadataResult =
     };
 
 export type UpgradeLegacyDraftResult =
-  | { ok: true; key: string; legacyRemoved: boolean }
+  | { ok: true; key: string; legacyRemoved: true }
+  | {
+      ok: true;
+      key: string;
+      legacyRemoved: false;
+      retentionReason: LegacyDraftRetentionReason;
+    }
   | {
       ok: false;
       code:
@@ -75,6 +88,15 @@ export type UpgradeLegacyDraftResult =
 export type RemoveDraftCognitionBatchResult =
   | { ok: true; removedCount: number }
   | { ok: false; code: "READ_FAILED" | "WRITE_FAILED" };
+
+export type RemoveLegacyDraftResult =
+  | { ok: true; removed: boolean }
+  | { ok: false; code: "READ_FAILED" | "DRAFT_NOT_FOUND" };
+
+export interface LoadRetainedLegacyDraftsResult {
+  records: RetainedLegacyDraft[];
+  errorCode: "READ_FAILED" | null;
+}
 
 export interface LoadDraftCognitionBatchesResult {
   records: DraftCognitionSessionRecord[];
@@ -256,6 +278,13 @@ function hasSameDraftEvidence(
     && JSON.stringify(legacy.analysis) === JSON.stringify(current.analysis);
 }
 
+function retentionReasonFor(
+  legacy: LegacyDraftCognitionSessionRecord,
+  current: DraftCognitionSessionRecord,
+): LegacyDraftRetentionReason {
+  return hasSameDraftEvidence(legacy, current) ? "delete_failed" : "conflict";
+}
+
 function removeStorageItemAndVerify(
   storage: DraftSessionStorageLike,
   key: string,
@@ -330,6 +359,46 @@ export function loadDraftCognitionBatches(
   };
 }
 
+export function loadRetainedLegacyDrafts(
+  storage: DraftSessionStorageLike | null,
+  ipId: string,
+): LoadRetainedLegacyDraftsResult {
+  if (!storage) return { records: [], errorCode: "READ_FAILED" };
+  if (!ipId.trim()) return { records: [], errorCode: null };
+  const legacyByBatch = new Map<string, LegacyDraftCognitionSessionRecord>();
+  const currentByBatch = new Map<string, DraftCognitionSessionRecord>();
+
+  try {
+    const length = storage.length;
+    for (let index = 0; index < length; index += 1) {
+      const key = storage.key(index);
+      if (!isDraftStorageKey(key)) continue;
+      const raw = storage.getItem(key);
+      if (raw === null) continue;
+      const parsed = parseStoredDraft(key, raw);
+      if (parsed?.ipId !== ipId) continue;
+      if (parsed.schemaVersion === 2) {
+        currentByBatch.set(parsed.batchId, parsed);
+      } else {
+        legacyByBatch.set(parsed.batchId, parsed);
+      }
+    }
+  } catch {
+    return { records: [], errorCode: "READ_FAILED" };
+  }
+
+  const records: RetainedLegacyDraft[] = [];
+  legacyByBatch.forEach((legacy, batchId) => {
+    const current = currentByBatch.get(batchId);
+    if (!current) return;
+    records.push({
+      record: legacy,
+      retentionReason: retentionReasonFor(legacy, current),
+    });
+  });
+  return { records, errorCode: null };
+}
+
 export function updateDraftSourceMetadata(
   storage: DraftSessionStorageLike | null,
   ipId: string,
@@ -370,13 +439,22 @@ export function upgradeLegacyDraftSourceMetadata(
       return { ok: true, key: located.current.key, legacyRemoved: true };
     }
     if (!hasSameDraftEvidence(located.legacy.record, located.current.record)) {
-      return { ok: true, key: located.current.key, legacyRemoved: false };
+      return {
+        ok: true,
+        key: located.current.key,
+        legacyRemoved: false,
+        retentionReason: "conflict",
+      };
     }
-    return {
-      ok: true,
-      key: located.current.key,
-      legacyRemoved: removeStorageItemAndVerify(storage, located.legacy.key),
-    };
+    const legacyRemoved = removeStorageItemAndVerify(storage, located.legacy.key);
+    return legacyRemoved
+      ? { ok: true, key: located.current.key, legacyRemoved: true }
+      : {
+          ok: true,
+          key: located.current.key,
+          legacyRemoved: false,
+          retentionReason: "delete_failed",
+        };
   }
   if (!located.legacy) return { ok: false, code: "DRAFT_NOT_FOUND" };
 
@@ -391,11 +469,31 @@ export function upgradeLegacyDraftSourceMetadata(
   });
   if (!saved.ok) return saved;
 
-  return {
-    ok: true,
-    key: saved.key,
-    legacyRemoved: removeStorageItemAndVerify(storage, located.legacy.key),
-  };
+  const legacyRemoved = removeStorageItemAndVerify(storage, located.legacy.key);
+  return legacyRemoved
+    ? { ok: true, key: saved.key, legacyRemoved: true }
+    : {
+        ok: true,
+        key: saved.key,
+        legacyRemoved: false,
+        retentionReason: "delete_failed",
+      };
+}
+
+export function removeLegacyDraftByBatch(
+  storage: DraftSessionStorageLike | null,
+  ipId: string,
+  batchId: string,
+): RemoveLegacyDraftResult {
+  if (!storage) return { ok: false, code: "READ_FAILED" };
+  const located = locateDraftVersions(storage, ipId, batchId);
+  if (!located) return { ok: false, code: "READ_FAILED" };
+  if (!located.current) return { ok: false, code: "DRAFT_NOT_FOUND" };
+  if (!located.legacy) return { ok: true, removed: false };
+  if (!removeStorageItemAndVerify(storage, located.legacy.key)) {
+    return { ok: false, code: "READ_FAILED" };
+  }
+  return { ok: true, removed: true };
 }
 
 export function removeDraftsByBatch(

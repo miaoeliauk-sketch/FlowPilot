@@ -55,6 +55,8 @@ async function loadDraftStoreModule(): Promise<DraftStoreModule> {
   assert.equal(typeof module.loadDraftCognitionBatches, "function");
   assert.equal(typeof module.updateDraftSourceMetadata, "function");
   assert.equal(typeof module.upgradeLegacyDraftSourceMetadata, "function");
+  assert.equal(typeof module.loadRetainedLegacyDrafts, "function");
+  assert.equal(typeof module.removeLegacyDraftByBatch, "function");
   return module as DraftStoreModule;
 }
 
@@ -847,6 +849,7 @@ test("V1删除失败时保留V2并由幂等重跑完成清理", async () => {
   assert.equal(first.ok, true);
   if (!first.ok) return;
   assert.equal(first.legacyRemoved, false);
+  assert.equal(first.retentionReason, "delete_failed");
   assert.ok(underlying.getItem(legacyKey));
   const afterPartialSuccess = loadDraftCognitionBatches(underlying, legacy.ipId);
   assert.equal(afterPartialSuccess.records.length, 1);
@@ -908,6 +911,7 @@ test("同批次V1与V2业务内容不一致时不静默删除V1", async () => {
     ok: true,
     key: saved.key,
     legacyRemoved: false,
+    retentionReason: "conflict",
   });
   assert.equal(storage.getItem(legacyKey), legacyRaw);
   assert.ok(storage.getItem(saved.key));
@@ -946,6 +950,7 @@ test("存储删除静默失效时不误报V1已清理", async () => {
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.legacyRemoved, false);
+  assert.equal(result.retentionReason, "delete_failed");
   assert.ok(underlying.getItem(legacyKey));
   assert.ok(underlying.getItem(result.key));
 });
@@ -985,5 +990,162 @@ test("V1升级拒绝跨IP和非法元数据且不产生任何写入", async () =
     },
   ), { ok: false, code: "INVALID_METADATA" });
   assert.equal(storage.length, 1);
+  assert.equal(storage.getItem(legacyKey), legacyRaw);
+});
+
+test("同批次V1与V2并存时公开准确的残留原因", async () => {
+  const {
+    loadRetainedLegacyDrafts,
+    saveDraftCognitionBatch,
+  } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const deleteFailedCurrent = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-retained-delete-failed",
+    analyzedAt: "2026-08-27T10:27:00.000Z",
+  });
+  const conflictCurrent = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-retained-conflict",
+    analyzedAt: "2026-08-27T10:28:00.000Z",
+  });
+  const deleteFailedLegacy = makeLegacyRecord(deleteFailedCurrent, true);
+  const conflictLegacy = makeLegacyRecord({
+    ...conflictCurrent,
+    analysisToken: "different-legacy-token",
+  }, true);
+  storage.setItem(legacyStorageKey(deleteFailedLegacy), JSON.stringify(deleteFailedLegacy));
+  storage.setItem(legacyStorageKey(conflictLegacy), JSON.stringify(conflictLegacy));
+  assert.equal(saveDraftCognitionBatch(storage, deleteFailedCurrent).ok, true);
+  assert.equal(saveDraftCognitionBatch(storage, conflictCurrent).ok, true);
+
+  const loaded = loadRetainedLegacyDrafts(storage, "ip-a");
+
+  assert.equal(loaded.errorCode, null);
+  assert.deepEqual(
+    loaded.records.map(item => ({ batchId: item.record.batchId, reason: item.retentionReason })).sort(
+      (left, right) => left.batchId.localeCompare(right.batchId),
+    ),
+    [
+      { batchId: conflictCurrent.batchId, reason: "conflict" },
+      { batchId: deleteFailedCurrent.batchId, reason: "delete_failed" },
+    ].sort((left, right) => left.batchId.localeCompare(right.batchId)),
+  );
+});
+
+test("显式清理只删除目标V1并完整保留V2且支持幂等重跑", async () => {
+  const {
+    removeLegacyDraftByBatch,
+    saveDraftCognitionBatch,
+  } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const current = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-remove-legacy",
+    analyzedAt: "2026-08-27T10:29:00.000Z",
+  });
+  const legacy = makeLegacyRecord(current, true);
+  const legacyKey = legacyStorageKey(legacy);
+  const saved = saveDraftCognitionBatch(storage, current);
+  assert.equal(saved.ok, true);
+  if (!saved.ok) return;
+  const currentRaw = storage.getItem(saved.key);
+  storage.setItem(legacyKey, JSON.stringify(legacy));
+
+  assert.deepEqual(removeLegacyDraftByBatch(storage, current.ipId, current.batchId), {
+    ok: true,
+    removed: true,
+  });
+  assert.equal(storage.getItem(legacyKey), null);
+  assert.equal(storage.getItem(saved.key), currentRaw);
+  assert.deepEqual(removeLegacyDraftByBatch(storage, current.ipId, current.batchId), {
+    ok: true,
+    removed: false,
+  });
+  assert.equal(storage.getItem(saved.key), currentRaw);
+});
+
+test("仅有V1而没有V2时拒绝清理并保留原记录", async () => {
+  const { removeLegacyDraftByBatch } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const legacy = makeLegacyRecord(makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-only-legacy",
+    analyzedAt: "2026-08-27T10:30:00.000Z",
+  }), true);
+  const legacyKey = legacyStorageKey(legacy);
+  const legacyRaw = JSON.stringify(legacy);
+  storage.setItem(legacyKey, legacyRaw);
+
+  assert.deepEqual(removeLegacyDraftByBatch(storage, legacy.ipId, legacy.batchId), {
+    ok: false,
+    code: "DRAFT_NOT_FOUND",
+  });
+  assert.equal(storage.getItem(legacyKey), legacyRaw);
+});
+
+test("V1删除抛错或静默失效时不误报成功且V2保持原样", async () => {
+  const {
+    removeLegacyDraftByBatch,
+    saveDraftCognitionBatch,
+  } = await loadDraftStoreModule();
+
+  for (const mode of ["throw", "noop"] as const) {
+    const underlying = new MemoryStorage();
+    const current = makeRecord({
+      ipId: "ip-a",
+      sourceId: `source-remove-${mode}`,
+      analyzedAt: mode === "throw"
+        ? "2026-08-27T10:31:00.000Z"
+        : "2026-08-27T10:32:00.000Z",
+    });
+    const legacy = makeLegacyRecord(current, true);
+    const legacyKey = legacyStorageKey(legacy);
+    const saved = saveDraftCognitionBatch(underlying, current);
+    assert.equal(saved.ok, true);
+    if (!saved.ok) continue;
+    const currentRaw = underlying.getItem(saved.key);
+    underlying.setItem(legacyKey, JSON.stringify(legacy));
+    const failingStorage: DraftSessionStorageLike = {
+      get length() { return underlying.length; },
+      key: index => underlying.key(index),
+      getItem: key => underlying.getItem(key),
+      setItem: (key, value) => underlying.setItem(key, value),
+      removeItem: mode === "throw"
+        ? () => { throw new Error("legacy deletion failed"); }
+        : () => undefined,
+    };
+
+    assert.deepEqual(removeLegacyDraftByBatch(
+      failingStorage,
+      current.ipId,
+      current.batchId,
+    ), { ok: false, code: "READ_FAILED" });
+    assert.ok(underlying.getItem(legacyKey));
+    assert.equal(underlying.getItem(saved.key), currentRaw);
+  }
+});
+
+test("显式清理按IP隔离且不会误删其他IP的同批次记录", async () => {
+  const {
+    removeLegacyDraftByBatch,
+    saveDraftCognitionBatch,
+  } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const current = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-remove-isolation",
+    analyzedAt: "2026-08-27T10:33:00.000Z",
+  });
+  const legacy = makeLegacyRecord(current, true);
+  const legacyKey = legacyStorageKey(legacy);
+  const legacyRaw = JSON.stringify(legacy);
+  storage.setItem(legacyKey, legacyRaw);
+  assert.equal(saveDraftCognitionBatch(storage, current).ok, true);
+
+  assert.deepEqual(removeLegacyDraftByBatch(storage, "ip-b", current.batchId), {
+    ok: false,
+    code: "DRAFT_NOT_FOUND",
+  });
   assert.equal(storage.getItem(legacyKey), legacyRaw);
 });
