@@ -6,14 +6,14 @@ import {
 } from "./knowledge-scope";
 
 test("通用知识对所有IP可见，没有当前IP时也可见", () => {
-  const globalKnowledge = { id: "global-1", ipId: null };
+  const globalKnowledge = { id: "global-1", category: "通用禁用规则", ipId: null };
 
   assert.equal(isKnowledgeVisibleToIP(globalKnowledge, "ip-a"), true);
   assert.equal(isKnowledgeVisibleToIP(globalKnowledge, null), true);
 });
 
 test("私有知识只对所属IP可见，没有当前IP时不可见", () => {
-  const privateKnowledge = { id: "private-a", ipId: "ip-a" };
+  const privateKnowledge = { id: "private-a", category: "IP禁用规则", ipId: "ip-a" };
 
   assert.equal(isKnowledgeVisibleToIP(privateKnowledge, "ip-a"), true);
   assert.equal(isKnowledgeVisibleToIP(privateKnowledge, "ip-b"), false);

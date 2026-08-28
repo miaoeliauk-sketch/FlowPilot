@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { IP_CATEGORIES } from "./knowledge-categories";
+import {
+  GLOBAL_CATEGORIES,
+  IP_CATEGORIES,
+  isGlobalConstraintCategory,
+  isGlobalMethodCategory,
+} from "./knowledge-categories";
 
 import {
   getKnowledgeHubCorrectionCategories,
@@ -14,7 +19,7 @@ import {
 
 test("人工修正分类时不提供跨范围选项", () => {
   assert.deepEqual(getKnowledgeHubCorrectionCategories(null), [
-    "定位方法库", "选题方法库", "标题方法库", "开头方法库", "文案框架方法库",
+    "定位方法库", "选题方法库", "标题方法库", "开头方法库", "文案框架方法库", "通用禁用规则",
   ]);
   assert.deepEqual(getKnowledgeHubCorrectionCategories("ip-1"), [
     "IP人设资料", "IP表达语料", "IP历史内容", "IP高表现内容", "IP受众反馈", "IP禁用规则",
@@ -22,9 +27,19 @@ test("人工修正分类时不提供跨范围选项", () => {
   assert.deepEqual(getKnowledgeHubCorrectionCategories(""), []);
 });
 
+test("通用禁用规则属于全局约束但不属于创作方法", () => {
+  assert.equal(GLOBAL_CATEGORIES.some(category => category.id === "通用禁用规则"), true);
+  assert.equal(isGlobalConstraintCategory("通用禁用规则"), true);
+  assert.equal(isGlobalMethodCategory("通用禁用规则"), false);
+  assert.equal(isGlobalMethodCategory("文案框架方法库"), true);
+  assert.equal(isGlobalConstraintCategory("IP禁用规则"), false);
+});
+
 test("公共分类校验规则拒绝跨范围修正", () => {
   assert.equal(isKnowledgeHubCorrectionAllowed(null, "标题方法库"), true);
+  assert.equal(isKnowledgeHubCorrectionAllowed(null, "通用禁用规则"), true);
   assert.equal(isKnowledgeHubCorrectionAllowed(null, "IP表达语料"), false);
+  assert.equal(isKnowledgeHubCorrectionAllowed("ip-a", "通用禁用规则"), false);
   assert.equal(isKnowledgeHubCorrectionAllowed("ip-a", "IP表达语料"), true);
   assert.equal(isKnowledgeHubCorrectionAllowed("ip-a", "标题方法库"), false);
   assert.equal(isKnowledgeHubCorrectionAllowed("", "标题方法库"), false);

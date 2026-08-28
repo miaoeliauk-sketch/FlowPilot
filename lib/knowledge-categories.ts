@@ -4,6 +4,7 @@ export const GLOBAL_CATEGORIES = [
   { id: "标题方法库",     desc: "爆款标题、标题公式、关键词组合、情绪词、利益点表达，供 AI 生成标题参考。" },
   { id: "开头方法库",     desc: "短视频开头、3秒钩子、冲突引入、问题引入、反常识开头，供 AI 生成开头参考。" },
   { id: "文案框架方法库", desc: "口播文案结构、脚本结构、转折方式、论证框架、故事结构，供 AI 生成脚本参考。" },
+  { id: "通用禁用规则",   desc: "所有IP都必须遵守的内容底线、价值观红线和禁止使用的表达动机。" },
 ] as const;
 
 export const IP_CATEGORIES = [
@@ -47,7 +48,11 @@ export function getNormalizedCategory(e: { category: string; tags?: string[]; ip
 }
 
 export function isGlobalMethodCategory(category: string) {
-  return GLOBAL_CATEGORIES.some(c => c.id === category);
+  return GLOBAL_CATEGORIES.some(c => c.id === category && !isGlobalConstraintCategory(c.id));
+}
+
+export function isGlobalConstraintCategory(category: string) {
+  return category === "通用禁用规则";
 }
 
 export function isIPKnowledgeCategory(category: string) {

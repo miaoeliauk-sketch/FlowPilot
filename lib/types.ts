@@ -269,6 +269,7 @@ export type KnowledgeCategory =
   | "标题方法库"
   | "开头方法库"
   | "文案框架方法库"
+  | "通用禁用规则"
   | "IP原始内容"
   | "IP人设资料"
   | "IP表达语料"

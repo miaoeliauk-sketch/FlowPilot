@@ -1046,7 +1046,17 @@ export function getKnowledgeEntriesForFullLibraryComparison(): KnowledgeEntry[] 
   return getKnowledgeEntries();
 }
 
+export function assertKnowledgeCategoryScope(
+  category: KnowledgeCategory | string,
+  ipId: string | null | undefined,
+): void {
+  if (category === "通用禁用规则" && ipId !== null) {
+    throw new Error("通用禁用规则禁止绑定具体IP，必须使用全局归属");
+  }
+}
+
 export function addKnowledgeEntry(input: Omit<KnowledgeEntry, "id" | "createdAt">): KnowledgeEntry {
+  assertKnowledgeCategoryScope(input.category, input.ipId);
   if (input.sourceAnalysis?.parserVersion === 2) {
     throw new Error("V2认知只能通过最终凭证验证入口保存");
   }
@@ -1171,6 +1181,9 @@ export function saveAIExtractedKnowledgeEntriesStrict(
   if (items.some(item => item.entry.sourceAnalysis?.parserVersion === 2)) {
     throw new Error("V2认知只能通过最终凭证验证入口保存");
   }
+  for (const item of items) {
+    assertKnowledgeCategoryScope(item.entry.category, item.entry.ipId);
+  }
 
   const originalRaw = localStorage.getItem(KEY_KNOWLEDGE_ENTRIES);
   const all = readKnowledgeEntriesStrict();
@@ -1286,6 +1299,7 @@ export async function addFinalizedIPOriginalSourceWithId(
 }
 
 function persistKnowledgeEntryWithId(input: Omit<KnowledgeEntry, "createdAt">): KnowledgeEntry {
+  assertKnowledgeCategoryScope(input.category, input.ipId);
   const all = readKnowledgeEntriesStrict();
   if (all.some(entry => entry.id === input.id)) {
     throw new Error("知识条目编号重复，未保存任何内容");
@@ -1348,6 +1362,9 @@ export function saveHotAnalysisKnowledgeEntries(
 ): KnowledgeEntry[] {
   const analysis = getHotAnalyses().find(item => item.id === input.analysisId);
   if (!analysis) throw new Error("没有找到需要沉淀的爆款分析记录");
+  for (const item of input.entries) {
+    assertKnowledgeCategoryScope(item.entry.category, item.entry.ipId);
+  }
   if (input.entries.some(item =>
     (item.role === "viral_case") !== (item.entry.category === "爆款案例")
   )) {
@@ -1659,6 +1676,10 @@ export function updateKnowledgeEntry(id: string, patch: KnowledgeEntryEditablePa
   const target = all.find(entry => entry.id === id);
   if (target?.executionTemplate) {
     throw new Error("保真执行模板保存后不能编辑；如需更新，请使用新版本号另存");
+  }
+  if (target) {
+    const updated = { ...target, ...patch };
+    assertKnowledgeCategoryScope(updated.category, updated.ipId);
   }
   writeJSON(KEY_KNOWLEDGE_ENTRIES, all.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 }

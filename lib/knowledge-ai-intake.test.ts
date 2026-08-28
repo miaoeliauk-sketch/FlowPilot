@@ -8,7 +8,13 @@ import {
   type PrepareAIExtractedKnowledgeBatchInput,
 } from "./knowledge-ai-intake";
 import * as ipStore from "./ip-store";
-import { addKnowledgeEntry, getKnowledgeEntries } from "./ip-store";
+import {
+  addKnowledgeEntry,
+  addKnowledgeEntryWithId,
+  getKnowledgeEntries,
+  saveHotAnalysisKnowledgeEntries,
+  updateKnowledgeEntry,
+} from "./ip-store";
 import type { KnowledgeEntry } from "./types";
 
 interface StorageTestContext {
@@ -137,6 +143,108 @@ test("多张AI方法卡严格写入失败时整批零落盘且恢复后重试不
     const saved = await saveAIExtractedKnowledgeBatch(prepared);
     assert.equal(saved.length, 2);
     assert.equal(getKnowledgeEntries().length, 2);
+  });
+});
+
+test("绕过页面不能把通用禁用规则绑定到具体IP", async () => {
+  await withStorage(async () => {
+    const item = saveItem("global-prohibition", {
+      entry: {
+        ...saveItem("global-prohibition").entry,
+        category: "通用禁用规则",
+        ipId: "ip-a",
+      },
+    });
+    const prepared = prepareAIExtractedKnowledgeBatch({ items: [item] });
+
+    await assert.rejects(
+      async () => saveAIExtractedKnowledgeBatch(prepared),
+      /通用禁用规则.*绑定具体IP/,
+    );
+    assert.equal(getKnowledgeEntries().length, 0);
+  });
+});
+
+test("普通新增、带编号新增和编辑入口都拒绝把通用禁用规则绑定具体IP", async () => {
+  await withStorage(() => {
+    const privateEntry = addKnowledgeEntry({
+      ...unrelatedEntry(),
+      category: "IP禁用规则",
+      ipId: "ip-a",
+    });
+    const originalRaw = localStorage.getItem("ipwr:knowledgeEntries");
+
+    assert.throws(
+      () => addKnowledgeEntry({
+        ...unrelatedEntry(),
+        category: "通用禁用规则",
+        ipId: "ip-a",
+      }),
+      /通用禁用规则.*绑定具体IP/,
+    );
+    assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), originalRaw);
+
+    assert.throws(
+      () => addKnowledgeEntryWithId({
+        id: "forged-global-constraint",
+        ...unrelatedEntry(),
+        category: "通用禁用规则",
+        ipId: "ip-a",
+      }),
+      /通用禁用规则.*绑定具体IP/,
+    );
+    assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), originalRaw);
+
+    assert.throws(
+      () => updateKnowledgeEntry(privateEntry.id, { category: "通用禁用规则" }),
+      /通用禁用规则.*绑定具体IP/,
+    );
+    assert.equal(localStorage.getItem("ipwr:knowledgeEntries"), originalRaw);
+  });
+});
+
+test("爆款分析批量入库混入非法通用禁用规则时整批拒绝且存储逐字不变", async () => {
+  await withStorage(() => {
+    addKnowledgeEntry(unrelatedEntry());
+    localStorage.setItem("ipwr:hotAnalyses", JSON.stringify([{
+      id: "analysis-global-constraint-bypass",
+      ipId: "ip-a",
+      createdAt: "2026-08-28T00:00:00.000Z",
+    }]));
+    const snapshotStorage = () => JSON.stringify(
+      Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+        .filter((key): key is string => key !== null)
+        .sort()
+        .map(key => [key, localStorage.getItem(key)]),
+    );
+    const originalSnapshot = snapshotStorage();
+
+    assert.throws(
+      () => saveHotAnalysisKnowledgeEntries({
+        analysisId: "analysis-global-constraint-bypass",
+        entries: [
+          {
+            slotId: "method-card-1",
+            role: "method_card",
+            entry: {
+              ...saveItem("valid-method").entry,
+              ipId: "ip-a",
+            },
+          },
+          {
+            slotId: "method-card-2",
+            role: "method_card",
+            entry: {
+              ...saveItem("invalid-constraint").entry,
+              category: "通用禁用规则",
+              ipId: "ip-a",
+            },
+          },
+        ],
+      }),
+      /通用禁用规则.*绑定具体IP/,
+    );
+    assert.equal(snapshotStorage(), originalSnapshot);
   });
 });
 

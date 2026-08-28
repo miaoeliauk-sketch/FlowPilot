@@ -8,7 +8,11 @@ import {
 import type { KnowledgeCategory, KnowledgeEntry } from "@/lib/types";
 import { apiFetch } from "@/lib/api-fetch";
 import { parseXlsxFile } from "@/lib/xlsx-parser";
-import { IP_CATEGORIES, isIPKnowledgeCategory } from "@/lib/knowledge-categories";
+import {
+  GLOBAL_CATEGORIES,
+  IP_CATEGORIES,
+  isIPKnowledgeCategory,
+} from "@/lib/knowledge-categories";
 import { getIPDisplayLabel } from "@/lib/ip-display";
 import {
   buildGlobalKnowledgeIntakeLengthMessage,
@@ -50,7 +54,10 @@ import {
   type AIExtractedKnowledgeConfirmation,
 } from "@/lib/knowledge-ai-intake";
 
-const ALL_CATS = ["定位方法库","选题方法库","标题方法库","开头方法库","文案框架方法库","IP人设资料","IP表达语料","IP历史内容","IP高表现内容","IP受众反馈","IP禁用规则"];
+const ALL_CATS = [
+  ...GLOBAL_CATEGORIES.map(category => category.id),
+  ...IP_CATEGORIES.map(category => category.id),
+];
 const INTAKE_FILE_ACCEPT = ".txt,.md,.xlsx,.xls,text/plain,text/markdown,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 interface IntakeItem {

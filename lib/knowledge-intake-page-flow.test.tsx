@@ -149,6 +149,35 @@ function deferredResponse() {
   return { promise, resolve };
 }
 
+test("通用智能入库允许人工选择通用禁用规则且不显示IP归属选择", async () => {
+  const { render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeIntakePage = (await import("../app/knowledge-intake/page")).default;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    mode: "global",
+    items: [buildIntakeResponseItem("跨IP内容底线")],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const view = render(<IPProvider><KnowledgeIntakePage /></IPProvider>);
+    const user = userEvent.setup({ document });
+    await user.click(view.getByPlaceholderText(/粘贴逐字稿/));
+    await user.paste("所有IP都不得利用受众的无力感操纵情绪。核心边界和适用范围已经由用户明确确认。");
+    await user.click(view.getByRole("button", { name: "AI提炼方法" }));
+    await waitFor(() => assert.ok(view.getAllByText("跨IP内容底线").length > 0));
+
+    const categorySelect = view.getAllByRole("combobox")[0] as HTMLSelectElement;
+    assert.ok([...categorySelect.options].some(option => option.value === "通用禁用规则"));
+    await user.selectOptions(categorySelect, "通用禁用规则");
+    assert.equal(categorySelect.value, "通用禁用规则");
+    assert.equal(view.queryByText("所属IP："), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("普通智能入库在提交前提示长内容需要分段并阻止提炼", async () => {
   const { render } = await import("@testing-library/react");
   const userEvent = (await import("@testing-library/user-event")).default;

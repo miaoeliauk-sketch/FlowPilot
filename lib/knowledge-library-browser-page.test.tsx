@@ -363,6 +363,10 @@ test("原有新增导入和专项库能力保留在次级管理入口", async ()
   assert.ok(view.getByText("历史专项库："));
   assert.ok(view.getByRole("link", { name: /新增知识/ }));
   assert.ok(view.getByRole("button", { name: /从 Excel 批量导入/ }));
+
+  await user.click(view.getByRole("button", { name: /通用禁用规则/ }));
+  assert.ok(view.getByText("所有IP都必须遵守的内容底线、价值观红线和禁止使用的表达动机。"));
+  assert.ok(view.getByText("你可以添加所有IP都必须遵守的内容底线、价值观红线和禁止使用的表达动机。"));
 });
 
 test("管理知识库的旧删除入口也必须先确认，取消时不删除", async () => {

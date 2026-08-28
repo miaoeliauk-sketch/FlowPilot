@@ -128,6 +128,41 @@ test("通用方法分类强制清空AI返回的ipId", async () => {
   }
 });
 
+test("通用禁用规则在智能入库中明确可选且不能绑定具体IP", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestPrompt = "";
+  globalThis.fetch = async (_input, init) => {
+    requestPrompt = String(init?.body ?? "");
+    return deepSeekResponse(JSON.stringify({
+      items: [{
+        ...BASE_ITEM,
+        title: "禁止利用无力感进行情绪绑架",
+        category: "通用禁用规则",
+        ipId: "ip-pengpeng",
+        ipMatchStatus: "matched",
+      }],
+    }));
+  };
+
+  try {
+    const response = await POST(intakeRequest({
+      rawContent: "所有IP都不得利用受众的无力感操纵情绪。",
+      sourceType: "text",
+      activeIPId: "ip-pengpeng",
+      availableIPs: [{ id: "ip-pengpeng", name: "彭彭说AI" }],
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.match(requestPrompt, /通用禁用规则/);
+    assert.equal(body.items[0].category, "通用禁用规则");
+    assert.equal(body.items[0].ipId, null);
+    assert.equal(body.items[0].ipMatchStatus, "not_applicable");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("普通智能入库不能绕过专属流程创建IP原始内容", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
