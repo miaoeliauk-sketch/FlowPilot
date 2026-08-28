@@ -8,7 +8,10 @@ import {
   type DraftSessionStorageLike,
 } from "./cognition-draft-session-store";
 import { createDraftCognitionBatchId } from "./cognition-graph-bridge";
-import { commitDraftCognitionBatch } from "./cognition-orchestrator";
+import {
+  CognitionCommitError,
+  commitDraftCognitionBatch,
+} from "./cognition-orchestrator";
 import { calculateSHA256 } from "./sha256";
 import type { IPSourceAnchor } from "./types";
 
@@ -24,6 +27,10 @@ class MemoryStorage implements DraftSessionStorageLike {
 
 class FailingClearStorage extends MemoryStorage {
   override removeItem() { throw new Error("storage cleanup unavailable"); }
+}
+
+class FailingReadStorage extends MemoryStorage {
+  override get length(): number { throw new Error("storage read unavailable"); }
 }
 
 function anchor(quote: string): IPSourceAnchor {
@@ -72,6 +79,16 @@ function makeReviewedDraft(): DraftCognitionSessionRecord {
   };
 }
 
+if (false) {
+  void commitDraftCognitionBatch({
+    storage: null,
+    ipId: "ip-type-guard",
+    batchId: "draft-type-guard",
+    // @ts-expect-error 确权元数据只能来自草稿，禁止恢复旧的外部注入参数。
+    sourceMetadata: makeReviewedDraft().sourceMetadata,
+  });
+}
+
 test("整批终审、正式写入和回读均成功后才清理草稿", async () => {
   const storage = new MemoryStorage();
   const draft = makeReviewedDraft();
@@ -89,12 +106,6 @@ test("整批终审、正式写入和回读均成功后才清理草稿", async ()
     storage,
     ipId: draft.ipId,
     batchId: draft.batchId,
-    sourceMetadata: {
-      title: "持续输出来自真实问题",
-      sourceKind: "课程内容",
-      sourceName: "",
-      sourceUrl: "",
-    },
     onProgress: status => progress.push(status),
   }, {
     finalize: async record => {
@@ -137,12 +148,6 @@ test("服务端终审失败时原样保留草稿且不写正式库", async () =>
       storage,
       ipId: draft.ipId,
       batchId: draft.batchId,
-      sourceMetadata: {
-        title: "持续输出来自真实问题",
-        sourceKind: "课程内容",
-        sourceName: "",
-        sourceUrl: "",
-      },
     }, {
       finalize: async () => { throw new Error("解析凭证无效或已过期"); },
       persistVerified: async () => { persistCalls += 1; },
@@ -166,12 +171,6 @@ test("正式写入后的回读结果不完整时保留草稿", async () => {
       storage,
       ipId: draft.ipId,
       batchId: draft.batchId,
-      sourceMetadata: {
-        title: "持续输出来自真实问题",
-        sourceKind: "课程内容",
-        sourceName: "",
-        sourceUrl: "",
-      },
     }, {
       finalize: async () => ({ finalProof: "fake-final-proof-for-test" }),
       persistVerified: async () => undefined,
@@ -198,12 +197,6 @@ test("正式认知已存在时重试只校验并清理草稿", async () => {
     storage,
     ipId: draft.ipId,
     batchId: draft.batchId,
-    sourceMetadata: {
-      title: "持续输出来自真实问题",
-      sourceKind: "课程内容",
-      sourceName: "",
-      sourceUrl: "",
-    },
   }, {
     finalize: async () => {
       finalizeCalls += 1;
@@ -234,12 +227,6 @@ test("正式认知已保存但草稿清理失败时返回待清理状态", async
     storage,
     ipId: draft.ipId,
     batchId: draft.batchId,
-    sourceMetadata: {
-      title: "持续输出来自真实问题",
-      sourceKind: "课程内容",
-      sourceName: "",
-      sourceUrl: "",
-    },
   }, {
     finalize: async () => { throw new Error("should not finalize existing cognition"); },
     persistVerified: async () => { throw new Error("should not persist existing cognition"); },
@@ -272,12 +259,6 @@ test("草稿缺少解析凭证时不会发起终审或清理记录", async () =>
       storage,
       ipId: draft.ipId,
       batchId: draft.batchId,
-      sourceMetadata: {
-        title: "持续输出来自真实问题",
-        sourceKind: "课程内容",
-        sourceName: "",
-        sourceUrl: "",
-      },
     }, {
       finalize: async () => {
         finalizeCalls += 1;
@@ -291,4 +272,58 @@ test("草稿缺少解析凭证时不会发起终审或清理记录", async () =>
 
   assert.equal(finalizeCalls, 0);
   assert.notEqual(storage.getItem(saved.key), null);
+});
+
+test("确权只使用草稿内来源信息并忽略旧参数注入", async () => {
+  const storage = new MemoryStorage();
+  const draft = makeReviewedDraft();
+  assert.equal(saveDraftCognitionBatch(storage, draft).ok, true);
+  let persistedMetadata: DraftCognitionSessionRecord["sourceMetadata"] | null = null;
+
+  const inputWithLegacyMetadata = {
+    storage,
+    ipId: draft.ipId,
+    batchId: draft.batchId,
+    sourceMetadata: {
+      title: "外部伪造标题",
+      sourceKind: "文章" as const,
+      sourceName: "外部注入",
+      sourceUrl: "https://example.com/tampered",
+    },
+  };
+  await commitDraftCognitionBatch(inputWithLegacyMetadata, {
+    finalize: async () => ({ finalProof: "proof-from-server" }),
+    persistVerified: async (_record, metadata) => { persistedMetadata = metadata; },
+    readVerified: async () => persistedMetadata ? {
+      id: draft.analysis.sourceId,
+      ipId: draft.ipId,
+      rawContent: draft.rawContent,
+      sourceFinalProof: "proof-from-server",
+      sourceAnalysis: draft.analysis,
+    } : null,
+  });
+
+  assert.deepEqual(persistedMetadata, draft.sourceMetadata);
+});
+
+test("读取存储失败与草稿不存在返回不同错误码", async () => {
+  await assert.rejects(
+    commitDraftCognitionBatch({
+      storage: new FailingReadStorage(),
+      ipId: "ip-pengpeng",
+      batchId: "draft-read-failure",
+    }),
+    (error: unknown) => error instanceof CognitionCommitError
+      && error.code === "READ_FAILED",
+  );
+
+  await assert.rejects(
+    commitDraftCognitionBatch({
+      storage: new MemoryStorage(),
+      ipId: "ip-pengpeng",
+      batchId: "draft-not-found",
+    }),
+    (error: unknown) => error instanceof CognitionCommitError
+      && error.code === "DRAFT_NOT_FOUND",
+  );
 });

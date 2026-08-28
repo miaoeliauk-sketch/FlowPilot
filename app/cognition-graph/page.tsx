@@ -224,7 +224,6 @@ export default function CognitionGraphPage() {
         storage: window.sessionStorage,
         ipId: requestedIPId,
         batchId,
-        sourceMetadata: draft.sourceMetadata,
         onProgress: setCommitProgress,
       });
       if (result.status === "COMMITTED_CLEANUP_PENDING") {

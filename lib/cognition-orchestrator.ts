@@ -6,12 +6,13 @@ import {
   loadDraftCognitionBatches,
   type DraftCognitionSessionRecord,
   type DraftSessionStorageLike,
+  type DraftSourceMetadata,
 } from "./cognition-draft-session-store";
 import {
   addVerifiedIPOriginalSource,
   getIPOriginalSource,
 } from "./ip-original-source";
-import type { IPOriginalSourceKind, IPSourceAnalysisV2 } from "./types";
+import type { IPSourceAnalysisV2 } from "./types";
 
 export type CognitionCommitProgress =
   | "READING_DRAFT"
@@ -22,11 +23,16 @@ export type CognitionCommitProgress =
   | "COMPLETED"
   | "CLEANUP_PENDING";
 
-export interface CognitionSourceMetadata {
-  title: string;
-  sourceKind: IPOriginalSourceKind;
-  sourceName: string;
-  sourceUrl: string;
+export type CognitionCommitErrorCode = "READ_FAILED" | "DRAFT_NOT_FOUND";
+
+export class CognitionCommitError extends Error {
+  constructor(
+    readonly code: CognitionCommitErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CognitionCommitError";
+  }
 }
 
 interface VerifiedCognitionSnapshot {
@@ -41,7 +47,7 @@ export interface CognitionCommitDependencies {
   finalize(record: DraftCognitionSessionRecord): Promise<{ finalProof: string }>;
   persistVerified(
     record: DraftCognitionSessionRecord,
-    metadata: CognitionSourceMetadata,
+    metadata: DraftSourceMetadata,
     finalProof: string,
   ): Promise<void>;
   readVerified(sourceId: string): Promise<VerifiedCognitionSnapshot | null>;
@@ -51,7 +57,6 @@ export interface CommitDraftCognitionBatchInput {
   storage: DraftSessionStorageLike | null;
   ipId: string;
   batchId: string;
-  sourceMetadata: CognitionSourceMetadata;
   onProgress?: (status: CognitionCommitProgress) => void;
 }
 
@@ -135,16 +140,22 @@ export async function commitDraftCognitionBatch(
   dependencies: CognitionCommitDependencies = defaultDependencies,
 ): Promise<CommitDraftCognitionBatchResult> {
   input.onProgress?.("READING_DRAFT");
-  const draft = loadDraftCognitionBatches(input.storage, input.ipId).records
+  const loaded = loadDraftCognitionBatches(input.storage, input.ipId);
+  if (loaded.errorCode === "READ_FAILED") {
+    throw new CognitionCommitError("READ_FAILED", "认知草稿读取失败，请检查浏览器存储权限后重试");
+  }
+  const draft = loaded.records
     .find(record => record.batchId === input.batchId);
-  if (!draft) throw new Error("找不到当前IP的认知草稿批次");
+  if (!draft) {
+    throw new CognitionCommitError("DRAFT_NOT_FOUND", "找不到当前IP的认知草稿批次");
+  }
 
   const existing = await dependencies.readVerified(draft.analysis.sourceId);
   if (!existing) {
     input.onProgress?.("FINALIZING");
     const { finalProof } = await dependencies.finalize(draft);
     input.onProgress?.("PERSISTING");
-    await dependencies.persistVerified(draft, input.sourceMetadata, finalProof);
+    await dependencies.persistVerified(draft, draft.sourceMetadata, finalProof);
     input.onProgress?.("VERIFYING");
     const persisted = await dependencies.readVerified(draft.analysis.sourceId);
     if (!matchesDraft(persisted, draft, finalProof)) {
