@@ -24,6 +24,7 @@ type CognitionGraphAuditStatus = AssociationAuditNodeResult["relation"];
 export type CognitionGraphCanvasNode = Omit<CognitionGraphNode, "data"> & {
   data: CognitionGraphNode["data"] & {
     auditStatus?: CognitionGraphAuditStatus;
+    isDraft?: boolean;
   };
 };
 
@@ -37,6 +38,7 @@ type CanvasNodeData = {
   label: string;
   content: string;
   auditStatus?: CognitionGraphAuditStatus;
+  isDraft?: boolean;
 };
 
 type CanvasNode = Node<CanvasNodeData, CognitionGraphNode["type"]>;
@@ -63,11 +65,16 @@ function auditVisualClasses(
   return `${defaultClasses}${auditStatus === "UNASSESSED" ? " opacity-50" : ""}`;
 }
 
+function visibleAuditStatus(data: CanvasNodeData): CognitionGraphAuditStatus | undefined {
+  return data.isDraft ? undefined : data.auditStatus;
+}
+
 function NodeContent({ data }: { data: CanvasNodeData }) {
+  const auditStatus = visibleAuditStatus(data);
   return (
     <>
       <NodeHandles />
-      {data.auditStatus === "CONFLICTING" && (
+      {auditStatus === "CONFLICTING" && (
         <span aria-label="认知冲突" className="mr-1">!</span>
       )}
       {data.label}
@@ -76,14 +83,16 @@ function NodeContent({ data }: { data: CanvasNodeData }) {
 }
 
 function ClaimNode({ data }: NodeProps<CanvasNode>) {
+  const auditStatus = visibleAuditStatus(data);
   return (
     <div
       data-node-type="claim"
-      data-audit-status={data.auditStatus}
+      data-audit-status={auditStatus}
+      data-is-draft={data.isDraft}
       className={`relative min-w-[180px] rounded-md border-2 px-4 py-3 font-semibold shadow-sm ${auditVisualClasses(
-        data.auditStatus,
+        auditStatus,
         "border-[#B96514] bg-[#F3A04C] text-[#2B1605]",
-      )}`}
+      )}${data.isDraft ? " border-dashed opacity-30" : ""}`}
     >
       <NodeContent data={data} />
     </div>
@@ -91,14 +100,16 @@ function ClaimNode({ data }: NodeProps<CanvasNode>) {
 }
 
 function ReasoningNode({ data }: NodeProps<CanvasNode>) {
+  const auditStatus = visibleAuditStatus(data);
   return (
     <div
       data-node-type="reasoning"
-      data-audit-status={data.auditStatus}
+      data-audit-status={auditStatus}
+      data-is-draft={data.isDraft}
       className={`relative min-w-[180px] rounded-full border px-5 py-3 ${auditVisualClasses(
-        data.auditStatus,
+        auditStatus,
         "border-[#7DD3FC] bg-[#E0F2FE] text-[#0C4A6E]",
-      )}`}
+      )}${data.isDraft ? " border-dashed opacity-30" : ""}`}
     >
       <NodeContent data={data} />
     </div>
@@ -106,14 +117,16 @@ function ReasoningNode({ data }: NodeProps<CanvasNode>) {
 }
 
 function CaseNode({ data }: NodeProps<CanvasNode>) {
+  const auditStatus = visibleAuditStatus(data);
   return (
     <div
       data-node-type="case"
-      data-audit-status={data.auditStatus}
+      data-audit-status={auditStatus}
+      data-is-draft={data.isDraft}
       className={`relative flex min-h-[112px] min-w-[112px] max-w-[160px] items-center justify-center rounded-full border-2 border-dashed px-4 py-3 text-center ${auditVisualClasses(
-        data.auditStatus,
+        auditStatus,
         "border-[#86EFAC] bg-[#DCFCE7] text-[#166534]",
-      )}`}
+      )}${data.isDraft ? " opacity-30" : ""}`}
     >
       <NodeContent data={data} />
     </div>
