@@ -37,7 +37,7 @@ function makeReviewedDraft(): DraftCognitionSessionRecord {
   const analyzedAt = "2026-08-28T05:00:00.000Z";
   const sourceHash = calculateSHA256(rawContent);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     batchId: createDraftCognitionBatchId({ ipId, sourceId, sourceHash, analyzedAt }),
     ipId,
     rawContent,

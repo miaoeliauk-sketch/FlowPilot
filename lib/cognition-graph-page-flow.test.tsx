@@ -223,7 +223,7 @@ function seedP5Draft(
     analyzedAt: analysis.analyzedAt,
   });
   const saved = saveDraftCognitionBatch(window.sessionStorage, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     batchId,
     ipId,
     rawContent,
@@ -672,7 +672,7 @@ test("认知图谱加载多个真实草稿批次并只确权用户选择的一�
       analyzedAt: analysis.analyzedAt,
     });
     const saved = saveDraftCognitionBatch(window.sessionStorage, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       batchId,
       ipId: ip.id,
       rawContent,
