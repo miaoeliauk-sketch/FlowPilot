@@ -54,6 +54,7 @@ async function loadDraftStoreModule(): Promise<DraftStoreModule> {
   assert.equal(typeof module.saveDraftCognitionBatch, "function");
   assert.equal(typeof module.loadDraftCognitionBatches, "function");
   assert.equal(typeof module.updateDraftSourceMetadata, "function");
+  assert.equal(typeof module.upgradeLegacyDraftSourceMetadata, "function");
   return module as DraftStoreModule;
 }
 
@@ -724,4 +725,265 @@ test("来源信息更新区分读取失败和容量不足", async () => {
     { ...record.sourceMetadata, title: "无法写入的新标题" },
   ), { ok: false, code: "QUOTA_EXCEEDED" });
   assert.equal(underlying.getItem(saved.key), originalSerialized);
+});
+
+test("补全V1来源信息后写入完整V2并移除旧记录", async () => {
+  const {
+    loadDraftCognitionBatches,
+    upgradeLegacyDraftSourceMetadata,
+  } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const current = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-upgrade-success",
+    analyzedAt: "2026-08-27T10:23:00.000Z",
+  });
+  const legacy = makeLegacyRecord(current);
+  const legacyKey = legacyStorageKey(legacy);
+  storage.setItem(legacyKey, JSON.stringify({ ...legacy, sourceMetadata: undefined }));
+
+  const result = upgradeLegacyDraftSourceMetadata(
+    storage,
+    legacy.ipId,
+    legacy.batchId,
+    {
+      title: "升级后的真实标题",
+      sourceKind: "文章",
+      sourceName: "老师原文.md",
+      sourceUrl: "https://example.com/legacy-source",
+    },
+  );
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.legacyRemoved, true);
+  assert.match(result.key, /^FP_COGNITION_DRAFT_V2:[a-f0-9]{64}$/u);
+  assert.equal(storage.getItem(legacyKey), null);
+  const loaded = loadDraftCognitionBatches(storage, "ip-a");
+  assert.equal(loaded.metadataRequiredRecords.length, 0);
+  assert.equal(loaded.records.length, 1);
+  assert.deepEqual(loaded.records[0]?.sourceMetadata, {
+    title: "升级后的真实标题",
+    sourceKind: "文章",
+    sourceName: "老师原文.md",
+    sourceUrl: "https://example.com/legacy-source",
+  });
+  assert.equal(loaded.records[0]?.rawContent, legacy.rawContent);
+  assert.deepEqual(loaded.records[0]?.analysis, legacy.analysis);
+  assert.equal(loaded.records[0]?.analysisToken, legacy.analysisToken);
+});
+
+test("V1升级写入遇到容量不足时原记录逐字节保留", async () => {
+  const { upgradeLegacyDraftSourceMetadata } = await loadDraftStoreModule();
+  const underlying = new MemoryStorage();
+  const legacy = makeLegacyRecord(makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-upgrade-quota",
+    analyzedAt: "2026-08-27T10:24:00.000Z",
+  }));
+  const legacyKey = legacyStorageKey(legacy);
+  const legacyRaw = JSON.stringify({ ...legacy, sourceMetadata: undefined });
+  underlying.setItem(legacyKey, legacyRaw);
+  const quotaStorage: DraftSessionStorageLike = {
+    get length() { return underlying.length; },
+    key: index => underlying.key(index),
+    getItem: key => underlying.getItem(key),
+    setItem() {
+      throw new DOMException("sessionStorage quota exceeded", "QuotaExceededError");
+    },
+    removeItem: key => underlying.removeItem(key),
+  };
+
+  const result = upgradeLegacyDraftSourceMetadata(
+    quotaStorage,
+    legacy.ipId,
+    legacy.batchId,
+    {
+      title: "无法完成的升级",
+      sourceKind: "其他",
+      sourceName: "",
+      sourceUrl: "",
+    },
+  );
+
+  assert.deepEqual(result, { ok: false, code: "QUOTA_EXCEEDED" });
+  assert.equal(underlying.length, 1);
+  assert.equal(underlying.getItem(legacyKey), legacyRaw);
+});
+
+test("V1删除失败时保留V2并由幂等重跑完成清理", async () => {
+  const {
+    loadDraftCognitionBatches,
+    upgradeLegacyDraftSourceMetadata,
+  } = await loadDraftStoreModule();
+  const underlying = new MemoryStorage();
+  const legacy = makeLegacyRecord(makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-upgrade-cleanup-retry",
+    analyzedAt: "2026-08-27T10:25:00.000Z",
+  }));
+  const legacyKey = legacyStorageKey(legacy);
+  underlying.setItem(legacyKey, JSON.stringify(legacy));
+  const cleanupFailure: DraftSessionStorageLike = {
+    get length() { return underlying.length; },
+    key: index => underlying.key(index),
+    getItem: key => underlying.getItem(key),
+    setItem: (key, value) => underlying.setItem(key, value),
+    removeItem() { throw new Error("legacy cleanup failed"); },
+  };
+  const metadata = {
+    title: "已升级但待清理",
+    sourceKind: "课程内容" as const,
+    sourceName: "课程稿",
+    sourceUrl: "",
+  };
+
+  const first = upgradeLegacyDraftSourceMetadata(
+    cleanupFailure,
+    legacy.ipId,
+    legacy.batchId,
+    metadata,
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.equal(first.legacyRemoved, false);
+  assert.ok(underlying.getItem(legacyKey));
+  const afterPartialSuccess = loadDraftCognitionBatches(underlying, legacy.ipId);
+  assert.equal(afterPartialSuccess.records.length, 1);
+  assert.equal(afterPartialSuccess.metadataRequiredRecords.length, 0);
+
+  const second = upgradeLegacyDraftSourceMetadata(
+    underlying,
+    legacy.ipId,
+    legacy.batchId,
+    metadata,
+  );
+  assert.deepEqual(second, {
+    ok: true,
+    key: first.key,
+    legacyRemoved: true,
+  });
+  assert.equal(underlying.getItem(legacyKey), null);
+  assert.equal(underlying.length, 1);
+});
+
+test("同批次V1与V2业务内容不一致时不静默删除V1", async () => {
+  const {
+    saveDraftCognitionBatch,
+    upgradeLegacyDraftSourceMetadata,
+  } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const current = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-upgrade-conflict",
+    analyzedAt: "2026-08-27T10:25:30.000Z",
+  });
+  const legacy = makeLegacyRecord({
+    ...current,
+    analysis: {
+      ...current.analysis,
+      nonce: 2,
+      nodes: current.analysis.nodes.map(node => ({
+        ...node,
+        reviewStatus: "human_confirmed" as const,
+      })),
+    },
+    analysisToken: "legacy-human-confirmed-token",
+  }, true);
+  const legacyKey = legacyStorageKey(legacy);
+  const legacyRaw = JSON.stringify(legacy);
+  storage.setItem(legacyKey, legacyRaw);
+  const saved = saveDraftCognitionBatch(storage, current);
+  assert.equal(saved.ok, true);
+  if (!saved.ok) return;
+
+  const result = upgradeLegacyDraftSourceMetadata(
+    storage,
+    legacy.ipId,
+    legacy.batchId,
+    current.sourceMetadata,
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    key: saved.key,
+    legacyRemoved: false,
+  });
+  assert.equal(storage.getItem(legacyKey), legacyRaw);
+  assert.ok(storage.getItem(saved.key));
+});
+
+test("存储删除静默失效时不误报V1已清理", async () => {
+  const { upgradeLegacyDraftSourceMetadata } = await loadDraftStoreModule();
+  const underlying = new MemoryStorage();
+  const legacy = makeLegacyRecord(makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-upgrade-noop-removal",
+    analyzedAt: "2026-08-27T10:25:40.000Z",
+  }));
+  const legacyKey = legacyStorageKey(legacy);
+  underlying.setItem(legacyKey, JSON.stringify(legacy));
+  const noopRemoval: DraftSessionStorageLike = {
+    get length() { return underlying.length; },
+    key: index => underlying.key(index),
+    getItem: key => underlying.getItem(key),
+    setItem: (key, value) => underlying.setItem(key, value),
+    removeItem: () => undefined,
+  };
+
+  const result = upgradeLegacyDraftSourceMetadata(
+    noopRemoval,
+    legacy.ipId,
+    legacy.batchId,
+    {
+      title: "删除结果需验证",
+      sourceKind: "其他",
+      sourceName: "",
+      sourceUrl: "",
+    },
+  );
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.legacyRemoved, false);
+  assert.ok(underlying.getItem(legacyKey));
+  assert.ok(underlying.getItem(result.key));
+});
+
+test("V1升级拒绝跨IP和非法元数据且不产生任何写入", async () => {
+  const { upgradeLegacyDraftSourceMetadata } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const legacy = makeLegacyRecord(makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-upgrade-isolation",
+    analyzedAt: "2026-08-27T10:26:00.000Z",
+  }));
+  const legacyKey = legacyStorageKey(legacy);
+  const legacyRaw = JSON.stringify(legacy);
+  storage.setItem(legacyKey, legacyRaw);
+
+  assert.deepEqual(upgradeLegacyDraftSourceMetadata(
+    storage,
+    "ip-b",
+    legacy.batchId,
+    {
+      title: "其他IP不能升级",
+      sourceKind: "其他",
+      sourceName: "",
+      sourceUrl: "",
+    },
+  ), { ok: false, code: "DRAFT_NOT_FOUND" });
+  assert.deepEqual(upgradeLegacyDraftSourceMetadata(
+    storage,
+    legacy.ipId,
+    legacy.batchId,
+    {
+      title: "   ",
+      sourceKind: "其他",
+      sourceName: "",
+      sourceUrl: "",
+    },
+  ), { ok: false, code: "INVALID_METADATA" });
+  assert.equal(storage.length, 1);
+  assert.equal(storage.getItem(legacyKey), legacyRaw);
 });

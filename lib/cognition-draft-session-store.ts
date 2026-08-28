@@ -60,6 +60,18 @@ export type UpdateDraftSourceMetadataResult =
         | "WRITE_FAILED";
     };
 
+export type UpgradeLegacyDraftResult =
+  | { ok: true; key: string; legacyRemoved: boolean }
+  | {
+      ok: false;
+      code:
+        | "READ_FAILED"
+        | "DRAFT_NOT_FOUND"
+        | "INVALID_METADATA"
+        | "QUOTA_EXCEEDED"
+        | "WRITE_FAILED";
+    };
+
 export type RemoveDraftCognitionBatchResult =
   | { ok: true; removedCount: number }
   | { ok: false; code: "READ_FAILED" | "WRITE_FAILED" };
@@ -235,6 +247,27 @@ function isQuotaExceeded(error: unknown): boolean {
   return isRecord(error) && error.name === "QuotaExceededError";
 }
 
+function hasSameDraftEvidence(
+  legacy: LegacyDraftCognitionSessionRecord,
+  current: DraftCognitionSessionRecord,
+): boolean {
+  return legacy.rawContent === current.rawContent
+    && legacy.analysisToken === current.analysisToken
+    && JSON.stringify(legacy.analysis) === JSON.stringify(current.analysis);
+}
+
+function removeStorageItemAndVerify(
+  storage: DraftSessionStorageLike,
+  key: string,
+): boolean {
+  try {
+    storage.removeItem(key);
+    return storage.getItem(key) === null;
+  } catch {
+    return false;
+  }
+}
+
 export function saveDraftCognitionBatch(
   storage: DraftSessionStorageLike | null,
   record: DraftCognitionSessionRecord,
@@ -318,6 +351,51 @@ export function updateDraftSourceMetadata(
   });
   if (!saved.ok) return saved;
   return saved;
+}
+
+export function upgradeLegacyDraftSourceMetadata(
+  storage: DraftSessionStorageLike | null,
+  ipId: string,
+  batchId: string,
+  metadata: DraftSourceMetadata,
+): UpgradeLegacyDraftResult {
+  const sourceMetadata = parseSourceMetadata(metadata);
+  if (!sourceMetadata) return { ok: false, code: "INVALID_METADATA" };
+  if (!storage) return { ok: false, code: "READ_FAILED" };
+
+  const located = locateDraftVersions(storage, ipId, batchId);
+  if (!located) return { ok: false, code: "READ_FAILED" };
+  if (located.current) {
+    if (!located.legacy) {
+      return { ok: true, key: located.current.key, legacyRemoved: true };
+    }
+    if (!hasSameDraftEvidence(located.legacy.record, located.current.record)) {
+      return { ok: true, key: located.current.key, legacyRemoved: false };
+    }
+    return {
+      ok: true,
+      key: located.current.key,
+      legacyRemoved: removeStorageItemAndVerify(storage, located.legacy.key),
+    };
+  }
+  if (!located.legacy) return { ok: false, code: "DRAFT_NOT_FOUND" };
+
+  const saved = saveDraftCognitionBatch(storage, {
+    schemaVersion: 2,
+    batchId: located.legacy.record.batchId,
+    ipId: located.legacy.record.ipId,
+    rawContent: located.legacy.record.rawContent,
+    sourceMetadata,
+    analysis: located.legacy.record.analysis,
+    analysisToken: located.legacy.record.analysisToken,
+  });
+  if (!saved.ok) return saved;
+
+  return {
+    ok: true,
+    key: saved.key,
+    legacyRemoved: removeStorageItemAndVerify(storage, located.legacy.key),
+  };
 }
 
 export function removeDraftsByBatch(
