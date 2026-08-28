@@ -6,7 +6,11 @@ import { AssociationAuditPanel } from "@/components/ip-brain/AssociationAuditPan
 import { CognitionGraphCanvas } from "@/components/ip-brain/CognitionGraphCanvas";
 import { apiFetch } from "@/lib/api-fetch";
 import type { AssociationAuditResponse } from "@/lib/cognition-association-audit";
-import { loadDraftCognitionBatches } from "@/lib/cognition-draft-session-store";
+import {
+  loadDraftCognitionBatches,
+  loadRetainedLegacyDrafts,
+  removeLegacyDraftByBatch,
+} from "@/lib/cognition-draft-session-store";
 import {
   bridgeCognitionGraph,
   bridgeDraftCognitionGraph,
@@ -112,6 +116,7 @@ export default function CognitionGraphPage() {
   const [commitProgress, setCommitProgress] = useState<CognitionCommitProgress | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [commitWarning, setCommitWarning] = useState<string | null>(null);
+  const [cleaningLegacyBatchId, setCleaningLegacyBatchId] = useState<string | null>(null);
   const requestSequenceRef = useRef(0);
   const reportRef = useRef<AssociationAuditResponse | null>(null);
   const inFlightAuditKeysRef = useRef(new Map<string, number>());
@@ -132,20 +137,30 @@ export default function CognitionGraphPage() {
   }, [activeIP, graphRevision]);
   const drafts = useMemo(() => {
     if (!activeIP || typeof window === "undefined") {
-      return { records: [], error: null as string | null };
+      return {
+        records: [],
+        retainedLegacyRecords: [],
+        error: null as string | null,
+      };
     }
     try {
       const loaded = loadDraftCognitionBatches(window.sessionStorage, activeIP.id);
+      const retained = loadRetainedLegacyDrafts(window.sessionStorage, activeIP.id);
       return {
         records: loaded.records,
-        error: loaded.errorCode
+        retainedLegacyRecords: retained.records,
+        error: loaded.errorCode || retained.errorCode
           ? "认知草稿读取失败，请刷新页面后重试。"
           : loaded.corruptedRecordCount > 0
             ? `发现${loaded.corruptedRecordCount}份损坏的认知草稿，已安全跳过。`
             : null,
       };
     } catch {
-      return { records: [], error: "认知草稿读取失败，请检查浏览器会话存储。" };
+      return {
+        records: [],
+        retainedLegacyRecords: [],
+        error: "认知草稿读取失败，请检查浏览器会话存储。",
+      };
     }
   }, [activeIP, graphRevision]);
   const graph = useMemo(() => {
@@ -205,7 +220,40 @@ export default function CognitionGraphPage() {
     setCommitProgress(null);
     setCommitError(null);
     setCommitWarning(null);
+    setCleaningLegacyBatchId(null);
   }, [activeIP?.id]);
+
+  function clearRetainedLegacyDraft(batchId: string, title: string, isConflict: boolean) {
+    if (!activeIP || cleaningLegacyBatchId) return;
+    const reason = isConflict
+      ? "旧版残留与当前草稿内容不一致。"
+      : "检测到可安全清理的旧版重复记录，上次清理可能未完成。";
+    const confirmed = window.confirm(
+      `${reason}\n\n确认永久删除旧版残留记录“${title}”吗？当前V2草稿会完整保留。`,
+    );
+    if (!confirmed) return;
+
+    setCleaningLegacyBatchId(batchId);
+    setCommitError(null);
+    setCommitWarning(null);
+    const result = removeLegacyDraftByBatch(
+      window.sessionStorage,
+      activeIP.id,
+      batchId,
+    );
+    if (!result.ok) {
+      setCommitError(result.code === "DRAFT_NOT_FOUND"
+        ? "找不到对应的当前草稿，未执行旧版残留清理。"
+        : "旧版残留记录清理失败，当前草稿未受影响，请稍后重试。");
+      setCleaningLegacyBatchId(null);
+      return;
+    }
+    setCommitWarning(result.removed
+      ? "旧版残留记录已清理，当前草稿保持不变。"
+      : "旧版残留记录已不存在，当前草稿保持不变。");
+    setGraphRevision(revision => revision + 1);
+    setCleaningLegacyBatchId(null);
+  }
 
   async function commitDraft(batchId: string) {
     if (!activeIP || committingBatchId) return;
@@ -227,7 +275,7 @@ export default function CognitionGraphPage() {
         onProgress: setCommitProgress,
       });
       if (result.status === "COMMITTED_CLEANUP_PENDING") {
-        setCommitWarning("正式认知已保存，建议手动刷新清除草稿。");
+        setCommitWarning("已确权，草稿清理未完成，可稍后重试清除。");
       }
       reportRef.current = null;
       setReport(null);
@@ -381,6 +429,47 @@ export default function CognitionGraphPage() {
 
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.8fr)]">
         <div className="relative overflow-hidden rounded-[18px] border border-[#E5E4DE] bg-white p-3">
+          {drafts.retainedLegacyRecords.length > 0 && (
+            <div className="mb-3 space-y-2 rounded-[12px] border border-[#F2D38B] bg-[#FFF9E8] p-3">
+              <p className="text-[12px] font-bold text-[#7A5A13]">旧版残留记录</p>
+              {drafts.retainedLegacyRecords.map((item) => {
+                const current = drafts.records.find(
+                  record => record.batchId === item.record.batchId,
+                );
+                const title = current?.sourceMetadata.title
+                  ?? item.record.sourceMetadata?.title
+                  ?? "未命名草稿";
+                const isConflict = item.retentionReason === "conflict";
+                return (
+                  <div key={item.record.batchId} className="rounded-[10px] bg-white px-3 py-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-[12px] font-semibold text-[#333]">{title}</p>
+                        <p className="mt-1 text-[11px] leading-5 text-[#7A5A13]">
+                          {isConflict
+                            ? "旧版残留与当前草稿内容不一致，请确认后再清理。"
+                            : "检测到可安全清理的旧版重复记录，上次清理可能未完成。"}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        aria-label={`清理旧版残留：${title}`}
+                        disabled={cleaningLegacyBatchId !== null}
+                        onClick={() => clearRetainedLegacyDraft(
+                          item.record.batchId,
+                          title,
+                          isConflict,
+                        )}
+                        className="shrink-0 rounded-full border border-[#D7B764] px-3 py-1.5 text-[11px] font-bold text-[#7A5A13] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        清理旧版残留
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {drafts.records.length > 0 && (
             <div className="mb-3 space-y-2 rounded-[12px] border border-dashed border-[#D8D7D1] bg-[#FAFAF8] p-3">
               <p className="text-[12px] font-bold text-[#555]">待确权认知草稿</p>

@@ -4,10 +4,15 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 
-import { saveDraftCognitionBatch } from "./cognition-draft-session-store";
+import {
+  saveDraftCognitionBatch,
+  type DraftCognitionSessionRecord,
+  type LegacyDraftCognitionSessionRecord,
+} from "./cognition-draft-session-store";
 import { createDraftCognitionBatchId } from "./cognition-graph-bridge";
 import { IPProvider } from "./ip-context";
 import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
+import { calculateSHA256 } from "./sha256";
 import { createTopicBoardIPProfile } from "./topic-board-contract.fixture";
 
 type LoaderResult = {
@@ -222,7 +227,7 @@ function seedP5Draft(
     sourceHash: analysis.sourceHash,
     analyzedAt: analysis.analyzedAt,
   });
-  const saved = saveDraftCognitionBatch(window.sessionStorage, {
+  const record: DraftCognitionSessionRecord = {
     schemaVersion: 2,
     batchId,
     ipId,
@@ -230,9 +235,31 @@ function seedP5Draft(
     sourceMetadata: { title, sourceKind: "课程内容", sourceName: "", sourceUrl: "" },
     analysis,
     analysisToken: `fake-token-for-${sourceId}`,
-  });
+  };
+  const saved = saveDraftCognitionBatch(window.sessionStorage, record);
   assert.equal(saved.ok, true);
-  return { batchId, sourceId };
+  return { batchId, sourceId, record };
+}
+
+function seedRetainedLegacyDraft(
+  record: DraftCognitionSessionRecord,
+  reason: "conflict" | "delete_failed",
+) {
+  const legacy: LegacyDraftCognitionSessionRecord = {
+    ...record,
+    schemaVersion: 1,
+    analysisToken: reason === "conflict"
+      ? `${record.analysisToken}-conflict`
+      : record.analysisToken,
+  };
+  const identity = JSON.stringify([
+    legacy.ipId,
+    legacy.analysis.sourceId,
+    legacy.batchId,
+  ]);
+  const key = `FP_COGNITION_DRAFT_V1:${calculateSHA256(identity)}`;
+  window.sessionStorage.setItem(key, JSON.stringify(legacy));
+  return key;
 }
 
 test("认知图谱页面首次审计发送完整候选范围并渲染全量报告", async () => {
@@ -706,6 +733,7 @@ test("认知图谱加载多个真实草稿批次并只确权用户选择的一�
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     if (url === "/api/ip-source-analysis/finalize") {
+      assert.equal("sourceMetadata" in body, false);
       finalizedSourceIds.push(String(body.sourceId));
       const analysis = body.analysis as { nonce: number };
       return Response.json({
@@ -746,6 +774,73 @@ test("认知图谱加载多个真实草稿批次并只确权用户选择的一�
   } finally {
     cleanupPage?.();
     globalThis.fetch = originalFetch;
+    restoreBrowser();
+  }
+});
+
+test("认知图谱区分冲突与可安全清理的V1残留并经确认只删除旧记录", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  const ip = createTopicBoardIPProfile({ id: "ip-p5-retained", name: "P5残留测试IP" });
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const conflict = seedP5Draft(
+    ip.id,
+    "source-retained-conflict",
+    "冲突残留草稿",
+    "这份旧草稿与当前版本内容不同。",
+    "55555555-5555-4555-8555-555555555555",
+  );
+  const deleteFailed = seedP5Draft(
+    ip.id,
+    "source-retained-delete-failed",
+    "重复残留草稿",
+    "这份旧草稿与当前版本内容相同。",
+    "66666666-6666-4666-8666-666666666666",
+  );
+  const conflictLegacyKey = seedRetainedLegacyDraft(conflict.record, "conflict");
+  const deleteFailedLegacyKey = seedRetainedLegacyDraft(deleteFailed.record, "delete_failed");
+  const v2RawBefore = [...Array.from({ length: window.sessionStorage.length }, (_, index) => window.sessionStorage.key(index))]
+    .filter((key): key is string => Boolean(key?.startsWith("FP_COGNITION_DRAFT_V2:")))
+    .map(key => [key, window.sessionStorage.getItem(key)] as const);
+  const confirmMessages: string[] = [];
+  let allowCleanup = false;
+  Object.defineProperty(window, "confirm", {
+    configurable: true,
+    value: (message: string) => {
+      confirmMessages.push(message);
+      return allowCleanup;
+    },
+  });
+
+  let cleanupPage: (() => void) | undefined;
+  try {
+    const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
+    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
+
+    assert.ok(await view.findByText("旧版残留与当前草稿内容不一致，请确认后再清理。"));
+    assert.ok(view.getByText("检测到可安全清理的旧版重复记录，上次清理可能未完成。"));
+    const conflictButton = view.getByRole("button", { name: "清理旧版残留：冲突残留草稿" });
+    fireEvent.click(conflictButton);
+    assert.equal(confirmMessages.length, 1);
+    assert.match(confirmMessages[0]!, /永久删除旧版残留记录/u);
+    assert.ok(window.sessionStorage.getItem(conflictLegacyKey));
+
+    allowCleanup = true;
+    fireEvent.click(conflictButton);
+    assert.ok(await view.findByText("旧版残留记录已清理，当前草稿保持不变。"));
+    await waitFor(() => {
+      assert.equal(window.sessionStorage.getItem(conflictLegacyKey), null);
+      assert.equal(view.queryByText("旧版残留与当前草稿内容不一致，请确认后再清理。"), null);
+    });
+    assert.ok(window.sessionStorage.getItem(deleteFailedLegacyKey));
+    v2RawBefore.forEach(([key, raw]) => assert.equal(window.sessionStorage.getItem(key), raw));
+    assert.ok(view.getByRole("button", { name: "确认入库：冲突残留草稿" }));
+    assert.ok(view.getByRole("button", { name: "确认入库：重复残留草稿" }));
+  } finally {
+    cleanupPage?.();
     restoreBrowser();
   }
 });
@@ -838,7 +933,7 @@ test("正式认知已保存但草稿清理失败时显示手动刷新警告", as
     });
     fireEvent.click(view.getByRole("button", { name: "确认入库：清理失败草稿" }));
 
-    assert.ok(await view.findByText("正式认知已保存，建议手动刷新清除草稿。"));
+    assert.ok(await view.findByText("已确权，草稿清理未完成，可稍后重试清除。"));
     await waitFor(() => {
       assert.equal(view.container.querySelectorAll('[data-is-draft="true"]').length, 0);
     });
