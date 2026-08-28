@@ -321,6 +321,25 @@ test("新增原始内容按V2解析并用分析前生成的同一Source编号完
       sourceName: "",
       sourceUrl: "",
     });
+    fireEvent.change(view.getByLabelText("资料类型"), {
+      target: { value: "文章" },
+    });
+    await waitFor(() => {
+      assert.equal(
+        loadDraftCognitionBatches(window.sessionStorage, ip.id).records[0]
+          ?.sourceMetadata.sourceKind,
+        "文章",
+      );
+    }, { timeout: 1_000 });
+    fireEvent.change(view.getByLabelText("来源链接（可选）"), {
+      target: { value: "https://example.com/latest-source" },
+    });
+    window.dispatchEvent(new Event("pagehide"));
+    assert.equal(
+      loadDraftCognitionBatches(window.sessionStorage, ip.id).records[0]
+        ?.sourceMetadata.sourceUrl,
+      "https://example.com/latest-source",
+    );
     const initialAnalysisToken = initialDrafts[0]?.analysisToken;
     assert.equal(requestedParserVersion, 2);
     assert.match(requestedSourceId, /^source-/);
@@ -352,6 +371,192 @@ test("新增原始内容按V2解析并用分析前生成的同一Source编号完
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("来源信息无效或草稿已被清理时保留表单且不重建草稿", async () => {
+  const { createTopicBoardIPProfile } = await import("./topic-board-contract.fixture");
+  const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
+  const {
+    loadDraftCognitionBatches,
+    removeDraftsByBatch,
+  } = await import("./cognition-draft-session-store");
+  const ip = createTopicBoardIPProfile({ id: "ip-metadata-failure", name: "来源同步测试IP" });
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const sourceContent = "老师明确说：来源信息必须和草稿一起保存。";
+  let reviewCalls = 0;
+
+  try {
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      if (url === "/api/ip-source-analysis/review") {
+        reviewCalls += 1;
+        const currentAnalysis = body.analysis as ReturnType<typeof buildIPSourceAnalysisV2>;
+        return Response.json({
+          analysis: {
+            ...currentAnalysis,
+            nonce: currentAnalysis.nonce + 1,
+            nodes: currentAnalysis.nodes.map(node => ({ ...node, reviewStatus: "human_confirmed" })),
+          },
+          analysisToken: "should-not-be-used",
+          activeIPId: ip.id,
+          requestSeq: body.requestSeq,
+        });
+      }
+      assert.equal(url, "/api/ip-source-analysis");
+      const analysis = buildIPSourceAnalysisV2({
+        sourceId: String(body.sourceId),
+        sourceContent,
+        analyzedAt: "2026-08-28T08:00:00.000Z",
+        createId: () => "00000000-0000-4000-8000-000000000101",
+        candidate: {
+          nodes: [{
+            nodeRef: "N1",
+            question: { content: "来源信息应如何保存？", derivation: "explicit", anchors: [{ quote: sourceContent }] },
+            claim: { content: "来源信息必须和草稿一起保存。", anchors: [{ quote: "来源信息必须和草稿一起保存" }] },
+            reasoning: { status: "not_provided", steps: [] },
+            evidence: [],
+            concepts: [],
+          }],
+          aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+        },
+      });
+      return Response.json({
+        analysis,
+        analysisToken: "metadata-sync-token",
+        activeIPId: ip.id,
+        requestSeq: body.requestSeq,
+      });
+    };
+
+    const { fireEvent, render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const OriginalSourcePage = (await import("../app/knowledge-intake/original/page")).default;
+    const view = render(<IPProvider><OriginalSourcePage /></IPProvider>);
+    const user = userEvent.setup({ document });
+
+    const titleInput = view.getByLabelText("标题（保存必填）") as HTMLInputElement;
+    await user.type(titleInput, "来源同步原始标题");
+    await user.type(view.getByPlaceholderText(/粘贴老师的课程/), sourceContent);
+    fireEvent.click(view.getByRole("button", { name: "开始理解内容" }));
+    await view.findByText("来源信息必须和草稿一起保存。");
+    const initial = loadDraftCognitionBatches(window.sessionStorage, ip.id).records[0];
+    assert.ok(initial);
+
+    fireEvent.change(titleInput, { target: { value: "" } });
+    fireEvent.blur(titleInput);
+    assert.ok(await view.findByText("请填写有效的来源标题，标题不能超过200字。"));
+    assert.equal(
+      loadDraftCognitionBatches(window.sessionStorage, ip.id).records[0]?.sourceMetadata.title,
+      "来源同步原始标题",
+    );
+
+    assert.deepEqual(removeDraftsByBatch(
+      window.sessionStorage,
+      ip.id,
+      initial.batchId,
+    ), { ok: true, removedCount: 1 });
+    fireEvent.click(view.getByRole("button", { name: "确认" }));
+    assert.ok(await view.findByText("草稿已不存在，请重新理解内容后再继续。"));
+    assert.equal(reviewCalls, 0);
+    fireEvent.change(titleInput, { target: { value: "草稿被删除后仍保留的表单值" } });
+    fireEvent.blur(titleInput);
+    assert.ok(await view.findByText("草稿已不存在，请重新理解内容后再继续。"));
+    assert.equal(titleInput.value, "草稿被删除后仍保留的表单值");
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await waitFor(() => {
+      assert.equal(loadDraftCognitionBatches(window.sessionStorage, ip.id).records.length, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("V1草稿展示为来源待补充并在用户确认后升级为V2", async () => {
+  const { createTopicBoardIPProfile } = await import("./topic-board-contract.fixture");
+  const { buildIPSourceAnalysisV2 } = await import("./ip-source-analysis-v2");
+  const { createDraftCognitionBatchId } = await import("./cognition-graph-bridge");
+  const { loadDraftCognitionBatches } = await import("./cognition-draft-session-store");
+  const { calculateSHA256 } = await import("./sha256");
+  const ip = createTopicBoardIPProfile({ id: "ip-legacy-upgrade-page", name: "旧草稿测试IP" });
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([ip]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(ip.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const rawContent = "老师明确说：旧草稿只能由用户确认后升级。";
+  const analysis = buildIPSourceAnalysisV2({
+    sourceId: "source-legacy-page",
+    sourceContent: rawContent,
+    analyzedAt: "2026-08-28T09:00:00.000Z",
+    createId: () => "00000000-0000-4000-8000-000000000102",
+    candidate: {
+      nodes: [{
+        nodeRef: "N1",
+        question: { content: "旧草稿何时升级？", derivation: "explicit", anchors: [{ quote: rawContent }] },
+        claim: { content: "旧草稿只能由用户确认后升级。", anchors: [{ quote: "旧草稿只能由用户确认后升级" }] },
+        reasoning: { status: "not_provided", steps: [] },
+        evidence: [],
+        concepts: [],
+      }],
+      aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
+    },
+  });
+  const batchId = createDraftCognitionBatchId({
+    ipId: ip.id,
+    sourceId: analysis.sourceId,
+    sourceHash: analysis.sourceHash,
+    analyzedAt: analysis.analyzedAt,
+  });
+  const legacyRecord = {
+    schemaVersion: 1,
+    batchId,
+    ipId: ip.id,
+    rawContent,
+    sourceMetadata: {
+      title: "旧草稿已有标题",
+      sourceKind: "课程内容",
+      sourceName: "旧课程稿.md",
+      sourceUrl: "https://example.com/legacy",
+    },
+    analysis,
+    analysisToken: "legacy-page-token",
+  } as const;
+  const legacyKey = `FP_COGNITION_DRAFT_V1:${calculateSHA256(JSON.stringify([
+    ip.id,
+    analysis.sourceId,
+    batchId,
+  ]))}`;
+  window.sessionStorage.setItem(legacyKey, JSON.stringify(legacyRecord));
+
+  const { fireEvent, render, waitFor } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const OriginalSourcePage = (await import("../app/knowledge-intake/original/page")).default;
+  const view = render(<IPProvider><OriginalSourcePage /></IPProvider>);
+  const user = userEvent.setup({ document });
+
+  assert.ok(await view.findByText("来源待补充"));
+  await user.click(view.getByRole("button", { name: "补充来源信息：旧草稿已有标题" }));
+  assert.equal((view.getByLabelText("标题（保存必填）") as HTMLInputElement).value, "旧草稿已有标题");
+  assert.equal((view.getByLabelText("资料类型") as HTMLSelectElement).value, "课程内容");
+  assert.equal((view.getByLabelText("来源链接（可选）") as HTMLInputElement).value, "https://example.com/legacy");
+  fireEvent.change(view.getByLabelText("来源链接（可选）"), {
+    target: { value: "https://example.com/confirmed" },
+  });
+  await user.click(view.getByRole("button", { name: "确认来源信息并升级草稿" }));
+
+  assert.ok(await view.findByText("来源信息已确认，草稿已升级。"));
+  await waitFor(() => {
+    const loaded = loadDraftCognitionBatches(window.sessionStorage, ip.id);
+    assert.equal(loaded.records.length, 1);
+    assert.equal(loaded.metadataRequiredRecords.length, 0);
+    assert.equal(loaded.records[0]?.sourceMetadata.sourceUrl, "https://example.com/confirmed");
+    assert.equal(loaded.records[0]?.rawContent, rawContent);
+    assert.equal(loaded.records[0]?.analysisToken, "legacy-page-token");
+  });
+  assert.equal(window.sessionStorage.getItem(legacyKey), null);
 });
 
 test("A分析期间切换到B后，A的迟到结果不会显示在B页面", { timeout: 5_000 }, async () => {

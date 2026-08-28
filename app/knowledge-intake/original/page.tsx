@@ -3,8 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import {
+  loadDraftCognitionBatches,
   removeDraftsByBatch,
   saveDraftCognitionBatch,
+  updateDraftSourceMetadata,
+  upgradeLegacyDraftSourceMetadata,
+  type DraftSourceMetadata,
+  type LegacyDraftCognitionSessionRecord,
+  type UpdateDraftSourceMetadataResult,
 } from "@/lib/cognition-draft-session-store";
 import { createDraftCognitionBatchId } from "@/lib/cognition-graph-bridge";
 import { useIP } from "@/lib/ip-context";
@@ -33,6 +39,13 @@ import type {
 
 const SOURCE_KINDS: IPOriginalSourceKind[] = ["直播逐字稿", "课程内容", "文章", "语音整理", "其他"];
 const ACCEPT = ".txt,.md,.srt,text/plain,text/markdown,application/x-subrip";
+const METADATA_SYNC_DELAY_MS = 300;
+
+interface DraftMetadataSyncTarget {
+  ipId: string;
+  batchId: string;
+  metadata: DraftSourceMetadata;
+}
 
 const KIND_LABEL: Record<IPSourceAnalysisKind, string> = {
   question: "老师在回答什么",
@@ -102,11 +115,20 @@ export default function IPOriginalContentIntakePage() {
   const [saving, setSaving] = useState(false);
   const [savedId, setSavedId] = useState("");
   const [error, setError] = useState("");
+  const [metadataError, setMetadataError] = useState("");
+  const [draftUnavailable, setDraftUnavailable] = useState(false);
+  const [legacyDrafts, setLegacyDrafts] = useState<LegacyDraftCognitionSessionRecord[]>([]);
+  const [selectedLegacyBatchId, setSelectedLegacyBatchId] = useState<string | null>(null);
+  const [legacyNotice, setLegacyNotice] = useState("");
   const activeRequestSeq = useRef(0);
   const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
   const analysisInFlight = useRef(false);
   const reviewInFlight = useRef(false);
   const saveInFlight = useRef(false);
+  const metadataSyncTargetRef = useRef<DraftMetadataSyncTarget | null>(null);
+  const metadataSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftUnavailableRef = useRef(false);
+  const flushMetadataRef = useRef<(showError: boolean) => void>(() => undefined);
   const [sourceId, setSourceId] = useState(() => createIPOriginalSourceId());
   const confirmedCount = analysis?.parserVersion === 1
     ? analysis.items.filter(item => item.extractionStatus === "人工确认").length
@@ -118,6 +140,100 @@ export default function IPOriginalContentIntakePage() {
     ? confirmedCount
     : analysis?.nodes.filter(node => node.reviewStatus !== "ai_extracted").length ?? 0;
   const isGlobalLocked = loading || reviewing || saving;
+
+  function cancelMetadataSyncTimer() {
+    if (metadataSyncTimerRef.current !== null) {
+      clearTimeout(metadataSyncTimerRef.current);
+      metadataSyncTimerRef.current = null;
+    }
+  }
+
+  function handleMetadataUpdateResult(
+    result: UpdateDraftSourceMetadataResult,
+    showError: boolean,
+  ) {
+    if (result.ok) {
+      if (showError) setMetadataError("");
+      return;
+    }
+    if (result.code === "DRAFT_NOT_FOUND") {
+      draftUnavailableRef.current = true;
+      if (showError) {
+        setDraftUnavailable(true);
+        setMetadataError("");
+        setError("草稿已不存在，请重新理解内容后再继续。");
+      }
+      return;
+    }
+    if (!showError) return;
+    if (result.code === "INVALID_METADATA") {
+      setMetadataError("请填写有效的来源标题，标题不能超过200字。");
+      return;
+    }
+    const message = result.code === "QUOTA_EXCEEDED"
+      ? "浏览器暂存空间不足，来源信息尚未同步。请保留当前页面后重试。"
+      : result.code === "READ_FAILED"
+        ? "暂时无法读取认知草稿，来源信息尚未同步。"
+        : "来源信息暂存失败，请稍后重试。";
+    setError(message);
+  }
+
+  function updateMetadataSyncRef(nextMetadata: Partial<DraftSourceMetadata>) {
+    const current = metadataSyncTargetRef.current;
+    if (!current) return;
+    metadataSyncTargetRef.current = {
+      ...current,
+      metadata: { ...current.metadata, ...nextMetadata },
+    };
+  }
+
+  function markDraftUnavailable() {
+    draftUnavailableRef.current = true;
+    setDraftUnavailable(true);
+    setMetadataError("");
+    setError("草稿已不存在，请重新理解内容后再继续。");
+  }
+
+  function ensureDraftStillExists(
+    ipId: string,
+    currentAnalysis: Extract<IPSourceAnalysisSnapshot, { parserVersion: 2 }>,
+  ): boolean {
+    if (typeof window === "undefined" || draftUnavailableRef.current) {
+      markDraftUnavailable();
+      return false;
+    }
+    const loaded = loadDraftCognitionBatches(window.sessionStorage, ipId);
+    if (loaded.errorCode) {
+      setError("暂时无法读取认知草稿，请稍后重试。");
+      return false;
+    }
+    const batchId = createDraftCognitionBatchId({
+      ipId,
+      sourceId: currentAnalysis.sourceId,
+      sourceHash: currentAnalysis.sourceHash,
+      analyzedAt: currentAnalysis.analyzedAt,
+    });
+    if (!loaded.records.some(record => record.batchId === batchId)) {
+      markDraftUnavailable();
+      return false;
+    }
+    return true;
+  }
+
+  function flushDraftMetadata(showError = true) {
+    cancelMetadataSyncTimer();
+    const target = metadataSyncTargetRef.current;
+    if (!target || draftUnavailableRef.current || typeof window === "undefined") return;
+    const result = updateDraftSourceMetadata(
+      window.sessionStorage,
+      target.ipId,
+      target.batchId,
+      target.metadata,
+    );
+    handleMetadataUpdateResult(result, showError);
+  }
+
+  flushMetadataRef.current = flushDraftMetadata;
 
   useEffect(() => {
     activeIPIdRef.current = activeIP?.id ?? null;
@@ -134,7 +250,58 @@ export default function IPOriginalContentIntakePage() {
     setPrecheck(null);
     setSaveDecision(null);
     setError("");
+    setMetadataError("");
+    setDraftUnavailable(false);
+    setSelectedLegacyBatchId(null);
+    setLegacyNotice("");
+    setLegacyDrafts([]);
+    draftUnavailableRef.current = false;
+    metadataSyncTargetRef.current = null;
+    cancelMetadataSyncTimer();
   }, [activeIP?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !activeIP?.id) {
+      setLegacyDrafts([]);
+      return;
+    }
+    const loaded = loadDraftCognitionBatches(window.sessionStorage, activeIP.id);
+    setLegacyDrafts(loaded.metadataRequiredRecords.map(item => item.record));
+    if (loaded.errorCode) setError("暂时无法读取认知草稿，请刷新页面后重试。");
+  }, [activeIP?.id]);
+
+  useEffect(() => {
+    cancelMetadataSyncTimer();
+    if (analysis?.parserVersion !== 2 || !analysisIPId || selectedLegacyBatchId) {
+      metadataSyncTargetRef.current = null;
+      return;
+    }
+    const batchId = createDraftCognitionBatchId({
+      ipId: analysisIPId,
+      sourceId: analysis.sourceId,
+      sourceHash: analysis.sourceHash,
+      analyzedAt: analysis.analyzedAt,
+    });
+    metadataSyncTargetRef.current = {
+      ipId: analysisIPId,
+      batchId,
+      metadata: { title, sourceKind, sourceName, sourceUrl },
+    };
+    if (draftUnavailableRef.current) return;
+    metadataSyncTimerRef.current = setTimeout(() => {
+      flushMetadataRef.current(true);
+    }, METADATA_SYNC_DELAY_MS);
+    return cancelMetadataSyncTimer;
+  }, [analysis, analysisIPId, selectedLegacyBatchId, sourceKind, sourceName, sourceUrl, title]);
+
+  useEffect(() => {
+    const handlePageHide = () => flushMetadataRef.current(true);
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      cancelMetadataSyncTimer();
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, []);
 
   useEffect(() => {
     if (ipLoading || typeof window === "undefined") return;
@@ -168,16 +335,69 @@ export default function IPOriginalContentIntakePage() {
     });
   }
 
+  function selectLegacyDraft(record: LegacyDraftCognitionSessionRecord) {
+    if (!activeIP || record.ipId !== activeIP.id) {
+      setError("这条草稿不属于当前IP，已停止加载。");
+      return;
+    }
+    cancelMetadataSyncTimer();
+    metadataSyncTargetRef.current = null;
+    draftUnavailableRef.current = false;
+    setDraftUnavailable(false);
+    setMetadataError("");
+    setError("");
+    setLegacyNotice("");
+    setSelectedLegacyBatchId(record.batchId);
+    setTitle(record.sourceMetadata?.title ?? "");
+    setSourceKind(record.sourceMetadata?.sourceKind ?? "其他");
+    setSourceName(record.sourceMetadata?.sourceName ?? "");
+    setSourceUrl(record.sourceMetadata?.sourceUrl ?? "");
+    setRawContent(record.rawContent);
+    setAnalysis(record.analysis);
+    setAnalysisToken(record.analysisToken);
+    setAnalysisIPId(record.ipId);
+    setSourceId(record.analysis.sourceId);
+    setActiveAnchor(record.analysis.nodes[0]?.claim.anchors[0] ?? null);
+    setPrecheck(null);
+    setSaveDecision(null);
+  }
+
+  function confirmLegacyDraftUpgrade() {
+    if (!activeIP || !selectedLegacyBatchId || typeof window === "undefined") return;
+    const result = upgradeLegacyDraftSourceMetadata(
+      window.sessionStorage,
+      activeIP.id,
+      selectedLegacyBatchId,
+      { title, sourceKind, sourceName, sourceUrl },
+    );
+    if (!result.ok) {
+      handleMetadataUpdateResult(result, true);
+      return;
+    }
+    draftUnavailableRef.current = false;
+    setDraftUnavailable(false);
+    setMetadataError("");
+    setSelectedLegacyBatchId(null);
+    setLegacyNotice(result.legacyRemoved
+      ? "来源信息已确认，草稿已升级。"
+      : "来源信息已确认，但旧草稿尚未清理，不影响继续使用。",
+    );
+    const loaded = loadDraftCognitionBatches(window.sessionStorage, activeIP.id);
+    setLegacyDrafts(loaded.metadataRequiredRecords.map(item => item.record));
+  }
+
   function saveV2Draft(
     nextAnalysis: Extract<IPSourceAnalysisSnapshot, { parserVersion: 2 }>,
     nextToken: string,
     nextIPId: string,
     nextTitle: string,
+    requireExisting = false,
   ): boolean {
     if (typeof window === "undefined") return false;
+    if (requireExisting && !ensureDraftStillExists(nextIPId, nextAnalysis)) return false;
     try {
-      return saveDraftCognitionBatch(window.sessionStorage, {
-        schemaVersion: 1,
+      const result = saveDraftCognitionBatch(window.sessionStorage, {
+        schemaVersion: 2,
         batchId: createDraftCognitionBatchId({
           ipId: nextIPId,
           sourceId: nextAnalysis.sourceId,
@@ -194,7 +414,18 @@ export default function IPOriginalContentIntakePage() {
         },
         analysis: nextAnalysis,
         analysisToken: nextToken,
-      }).ok;
+      });
+      if (result.ok) {
+        draftUnavailableRef.current = false;
+        setDraftUnavailable(false);
+        setMetadataError("");
+        return true;
+      }
+      setError(result.code === "QUOTA_EXCEEDED"
+        ? "浏览器暂存空间不足，认知草稿尚未保存。请保留当前页面后重试。"
+        : "认知草稿暂存失败，请保留当前页面后重试。",
+      );
+      return false;
     } catch {
       return false;
     }
@@ -231,6 +462,10 @@ export default function IPOriginalContentIntakePage() {
     }
     const requestedIPId = activeIP.id;
     const requestedSourceId = createIPOriginalSourceId();
+    setSelectedLegacyBatchId(null);
+    setLegacyNotice("");
+    draftUnavailableRef.current = false;
+    setDraftUnavailable(false);
     setSourceId(requestedSourceId);
     const requestSeq = activeRequestSeq.current + 1;
     activeRequestSeq.current = requestSeq;
@@ -309,6 +544,15 @@ export default function IPOriginalContentIntakePage() {
   async function handleSave() {
     if (saveInFlight.current || analysisInFlight.current || reviewInFlight.current) return;
     if (!activeIP || !analysis) return;
+    if (selectedLegacyBatchId) {
+      setError("请先确认来源信息并完成草稿升级。");
+      return;
+    }
+    if (draftUnavailable) {
+      setError("草稿已不存在，请重新理解内容后再继续。");
+      return;
+    }
+    if (analysis.parserVersion === 2 && !ensureDraftStillExists(activeIP.id, analysis)) return;
     if (analysisIPId !== activeIP.id) {
       setError("当前IP已切换，请重新理解内容后再保存");
       return;
@@ -434,6 +678,14 @@ export default function IPOriginalContentIntakePage() {
 
   async function reviewNode(action: CognitionReviewAction) {
     if (!activeIP || analysis?.parserVersion !== 2) return;
+    if (selectedLegacyBatchId || draftUnavailable) {
+      setError(selectedLegacyBatchId
+        ? "请先确认来源信息并完成草稿升级。"
+        : "草稿已不存在，请重新理解内容后再继续。",
+      );
+      return;
+    }
+    if (!ensureDraftStillExists(activeIP.id, analysis)) return;
     if (reviewInFlight.current || analysisInFlight.current || saveInFlight.current) return;
     if (!analysisToken) {
       setError("解析凭证已失效，请重新分析");
@@ -488,6 +740,7 @@ export default function IPOriginalContentIntakePage() {
         data.analysisToken,
         requestedIPId,
         title.trim() || deriveIPOriginalSourceTitle(rawContent, parsed.analysis),
+        true,
       );
       setAnalysis(parsed.analysis);
       setAnalysisToken(data.analysisToken);
@@ -543,35 +796,76 @@ export default function IPOriginalContentIntakePage() {
             </div>
           </div>
         )}
+        {legacyDrafts.length > 0 && (
+          <section className="rounded-[16px] border border-[#E8D7A4] bg-[#FFFDF6] p-5">
+            <h2 className="text-[15px] font-bold text-[#6F5717]">来源待补充</h2>
+            <p className="mt-1 text-[12px] leading-5 text-[#806D3A]">这些旧草稿需要你重新确认来源信息，系统不会自动改写或迁移。</p>
+            <div className="mt-3 flex flex-col gap-2">
+              {legacyDrafts.map(record => (
+                <div key={record.batchId} className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[#EDE2C2] bg-white px-3 py-2.5">
+                  <div>
+                    <p className="text-[12.5px] font-semibold text-[#4F421F]">{record.sourceMetadata?.title ?? "未填写来源标题"}</p>
+                    <p className="mt-0.5 text-[11px] text-[#8A7A4D]">{record.sourceMetadata?.sourceKind ?? "资料类型待确认"}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => selectLegacyDraft(record)}
+                    className="rounded-[8px] bg-[#F4E8BE] px-3 py-2 text-[11.5px] font-bold text-[#6F5717]"
+                    aria-label={`补充来源信息：${record.sourceMetadata?.title ?? "未填写来源标题"}`}
+                  >
+                    补充来源信息
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {legacyNotice && (
+          <div role="status" className="rounded-[10px] bg-[#EAF3DE] px-3 py-2.5 text-[12.5px] text-[#3B6D11]">{legacyNotice}</div>
+        )}
         <section className="rounded-[16px] border border-[#E5E4DE] bg-white p-5">
           <div className="mb-4 rounded-[10px] bg-[#EFF6FF] px-3 py-2.5 text-[12.5px] text-[#1D4ED8]">
             当前IP：<b>{activeIP?.name ?? "尚未选择"}</b>。这份内容只会归入当前IP，不会作为通用方法使用。
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-[12.5px] font-semibold text-[#555]">标题（保存必填）
-              <input value={title} disabled={isGlobalLocked} onChange={event => { setTitle(event.target.value); setPrecheck(null); setSaveDecision(null); }} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
+              <input value={title} disabled={isGlobalLocked} onChange={event => { updateMetadataSyncRef({ title: event.target.value }); setTitle(event.target.value); setMetadataError(""); setPrecheck(null); setSaveDecision(null); }} onBlur={() => flushDraftMetadata(true)} placeholder="例如：持续输出的真正含义" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
+              {metadataError && <span className="mt-1 block text-[11px] font-normal text-[#A32D2D]">{metadataError}</span>}
             </label>
             <label className="text-[12.5px] font-semibold text-[#555]">资料类型
-              <select value={sourceKind} disabled={isGlobalLocked} onChange={event => setSourceKind(event.target.value as IPOriginalSourceKind)} className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none">
+              <select value={sourceKind} disabled={isGlobalLocked} onChange={event => { const nextKind = event.target.value as IPOriginalSourceKind; updateMetadataSyncRef({ sourceKind: nextKind }); setSourceKind(nextKind); }} onBlur={() => flushDraftMetadata(true)} className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none">
                 {SOURCE_KINDS.map(kind => <option key={kind}>{kind}</option>)}
               </select>
             </label>
           </div>
           <label className="mt-3 block text-[12.5px] font-semibold text-[#555]">来源链接（可选）
-            <input value={sourceUrl} disabled={isGlobalLocked} onChange={event => setSourceUrl(event.target.value)} placeholder="用于记录资料出处，不代表系统已核实外部事实" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
+            <input value={sourceUrl} disabled={isGlobalLocked} onChange={event => { updateMetadataSyncRef({ sourceUrl: event.target.value }); setSourceUrl(event.target.value); }} onBlur={() => flushDraftMetadata(true)} placeholder="用于记录资料出处，不代表系统已核实外部事实" className="mt-1.5 w-full rounded-[10px] border border-[#E5E4DE] px-3 py-2.5 text-[13px] font-normal outline-none focus:border-[#639922]" />
           </label>
+          {selectedLegacyBatchId && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[10px] bg-[#FFF8E8] px-3 py-2.5">
+              <span className="text-[11.5px] text-[#8A6418]">请核对以上来源信息。确认前，系统不会升级这条旧草稿。</span>
+              <button
+                type="button"
+                disabled={isGlobalLocked}
+                onClick={confirmLegacyDraftUpgrade}
+                className="rounded-[8px] bg-[#8A6418] px-3 py-2 text-[11.5px] font-bold text-white disabled:opacity-40"
+              >
+                确认来源信息并升级草稿
+              </button>
+            </div>
+          )}
           <label className="mt-4 flex cursor-pointer items-center justify-center rounded-[10px] border border-dashed border-[#CFCFC7] bg-[#FAFAF8] px-4 py-4 text-[12.5px] text-[#666]">
             {sourceName ? `已读取：${sourceName}` : "上传txt、md或srt，或者直接在下方粘贴"}
-            <input type="file" accept={ACCEPT} disabled={isGlobalLocked} className="hidden" onChange={event => {
+            <input type="file" accept={ACCEPT} disabled={isGlobalLocked || selectedLegacyBatchId !== null} className="hidden" onChange={event => {
               const file = event.target.files?.[0];
               if (file) void handleFile(file);
               event.target.value = "";
             }} />
           </label>
-          <textarea value={rawContent} disabled={isGlobalLocked} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisToken(""); setAnalysisIPId(null); setActiveAnchor(null); setPrecheck(null); setSaveDecision(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
+          <textarea value={rawContent} disabled={isGlobalLocked || selectedLegacyBatchId !== null} onChange={event => { setRawContent(event.target.value); setAnalysis(null); setAnalysisToken(""); setAnalysisIPId(null); setActiveAnchor(null); setPrecheck(null); setSaveDecision(null); }} rows={14} placeholder="粘贴老师的课程、直播逐字稿、文章或语音整理全文……" className="mt-3 w-full resize-y rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[13px] leading-6 text-[#333] outline-none focus:border-[#639922]" />
           <div className="mt-3 flex items-center justify-between gap-3">
             <span className="text-[11.5px] text-[#AAA]">{rawContent.length}字。原文将在确认保存时完整写入，不会被AI改写。</span>
-            <button onClick={handleAnalyze} disabled={isGlobalLocked || !rawContent.trim() || !activeIP} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">{loading ? "正在理解原始内容……" : "开始理解内容"}</button>
+            <button onClick={handleAnalyze} disabled={isGlobalLocked || selectedLegacyBatchId !== null || !rawContent.trim() || !activeIP} className="rounded-[10px] bg-[#1C1C1B] px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-40">{loading ? "正在理解原始内容……" : "开始理解内容"}</button>
           </div>
         </section>
 
@@ -676,7 +970,7 @@ export default function IPOriginalContentIntakePage() {
                         node={node}
                         onActivateAnchor={setActiveAnchor}
                         onReview={action => { void reviewNode(action); }}
-                        reviewDisabled={reviewing}
+                        reviewDisabled={reviewing || draftUnavailable || selectedLegacyBatchId !== null}
                       />
                     ))}
                   </div>
@@ -706,9 +1000,9 @@ export default function IPOriginalContentIntakePage() {
               </>
             )}
             <div className="mt-4 flex justify-end gap-2">
-              <button disabled={reviewing} onClick={() => { setAnalysis(null); setAnalysisToken(""); setActiveAnchor(null); }} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555] disabled:opacity-40">返回修改原文</button>
+              <button disabled={reviewing || selectedLegacyBatchId !== null} onClick={() => { setAnalysis(null); setAnalysisToken(""); setActiveAnchor(null); }} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555] disabled:opacity-40">返回修改原文</button>
               {!title.trim() && <span className="self-center text-[11.5px] text-[#A32D2D]">请先填写标题</span>}
-              <button onClick={() => { void handleSave(); }} disabled={saving || reviewing || !precheck || saveDecision === "skip" || (analysis.parserVersion === 2 && analysis.nodes.some(node => node.reviewStatus === "ai_extracted"))} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
+              <button onClick={() => { void handleSave(); }} disabled={saving || reviewing || draftUnavailable || selectedLegacyBatchId !== null || !precheck || saveDecision === "skip" || (analysis.parserVersion === 2 && analysis.nodes.some(node => node.reviewStatus === "ai_extracted"))} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
             </div>
           </section>
         )}
