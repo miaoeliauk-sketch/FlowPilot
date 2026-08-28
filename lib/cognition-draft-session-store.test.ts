@@ -5,68 +5,19 @@ import {
   bridgeDraftCognitionGraph,
   createDraftCognitionBatchId,
 } from "./cognition-graph-bridge";
+import type {
+  DraftCognitionSessionRecord,
+  DraftSessionStorageLike,
+  LegacyDraftCognitionSessionRecord,
+} from "./cognition-draft-session-store";
 import { calculateSHA256 } from "./sha256";
 import type { IPSourceAnalysisV2, IPSourceAnchor } from "./types";
 
 const storeModulePath = "./cognition-draft-session-store";
-const STORAGE_KEY_PREFIX = "FP_COGNITION_DRAFT_V1:";
+const STORAGE_KEY_PREFIX_V1 = "FP_COGNITION_DRAFT_V1:";
+const STORAGE_KEY_PREFIX_V2 = "FP_COGNITION_DRAFT_V2:";
 
-interface DraftSessionStorageLike {
-  readonly length: number;
-  key(index: number): string | null;
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-}
-
-interface DraftCognitionSessionRecord {
-  schemaVersion: 1;
-  batchId: string;
-  ipId: string;
-  rawContent: string;
-  sourceMetadata: {
-    title: string;
-    sourceKind: "课程内容";
-    sourceName: string;
-    sourceUrl: string;
-  };
-  analysis: IPSourceAnalysisV2;
-  analysisToken: string;
-}
-
-type SaveDraftResult =
-  | { ok: true; key: string }
-  | { ok: false; code: "QUOTA_EXCEEDED" | "WRITE_FAILED" };
-
-type RemoveDraftResult =
-  | { ok: true; removedCount: number }
-  | { ok: false; code: "READ_FAILED" | "WRITE_FAILED" };
-
-interface LoadDraftResult {
-  records: DraftCognitionSessionRecord[];
-  corruptedRecordCount: number;
-  errorCode: "READ_FAILED" | null;
-}
-
-type DraftStoreModule = {
-  saveDraftCognitionBatch: (
-    storage: DraftSessionStorageLike | null,
-    record: DraftCognitionSessionRecord,
-  ) => SaveDraftResult;
-  loadDraftCognitionBatches: (
-    storage: DraftSessionStorageLike | null,
-    ipId: string,
-  ) => LoadDraftResult;
-  removeDraftsByBatch: (
-    storage: DraftSessionStorageLike | null,
-    ipId: string,
-    batchId: string,
-  ) => RemoveDraftResult;
-  clearAllDraftsForIP: (
-    storage: DraftSessionStorageLike | null,
-    ipId: string,
-  ) => RemoveDraftResult;
-};
+type DraftStoreModule = typeof import("./cognition-draft-session-store");
 
 class MemoryStorage implements DraftSessionStorageLike {
   readonly values = new Map<string, string>();
@@ -102,6 +53,7 @@ async function loadDraftStoreModule(): Promise<DraftStoreModule> {
   const module = loaded as Partial<DraftStoreModule>;
   assert.equal(typeof module.saveDraftCognitionBatch, "function");
   assert.equal(typeof module.loadDraftCognitionBatches, "function");
+  assert.equal(typeof module.updateDraftSourceMetadata, "function");
   return module as DraftStoreModule;
 }
 
@@ -145,7 +97,7 @@ function makeRecord(input: {
     aiSuggestions: { potentialPrinciples: [], topicPotential: [] },
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     batchId: createDraftCognitionBatchId({
       ipId: input.ipId,
       sourceId: input.sourceId,
@@ -165,6 +117,30 @@ function makeRecord(input: {
   };
 }
 
+function legacyStorageKey(record: LegacyDraftCognitionSessionRecord): string {
+  const identity = JSON.stringify([
+    record.ipId,
+    record.analysis.sourceId,
+    record.batchId,
+  ]);
+  return `${STORAGE_KEY_PREFIX_V1}${calculateSHA256(identity)}`;
+}
+
+function makeLegacyRecord(
+  record: DraftCognitionSessionRecord,
+  preserveMetadata = false,
+): LegacyDraftCognitionSessionRecord {
+  return {
+    schemaVersion: 1,
+    batchId: record.batchId,
+    ipId: record.ipId,
+    rawContent: record.rawContent,
+    sourceMetadata: preserveMetadata ? record.sourceMetadata : null,
+    analysis: record.analysis,
+    analysisToken: record.analysisToken,
+  };
+}
+
 test("同一草稿批次重复保存时覆盖原记录而不累积副本", async () => {
   const { saveDraftCognitionBatch, loadDraftCognitionBatches } = await loadDraftStoreModule();
   const storage = new MemoryStorage();
@@ -176,7 +152,7 @@ test("同一草稿批次重复保存时覆盖原记录而不累积副本", async
   const firstSave = saveDraftCognitionBatch(storage, original);
   assert.equal(firstSave.ok, true);
   if (!firstSave.ok) return;
-  assert.match(firstSave.key, /^FP_COGNITION_DRAFT_V1:[a-f0-9]{64}$/u);
+  assert.match(firstSave.key, /^FP_COGNITION_DRAFT_V2:[a-f0-9]{64}$/u);
 
   const reviewed: DraftCognitionSessionRecord = {
     ...original,
@@ -281,11 +257,11 @@ test("混合IP读取严格隔离并保留损坏和未知版本原文", async () 
     assert.equal(saveDraftCognitionBatch(storage, record).ok, true);
   });
 
-  const brokenKey = `${STORAGE_KEY_PREFIX}broken-json`;
-  const futureKey = `${STORAGE_KEY_PREFIX}future-schema`;
-  const missingTokenKey = `${STORAGE_KEY_PREFIX}missing-token`;
+  const brokenKey = `${STORAGE_KEY_PREFIX_V2}broken-json`;
+  const futureKey = `${STORAGE_KEY_PREFIX_V2}future-schema`;
+  const missingTokenKey = `${STORAGE_KEY_PREFIX_V2}missing-token`;
   const brokenRaw = "{broken";
-  const futureRaw = JSON.stringify({ ...ipARecords[0], schemaVersion: 2 });
+  const futureRaw = JSON.stringify({ ...ipARecords[0], schemaVersion: 3 });
   const { analysisToken: _ignored, ...withoutToken } = ipARecords[1]!;
   const missingTokenRaw = JSON.stringify(withoutToken);
   storage.setItem(brokenKey, brokenRaw);
@@ -322,7 +298,7 @@ test("读取时拒绝存储键与记录内容不一致的重复草稿", async ()
   if (!saved.ok) return;
   const serialized = storage.getItem(saved.key);
   assert.ok(serialized);
-  storage.setItem(`${STORAGE_KEY_PREFIX}${"f".repeat(64)}`, serialized);
+  storage.setItem(`${STORAGE_KEY_PREFIX_V2}${"f".repeat(64)}`, serialized);
 
   const loaded = loadDraftCognitionBatches(storage, "ip-a");
 
@@ -342,7 +318,7 @@ test("读取存储失败时返回明确错误且不暴露部分结果", async ()
   };
   const readFailure: DraftSessionStorageLike = {
     length: 1,
-    key: () => `${STORAGE_KEY_PREFIX}${"a".repeat(64)}`,
+    key: () => `${STORAGE_KEY_PREFIX_V2}${"a".repeat(64)}`,
     getItem() { throw new Error("storage read failed"); },
     setItem: () => undefined,
     removeItem: () => undefined,
@@ -350,11 +326,13 @@ test("读取存储失败时返回明确错误且不暴露部分结果", async ()
 
   assert.deepEqual(loadDraftCognitionBatches(lengthFailure, "ip-a"), {
     records: [],
+    metadataRequiredRecords: [],
     corruptedRecordCount: 0,
     errorCode: "READ_FAILED",
   });
   assert.deepEqual(loadDraftCognitionBatches(readFailure, "ip-a"), {
     records: [],
+    metadataRequiredRecords: [],
     corruptedRecordCount: 0,
     errorCode: "READ_FAILED",
   });
@@ -385,7 +363,7 @@ test("按批次清除只移除目标草稿且重复调用安全", async () => {
   [target, sameIP, otherIP].forEach(record => {
     assert.equal(saveDraftCognitionBatch(storage, record).ok, true);
   });
-  const brokenKey = `${STORAGE_KEY_PREFIX}keep-broken`;
+  const brokenKey = `${STORAGE_KEY_PREFIX_V2}keep-broken`;
   storage.setItem(brokenKey, "{broken");
 
   assert.deepEqual(removeDraftsByBatch(storage, "ip-a", target.batchId), {
@@ -434,7 +412,7 @@ test("按IP清除只移除该IP的全部合法草稿", async () => {
   [...ipARecords, ipBRecord].forEach(record => {
     assert.equal(saveDraftCognitionBatch(storage, record).ok, true);
   });
-  const brokenKey = `${STORAGE_KEY_PREFIX}keep-broken-after-clear`;
+  const brokenKey = `${STORAGE_KEY_PREFIX_V2}keep-broken-after-clear`;
   storage.setItem(brokenKey, "{broken");
 
   assert.deepEqual(clearAllDraftsForIP(storage, "ip-a"), {
@@ -563,4 +541,187 @@ test("草稿保存读取后桥接为幽灵节点", async () => {
   assert.ok(graph.nodes.length > 0);
   assert.ok(graph.nodes.every(node => node.data.isDraft === true));
   assert.ok(graph.nodes.every(node => node.data.draftProvenance.batchId === record.batchId));
+});
+
+test("V2草稿往返读取后完整保留来源信息", async () => {
+  const { saveDraftCognitionBatch, loadDraftCognitionBatches } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const record: DraftCognitionSessionRecord = {
+    ...makeRecord({
+      ipId: "ip-a",
+      sourceId: "source-metadata-round-trip",
+      analyzedAt: "2026-08-27T10:17:00.000Z",
+    }),
+    sourceMetadata: {
+      title: "  老师的完整课程资料  ",
+      sourceKind: "课程内容",
+      sourceName: "课程原稿.md",
+      sourceUrl: "https://example.com/source",
+    },
+  };
+
+  const saved = saveDraftCognitionBatch(storage, record);
+  assert.equal(saved.ok, true);
+  if (!saved.ok) return;
+  assert.match(saved.key, /^FP_COGNITION_DRAFT_V2:[a-f0-9]{64}$/u);
+
+  const loaded = loadDraftCognitionBatches(storage, "ip-a");
+  assert.equal(loaded.metadataRequiredRecords.length, 0);
+  assert.deepEqual(loaded.records[0]?.sourceMetadata, {
+    title: "老师的完整课程资料",
+    sourceKind: "课程内容",
+    sourceName: "课程原稿.md",
+    sourceUrl: "https://example.com/source",
+  });
+});
+
+test("V1草稿只读识别为来源信息待补全且不改写原记录", async () => {
+  const { loadDraftCognitionBatches } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const legacy = makeLegacyRecord(makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-legacy-metadata",
+    analyzedAt: "2026-08-27T10:18:00.000Z",
+  }));
+  const key = legacyStorageKey(legacy);
+  const serialized = JSON.stringify({
+    ...legacy,
+    sourceMetadata: undefined,
+  });
+  storage.setItem(key, serialized);
+
+  const loaded = loadDraftCognitionBatches(storage, "ip-a");
+
+  assert.equal(loaded.records.length, 0);
+  assert.equal(loaded.corruptedRecordCount, 0);
+  assert.equal(loaded.metadataRequiredRecords.length, 1);
+  assert.equal(loaded.metadataRequiredRecords[0]?.status, "metadata_required");
+  assert.equal(loaded.metadataRequiredRecords[0]?.record.batchId, legacy.batchId);
+  assert.equal(loaded.metadataRequiredRecords[0]?.record.sourceMetadata, null);
+  assert.equal(storage.getItem(key), serialized);
+});
+
+test("同批次同时存在V1和V2时只返回可确权的V2草稿", async () => {
+  const { saveDraftCognitionBatch, loadDraftCognitionBatches } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const current = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-version-dedup",
+    analyzedAt: "2026-08-27T10:19:00.000Z",
+  });
+  const legacy = makeLegacyRecord(current, true);
+  storage.setItem(legacyStorageKey(legacy), JSON.stringify(legacy));
+  assert.equal(saveDraftCognitionBatch(storage, current).ok, true);
+
+  const loaded = loadDraftCognitionBatches(storage, "ip-a");
+
+  assert.deepEqual(loaded.records.map(record => record.batchId), [current.batchId]);
+  assert.equal(loaded.metadataRequiredRecords.length, 0);
+  assert.equal(storage.length, 2);
+});
+
+test("更新来源信息只覆盖元数据并保持批次身份和解析凭证", async () => {
+  const {
+    saveDraftCognitionBatch,
+    loadDraftCognitionBatches,
+    updateDraftSourceMetadata,
+  } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const record = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-update-metadata",
+    analyzedAt: "2026-08-27T10:20:00.000Z",
+  });
+  const saved = saveDraftCognitionBatch(storage, record);
+  assert.equal(saved.ok, true);
+  if (!saved.ok) return;
+
+  const updated = updateDraftSourceMetadata(storage, "ip-a", record.batchId, {
+    title: "  修改后的来源标题  ",
+    sourceKind: "文章",
+    sourceName: "老师文章",
+    sourceUrl: "https://example.com/updated",
+  });
+
+  assert.deepEqual(updated, saved);
+  assert.equal(storage.length, 1);
+  const restored = loadDraftCognitionBatches(storage, "ip-a").records[0]!;
+  assert.deepEqual(restored.sourceMetadata, {
+    title: "修改后的来源标题",
+    sourceKind: "文章",
+    sourceName: "老师文章",
+    sourceUrl: "https://example.com/updated",
+  });
+  assert.equal(restored.rawContent, record.rawContent);
+  assert.deepEqual(restored.analysis, record.analysis);
+  assert.equal(restored.analysisToken, record.analysisToken);
+});
+
+test("非法元数据和跨IP更新均不会改写草稿", async () => {
+  const { saveDraftCognitionBatch, updateDraftSourceMetadata } = await loadDraftStoreModule();
+  const storage = new MemoryStorage();
+  const record = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-reject-metadata-update",
+    analyzedAt: "2026-08-27T10:21:00.000Z",
+  });
+  const saved = saveDraftCognitionBatch(storage, record);
+  assert.equal(saved.ok, true);
+  if (!saved.ok) return;
+  const originalSerialized = storage.getItem(saved.key);
+
+  assert.deepEqual(updateDraftSourceMetadata(storage, "ip-a", record.batchId, {
+    ...record.sourceMetadata,
+    title: "   ",
+  }), { ok: false, code: "INVALID_METADATA" });
+  assert.deepEqual(updateDraftSourceMetadata(storage, "ip-b", record.batchId, {
+    ...record.sourceMetadata,
+    title: "不应写入的标题",
+  }), { ok: false, code: "DRAFT_NOT_FOUND" });
+  assert.equal(storage.getItem(saved.key), originalSerialized);
+});
+
+test("来源信息更新区分读取失败和容量不足", async () => {
+  const { saveDraftCognitionBatch, updateDraftSourceMetadata } = await loadDraftStoreModule();
+  const record = makeRecord({
+    ipId: "ip-a",
+    sourceId: "source-update-storage-errors",
+    analyzedAt: "2026-08-27T10:22:00.000Z",
+  });
+  const readFailure: DraftSessionStorageLike = {
+    get length(): number { throw new Error("storage blocked"); },
+    key: () => null,
+    getItem: () => null,
+    setItem: () => undefined,
+    removeItem: () => undefined,
+  };
+  assert.deepEqual(updateDraftSourceMetadata(
+    readFailure,
+    record.ipId,
+    record.batchId,
+    record.sourceMetadata,
+  ), { ok: false, code: "READ_FAILED" });
+
+  const underlying = new MemoryStorage();
+  const saved = saveDraftCognitionBatch(underlying, record);
+  assert.equal(saved.ok, true);
+  if (!saved.ok) return;
+  const originalSerialized = underlying.getItem(saved.key);
+  const quotaStorage: DraftSessionStorageLike = {
+    get length() { return underlying.length; },
+    key: index => underlying.key(index),
+    getItem: key => underlying.getItem(key),
+    setItem() {
+      throw new DOMException("sessionStorage quota exceeded", "QuotaExceededError");
+    },
+    removeItem: key => underlying.removeItem(key),
+  };
+
+  assert.deepEqual(updateDraftSourceMetadata(
+    quotaStorage,
+    record.ipId,
+    record.batchId,
+    { ...record.sourceMetadata, title: "无法写入的新标题" },
+  ), { ok: false, code: "QUOTA_EXCEEDED" });
+  assert.equal(underlying.getItem(saved.key), originalSerialized);
 });
