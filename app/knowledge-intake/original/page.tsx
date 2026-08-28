@@ -707,6 +707,11 @@ export default function IPOriginalContentIntakePage() {
             )}
             <div className="mt-4 flex justify-end gap-2">
               <button disabled={reviewing} onClick={() => { setAnalysis(null); setAnalysisToken(""); setActiveAnchor(null); }} className="rounded-[10px] bg-[#F2F1ED] px-4 py-2.5 text-[13px] font-semibold text-[#555] disabled:opacity-40">返回修改原文</button>
+              {analysis.parserVersion === 2 && (
+                <a href="/cognition-graph" className="rounded-[10px] border border-[#BFD59F] bg-white px-4 py-2.5 text-[13px] font-semibold text-[#4E6C25]">
+                  前往认知图谱确认
+                </a>
+              )}
               {!title.trim() && <span className="self-center text-[11.5px] text-[#A32D2D]">请先填写标题</span>}
               <button onClick={() => { void handleSave(); }} disabled={saving || reviewing || !precheck || saveDecision === "skip" || (analysis.parserVersion === 2 && analysis.nodes.some(node => node.reviewStatus === "ai_extracted"))} className="rounded-[10px] bg-[#C8F04A] px-5 py-2.5 text-[13px] font-bold text-[#1A1A1A] disabled:opacity-40">{saving ? "保存中……" : "确认保存为IP原始内容"}</button>
             </div>

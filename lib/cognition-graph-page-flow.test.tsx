@@ -306,6 +306,24 @@ test("认知图谱页面首次审计发送完整候选范围并渲染全量报�
   }
 });
 
+test("认知图谱没有待确权草稿时提示从原提炼标签进入", async () => {
+  const restoreBrowser = installBrowserEnvironment();
+  seedCognitionGraphData();
+
+  let cleanupPage: (() => void) | undefined;
+  try {
+    const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
+    const { cleanup, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
+
+    assert.ok(await view.findByText("没有待确权草稿。请回到原提炼结果标签，点击“前往认知图谱确认”进入。"));
+  } finally {
+    cleanupPage?.();
+    restoreBrowser();
+  }
+});
+
 test("认知图谱页面把403凭证失败转换为可理解的安全提示", async () => {
   const restoreBrowser = installBrowserEnvironment();
   const originalFetch = globalThis.fetch;

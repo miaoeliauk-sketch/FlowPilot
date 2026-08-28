@@ -311,6 +311,9 @@ test("新增原始内容按V2解析并用分析前生成的同一Source编号完
     await user.type(view.getByPlaceholderText(/粘贴老师的课程/), sourceContent);
     fireEvent.click(view.getByRole("button", { name: "开始理解内容" }));
     await waitFor(() => assert.ok(view.getByText("不要追随已经形成的共识。")));
+    const graphEntry = view.getByRole("link", { name: "前往认知图谱确认" }) as HTMLAnchorElement;
+    assert.equal(graphEntry.getAttribute("href"), "/cognition-graph");
+    assert.equal(graphEntry.hasAttribute("target"), false);
     const { loadDraftCognitionBatches } = await import("./cognition-draft-session-store");
     const initialDrafts = loadDraftCognitionBatches(window.sessionStorage, ip.id).records;
     assert.equal(initialDrafts.length, 1);

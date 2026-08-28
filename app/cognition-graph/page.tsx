@@ -404,6 +404,11 @@ export default function CognitionGraphPage() {
               ))}
             </div>
           )}
+          {drafts.records.length === 0 && !drafts.error && (
+            <div className="mb-3 rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] px-4 py-3 text-[12px] text-[#777]">
+              没有待确权草稿。请回到原提炼结果标签，点击“前往认知图谱确认”进入。
+            </div>
+          )}
           <CognitionGraphCanvas nodes={graphWithAuditStatus.nodes} edges={graphWithAuditStatus.edges} />
           {committingBatchId && (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 text-[13px] font-semibold text-[#555]">
