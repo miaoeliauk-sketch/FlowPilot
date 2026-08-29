@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY,
+  LEGACY_GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY,
   getActiveGlobalBlockingConstraints,
   loadGlobalBlockingConstraints,
   saveGlobalBlockingConstraintDraft,
   transitionStoredGlobalBlockingConstraint,
 } from "./global-content-constraint-store";
+import { transitionGlobalBlockingConstraint } from "./global-content-constraint-contract";
 
 class MemoryStorage {
   protected readonly values = new Map<string, string>();
@@ -122,9 +124,13 @@ class QueuedWriteLock {
 
 function draftRuleFixture() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ruleId: "global-constraint-emotional-coercion",
     sourceKnowledgeEntryId: "knowledge-expression-motive",
+    sourceSnapshot: {
+      title: "禁止利用无力感进行情绪绑架",
+      rawContentSha256: "a".repeat(64),
+    },
     scope: "all_ips",
     category: "通用禁用规则",
     priority: "global_baseline",
@@ -156,6 +162,22 @@ function replaceStoredRules(storage: MemoryStorage, rules: unknown[]): void {
   }));
 }
 
+function activeRuleFixture() {
+  return transitionGlobalBlockingConstraint(draftRuleFixture(), {
+    type: "activate",
+    confirmedBy: "彭彭",
+    at: "2026-08-29T15:00:00.000Z",
+  });
+}
+
+function seedStoredRules(storage: MemoryStorage, rules: unknown[]): void {
+  storage.setItem(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY, JSON.stringify({
+    schemaVersion: 2,
+    writeOperationId: "test-seed",
+    rules,
+  }));
+}
+
 test("规则草稿写入独立存储并可严格回读，不复用普通知识键", async () => {
   const storage = new MemoryStorage();
   const draft = draftRuleFixture();
@@ -166,25 +188,23 @@ test("规则草稿写入独立存储并可严格回读，不复用普通知识�
   assert.equal(storage.getItem("ipwr:knowledgeEntries"), null);
 });
 
-test("规则只有经过人工确认启用后才进入生成流程可读集合", async () => {
+test("存储状态入口拒绝绕过人工确认直接启用，但允许停用已确认规则", async () => {
   const storage = new MemoryStorage();
   const draft = await saveGlobalBlockingConstraintDraft(storage, draftRuleFixture());
 
   assert.deepEqual(getActiveGlobalBlockingConstraints(storage), []);
+  await assert.rejects(
+    transitionStoredGlobalBlockingConstraint(storage, draft.ruleId, {
+      type: "activate",
+      confirmedBy: "彭彭",
+      at: "2026-08-29T15:00:00.000Z",
+    }),
+    /必须经过原知识核对和人工确认入口/,
+  );
 
-  const active = await transitionStoredGlobalBlockingConstraint(storage, draft.ruleId, {
-    type: "activate",
-    confirmedBy: "彭彭",
-    at: "2026-08-29T15:00:00.000Z",
-  });
-  assert.equal(active.status, "active");
-  assert.deepEqual(active.humanConfirmation, {
-    confirmedBy: "彭彭",
-    confirmedAt: "2026-08-29T15:00:00.000Z",
-  });
-  assert.deepEqual(getActiveGlobalBlockingConstraints(storage), [active]);
-
-  const disabled = await transitionStoredGlobalBlockingConstraint(storage, draft.ruleId, {
+  const active = activeRuleFixture();
+  seedStoredRules(storage, [active]);
+  const disabled = await transitionStoredGlobalBlockingConstraint(storage, active.ruleId, {
     type: "disable",
     at: "2026-08-29T16:00:00.000Z",
   });
@@ -205,6 +225,8 @@ test("拒绝直接伪造已启用规则、普通知识记录和重复来源，�
       humanConfirmation: {
         confirmedBy: "智能入库助手",
         confirmedAt: "2026-08-29T15:00:00.000Z",
+        confirmationMethod: "explicit_ui_action",
+        identityAssurance: "self_asserted",
       },
       updatedAt: "2026-08-29T15:00:00.000Z",
     }),
@@ -244,14 +266,14 @@ test("损坏数据停止读取和写入，回读不一致时恢复写入前原�
   assert.equal(corruptedStorage.getItem(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY), corruptedOriginal);
 
   const storage = new CorruptingStorage();
-  await saveGlobalBlockingConstraintDraft(storage, draftRuleFixture());
+  seedStoredRules(storage, [activeRuleFixture()]);
   const original = storage.getItem(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY);
   storage.corruptNextWrite = true;
   await assert.rejects(
     transitionStoredGlobalBlockingConstraint(
       storage,
       draftRuleFixture().ruleId,
-      { type: "activate", confirmedBy: "彭彭", at: "2026-08-29T15:00:00.000Z" },
+      { type: "disable", at: "2026-08-29T16:00:00.000Z" },
     ),
     /状态保存后回读不一致/,
   );
@@ -283,7 +305,7 @@ test("浏览器存储不可访问时返回清晰错误，不暴露底层异常",
 
 test("写入后的瞬时回读失败会恢复原内容，不留下未经确认的新状态", async () => {
   const storage = new TransientReadbackFailureStorage();
-  await saveGlobalBlockingConstraintDraft(storage, draftRuleFixture());
+  seedStoredRules(storage, [activeRuleFixture()]);
   const original = storage.peek(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY);
   storage.arm();
 
@@ -291,7 +313,7 @@ test("写入后的瞬时回读失败会恢复原内容，不留下未经确认�
     transitionStoredGlobalBlockingConstraint(
       storage,
       draftRuleFixture().ruleId,
-      { type: "activate", confirmedBy: "彭彭", at: "2026-08-29T15:00:00.000Z" },
+      { type: "disable", at: "2026-08-29T16:00:00.000Z" },
     ),
     /读取失败：回读暂时失败/,
   );
@@ -300,15 +322,15 @@ test("写入后的瞬时回读失败会恢复原内容，不留下未经确认�
 
 test("回读发现另一标签页的新写入时停止并保留对方内容，不用旧值覆盖", async () => {
   const storage = new ConcurrentWriteStorage();
-  await saveGlobalBlockingConstraintDraft(storage, draftRuleFixture());
+  seedStoredRules(storage, [activeRuleFixture()]);
   const concurrentRule = {
-    ...draftRuleFixture(),
+    ...activeRuleFixture(),
     title: "另一标签页保存的新标题",
-    revision: 2,
+    revision: 3,
     updatedAt: "2026-08-29T15:30:00.000Z",
   };
   const concurrentStorage = new MemoryStorage();
-  await saveGlobalBlockingConstraintDraft(concurrentStorage, concurrentRule);
+  seedStoredRules(concurrentStorage, [concurrentRule]);
   storage.concurrentValue = concurrentStorage.getItem(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY);
   storage.arm();
 
@@ -316,7 +338,7 @@ test("回读发现另一标签页的新写入时停止并保留对方内容，�
     transitionStoredGlobalBlockingConstraint(
       storage,
       draftRuleFixture().ruleId,
-      { type: "activate", confirmedBy: "彭彭", at: "2026-08-29T16:00:00.000Z" },
+      { type: "disable", at: "2026-08-29T16:00:00.000Z" },
     ),
     /并发写入冲突/,
   );
@@ -325,7 +347,7 @@ test("回读发现另一标签页的新写入时停止并保留对方内容，�
 
 test("连续回读失败时仍在写锁内恢复原内容", async () => {
   const storage = new ConsecutiveReadbackFailureStorage();
-  await saveGlobalBlockingConstraintDraft(storage, draftRuleFixture());
+  seedStoredRules(storage, [activeRuleFixture()]);
   const original = storage.peek(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY);
   storage.arm();
 
@@ -333,7 +355,7 @@ test("连续回读失败时仍在写锁内恢复原内容", async () => {
     transitionStoredGlobalBlockingConstraint(
       storage,
       draftRuleFixture().ruleId,
-      { type: "activate", confirmedBy: "彭彭", at: "2026-08-29T17:00:00.000Z" },
+      { type: "disable", at: "2026-08-29T17:00:00.000Z" },
     ),
     /读取失败：连续回读失败/,
   );
@@ -376,4 +398,26 @@ test("所有写入共用同一把跨标签页锁，并发保存不会互相覆�
   );
   assert.equal(lock.names.length, 2);
   assert.equal(new Set(lock.names).size, 1);
+});
+
+test("V2使用独立命名空间且不会读取、迁移或改写旧V1记录", async () => {
+  const storage = new MemoryStorage();
+  const legacyRaw = JSON.stringify({
+    schemaVersion: 1,
+    writeOperationId: "legacy-operation",
+    rules: [{
+      ...draftRuleFixture(),
+      schemaVersion: 1,
+      sourceSnapshot: undefined,
+    }],
+  });
+  storage.setItem(LEGACY_GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY, legacyRaw);
+
+  assert.deepEqual(loadGlobalBlockingConstraints(storage), []);
+  assert.equal(storage.getItem(LEGACY_GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY), legacyRaw);
+
+  await saveGlobalBlockingConstraintDraft(storage, draftRuleFixture());
+
+  assert.equal(storage.getItem(LEGACY_GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY), legacyRaw);
+  assert.ok(storage.getItem(GLOBAL_BLOCKING_CONSTRAINT_STORAGE_KEY));
 });

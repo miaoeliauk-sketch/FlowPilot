@@ -1,8 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { KnowledgeLibraryItem } from "@/lib/knowledge-library-view";
 import type { KnowledgeDeletionPreview } from "@/lib/ip-store";
+import {
+  GLOBAL_BLOCKING_CONSTRAINT_CONFIRMATION_STATEMENT,
+  confirmGlobalBlockingConstraintFromKnowledge,
+} from "@/lib/global-content-constraint-confirmation";
+import { getActiveGlobalBlockingConstraints } from "@/lib/global-content-constraint-store";
 
 function formatMetric(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value)
@@ -31,7 +36,31 @@ export function KnowledgeDetailPanel({
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deletionPreview, setDeletionPreview] = useState<KnowledgeDeletionPreview | null>(null);
+  const [ruleText, setRuleText] = useState(item.entry.rawContent);
+  const [prohibitedIntent, setProhibitedIntent] = useState("");
+  const [allowedBoundaries, setAllowedBoundaries] = useState("");
+  const [detectionTerms, setDetectionTerms] = useState("");
+  const [confirmedBy, setConfirmedBy] = useState("");
+  const [confirmationChecked, setConfirmationChecked] = useState(false);
+  const [isConfirmingRule, setIsConfirmingRule] = useState(false);
+  const [ruleConfirmationError, setRuleConfirmationError] = useState<string | null>(null);
+  const [ruleConfirmationSuccess, setRuleConfirmationSuccess] = useState(false);
+  const [isRuleActive, setIsRuleActive] = useState(false);
   const { originalSource, effectEvidence, legacyUnverifiedRecords } = item.detail;
+  const isGlobalBlockingSource = item.entry.category === "通用禁用规则" && item.entry.ipId === null;
+
+  useEffect(() => {
+    if (!isGlobalBlockingSource || typeof window === "undefined") {
+      setIsRuleActive(false);
+      return;
+    }
+    try {
+      setIsRuleActive(getActiveGlobalBlockingConstraints(window.localStorage)
+        .some(rule => rule.sourceKnowledgeEntryId === item.entry.id));
+    } catch {
+      setIsRuleActive(false);
+    }
+  }, [isGlobalBlockingSource, item.entry.id]);
   const sourceHref = originalSource.sourceUrl && /^https?:\/\//i.test(originalSource.sourceUrl)
     ? originalSource.sourceUrl
     : null;
@@ -137,6 +166,123 @@ export function KnowledgeDetailPanel({
         )}
 
         <div className="space-y-4">
+          {isGlobalBlockingSource && (
+            <section className="rounded-[14px] border border-[#E8D7B7] bg-[#FFF9ED] p-4">
+              <h3 className="text-[14px] font-semibold text-[#6B5122]">人工确认全局强制底线</h3>
+              {isRuleActive || ruleConfirmationSuccess ? (
+                <p className="mt-2 rounded-[10px] bg-[#EAF3DE] px-3 py-2 text-[12px] font-semibold text-[#3B6D11]">
+                  已严格回读：已记录本设备显式确认，这条规则现已对所有IP生效
+                </p>
+              ) : (
+                <>
+                  <p className="mt-1 text-[12px] leading-5 text-[#866A36]">
+                    这条知识尚未成为已启用的全局底线。当前记录可能来自AI整理，必须由你逐字核对后才能启用。
+                  </p>
+                  <p className="mt-1 text-[11px] leading-5 text-[#866A36]">
+                    本设备只能记录一次显式确认操作和自述姓名，不能证明现实身份。首次生产确认仍须由你本人点击。
+                  </p>
+                  <div className="mt-3 space-y-3">
+                    <label className="block text-[12px] font-semibold text-[#555]">
+                      规则全文
+                      <textarea
+                        aria-label="规则全文"
+                        value={ruleText}
+                        onChange={event => setRuleText(event.target.value)}
+                        rows={5}
+                        className="mt-1 w-full rounded-[9px] border border-[#DAD9D2] bg-white p-2 text-[12px] font-normal leading-5 text-[#333]"
+                      />
+                    </label>
+                    <label className="block text-[12px] font-semibold text-[#555]">
+                      禁止的表达动机
+                      <textarea
+                        aria-label="禁止的表达动机"
+                        value={prohibitedIntent}
+                        onChange={event => setProhibitedIntent(event.target.value)}
+                        rows={2}
+                        className="mt-1 w-full rounded-[9px] border border-[#DAD9D2] bg-white p-2 text-[12px] font-normal leading-5 text-[#333]"
+                      />
+                    </label>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <label className="block text-[12px] font-semibold text-[#555]">
+                        允许边界（每行一项）
+                        <textarea
+                          aria-label="允许边界（每行一项）"
+                          value={allowedBoundaries}
+                          onChange={event => setAllowedBoundaries(event.target.value)}
+                          rows={5}
+                          className="mt-1 w-full rounded-[9px] border border-[#DAD9D2] bg-white p-2 text-[12px] font-normal leading-5 text-[#333]"
+                        />
+                      </label>
+                      <label className="block text-[12px] font-semibold text-[#555]">
+                        高风险检测短语（每行一项）
+                        <textarea
+                          aria-label="高风险检测短语（每行一项）"
+                          value={detectionTerms}
+                          onChange={event => setDetectionTerms(event.target.value)}
+                          rows={5}
+                          className="mt-1 w-full rounded-[9px] border border-[#DAD9D2] bg-white p-2 text-[12px] font-normal leading-5 text-[#333]"
+                        />
+                      </label>
+                    </div>
+                    <label className="block text-[12px] font-semibold text-[#555]">
+                      确认名称（本设备自述）
+                      <input
+                        aria-label="确认名称（本设备自述）"
+                        value={confirmedBy}
+                        onChange={event => setConfirmedBy(event.target.value)}
+                        className="mt-1 w-full rounded-[9px] border border-[#DAD9D2] bg-white px-3 py-2 text-[12px] font-normal text-[#333]"
+                      />
+                    </label>
+                    <label className="flex items-start gap-2 text-[12px] leading-5 text-[#555]">
+                      <input
+                        type="checkbox"
+                        checked={confirmationChecked}
+                        onChange={event => setConfirmationChecked(event.target.checked)}
+                        className="mt-1"
+                      />
+                      {GLOBAL_BLOCKING_CONSTRAINT_CONFIRMATION_STATEMENT}
+                    </label>
+                    {ruleConfirmationError && <p role="alert" className="text-[12px] text-[#A32D2D]">{ruleConfirmationError}</p>}
+                    <button
+                      type="button"
+                      disabled={isConfirmingRule || !confirmationChecked}
+                      onClick={async () => {
+                        setIsConfirmingRule(true);
+                        setRuleConfirmationError(null);
+                        try {
+                          await confirmGlobalBlockingConstraintFromKnowledge(window.localStorage, {
+                            sourceKnowledgeEntryId: item.entry.id,
+                            expectedSourceTitle: item.entry.title,
+                            expectedSourceRawContent: item.entry.rawContent,
+                            confirmedBy,
+                            confirmationStatement: confirmationChecked
+                              ? GLOBAL_BLOCKING_CONSTRAINT_CONFIRMATION_STATEMENT
+                              : "",
+                            rule: {
+                              title: item.entry.title,
+                              canonicalText: ruleText,
+                              prohibitedIntent,
+                              allowedBoundaries: allowedBoundaries.split("\n").map(value => value.trim()).filter(Boolean),
+                              detectionTerms: detectionTerms.split("\n").map(value => value.trim()).filter(Boolean),
+                            },
+                          });
+                          setRuleConfirmationSuccess(true);
+                          setIsRuleActive(true);
+                        } catch (error) {
+                          setRuleConfirmationError(error instanceof Error ? error.message : "人工确认失败，请稍后重试");
+                        } finally {
+                          setIsConfirmingRule(false);
+                        }
+                      }}
+                      className="rounded-[9px] bg-[#1C1C1B] px-4 py-2 text-[12px] font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {isConfirmingRule ? "正在严格保存并回读…" : "确认并启用为所有IP强制底线"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          )}
           <section className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
             <h3 className="text-[14px] font-semibold text-[#1C1C1B]">完整原始来源</h3>
             <div className="mt-2 space-y-1 text-[12px] text-[#777]">

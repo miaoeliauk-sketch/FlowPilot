@@ -8,9 +8,13 @@ import {
 
 function activeRuleFixture() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ruleId: "global-constraint-emotional-coercion",
     sourceKnowledgeEntryId: "knowledge-expression-motive",
+    sourceSnapshot: {
+      title: "表达动机底线",
+      rawContentSha256: "a".repeat(64),
+    },
     scope: "all_ips",
     category: "通用禁用规则",
     priority: "global_baseline",
@@ -28,6 +32,8 @@ function activeRuleFixture() {
     humanConfirmation: {
       confirmedBy: "彭彭",
       confirmedAt: "2026-08-29T14:00:00.000Z",
+      confirmationMethod: "explicit_ui_action",
+      identityAssurance: "self_asserted",
     },
     revision: 1,
     createdAt: "2026-08-29T14:00:00.000Z",
@@ -57,7 +63,7 @@ test("契约拒绝单一IP范围和本期未开放的语义检测器", () => {
 
 test("字段缺失、伪造优先级和不可执行规则不能进入状态管理", () => {
   const cases: Array<{ value: unknown; message: RegExp }> = [
-    { value: { ...activeRuleFixture(), schemaVersion: 2 }, message: /schemaVersion必须为1/ },
+    { value: { ...activeRuleFixture(), schemaVersion: 1 }, message: /schemaVersion必须为2/ },
     { value: { ...activeRuleFixture(), category: "IP禁用规则" }, message: /category必须为通用禁用规则/ },
     { value: { ...activeRuleFixture(), priority: "ip_specific" }, message: /priority必须为global_baseline/ },
     { value: { ...activeRuleFixture(), enforcement: "warn" }, message: /enforcement必须为block/ },
@@ -104,6 +110,8 @@ test("草稿经人工确认后启用，启用规则可停用且不修改原对�
   assert.deepEqual(active.humanConfirmation, {
     confirmedBy: "彭彭",
     confirmedAt: "2026-08-29T15:00:00.000Z",
+    confirmationMethod: "explicit_ui_action",
+    identityAssurance: "self_asserted",
   });
   assert.equal(active.revision, 2);
   assert.equal(active.updatedAt, "2026-08-29T15:00:00.000Z");
@@ -194,6 +202,8 @@ test("契约拒绝创建、确认和更新时间顺序自相矛盾", () => {
       humanConfirmation: {
         confirmedBy: "彭彭",
         confirmedAt: "2026-08-29T13:59:59.000Z",
+        confirmationMethod: "explicit_ui_action",
+        identityAssurance: "self_asserted",
       },
     }),
     /确认时间不能早于创建时间/,
@@ -204,6 +214,8 @@ test("契约拒绝创建、确认和更新时间顺序自相矛盾", () => {
       humanConfirmation: {
         confirmedBy: "彭彭",
         confirmedAt: "2026-08-29T15:00:00.000Z",
+        confirmationMethod: "explicit_ui_action",
+        identityAssurance: "self_asserted",
       },
     }),
     /确认时间不能晚于更新时间/,

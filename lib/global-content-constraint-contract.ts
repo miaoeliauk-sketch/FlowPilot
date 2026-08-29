@@ -7,9 +7,13 @@ export interface KeywordConstraintDetection {
 }
 
 export interface GlobalBlockingConstraint {
-  schemaVersion: 1;
+  schemaVersion: 2;
   ruleId: string;
   sourceKnowledgeEntryId: string;
+  sourceSnapshot: {
+    title: string;
+    rawContentSha256: string;
+  };
   scope: "all_ips";
   category: "通用禁用规则";
   priority: "global_baseline";
@@ -23,6 +27,8 @@ export interface GlobalBlockingConstraint {
   humanConfirmation: {
     confirmedBy: string;
     confirmedAt: string;
+    confirmationMethod: "explicit_ui_action";
+    identityAssurance: "self_asserted";
   } | null;
   revision: number;
   createdAt: string;
@@ -44,6 +50,7 @@ const RULE_KEYS = [
   "schemaVersion",
   "ruleId",
   "sourceKnowledgeEntryId",
+  "sourceSnapshot",
   "scope",
   "category",
   "priority",
@@ -104,8 +111,8 @@ export function parseGlobalBlockingConstraint(value: unknown): GlobalBlockingCon
   if (!hasExactKeys(rule, RULE_KEYS)) {
     throw new GlobalBlockingConstraintContractError("强制拦截规则字段不完整或包含未定义字段");
   }
-  if (rule.schemaVersion !== 1) {
-    throw new GlobalBlockingConstraintContractError("schemaVersion必须为1");
+  if (rule.schemaVersion !== 2) {
+    throw new GlobalBlockingConstraintContractError("schemaVersion必须为2");
   }
   if (rule.scope !== "all_ips") {
     throw new GlobalBlockingConstraintContractError("scope必须为all_ips");
@@ -130,6 +137,17 @@ export function parseGlobalBlockingConstraint(value: unknown): GlobalBlockingCon
     "prohibitedIntent",
   ] as const) {
     requireNonEmptyString(rule[field], field);
+  }
+  if (!rule.sourceSnapshot || typeof rule.sourceSnapshot !== "object" || Array.isArray(rule.sourceSnapshot)) {
+    throw new GlobalBlockingConstraintContractError("sourceSnapshot格式不正确");
+  }
+  const sourceSnapshot = rule.sourceSnapshot as Record<string, unknown>;
+  if (!hasExactKeys(sourceSnapshot, ["title", "rawContentSha256"])) {
+    throw new GlobalBlockingConstraintContractError("sourceSnapshot字段不完整或包含未定义字段");
+  }
+  requireNonEmptyString(sourceSnapshot.title, "sourceSnapshot.title");
+  if (typeof sourceSnapshot.rawContentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceSnapshot.rawContentSha256)) {
+    throw new GlobalBlockingConstraintContractError("sourceSnapshot.rawContentSha256必须是SHA-256摘要");
   }
   requireUniqueStringArray(rule.allowedBoundaries, "allowedBoundaries");
   if (!Number.isInteger(rule.revision) || (rule.revision as number) < 1) {
@@ -170,11 +188,22 @@ export function parseGlobalBlockingConstraint(value: unknown): GlobalBlockingCon
       throw new GlobalBlockingConstraintContractError("humanConfirmation格式不正确");
     }
     const confirmationRecord = confirmation as Record<string, unknown>;
-    if (!hasExactKeys(confirmationRecord, ["confirmedBy", "confirmedAt"])) {
+    if (!hasExactKeys(confirmationRecord, [
+      "confirmedBy",
+      "confirmedAt",
+      "confirmationMethod",
+      "identityAssurance",
+    ])) {
       throw new GlobalBlockingConstraintContractError("humanConfirmation字段不完整或包含未定义字段");
     }
     requireNonEmptyString(confirmationRecord.confirmedBy, "humanConfirmation.confirmedBy");
     requireIsoTimestamp(confirmationRecord.confirmedAt, "humanConfirmation.confirmedAt");
+    if (confirmationRecord.confirmationMethod !== "explicit_ui_action") {
+      throw new GlobalBlockingConstraintContractError("humanConfirmation.confirmationMethod格式不正确");
+    }
+    if (confirmationRecord.identityAssurance !== "self_asserted") {
+      throw new GlobalBlockingConstraintContractError("humanConfirmation.identityAssurance格式不正确");
+    }
     if (Date.parse(confirmationRecord.confirmedAt) < Date.parse(rule.createdAt)) {
       throw new GlobalBlockingConstraintContractError("确认时间不能早于创建时间");
     }
@@ -213,6 +242,8 @@ export function transitionGlobalBlockingConstraint(
       humanConfirmation: {
         confirmedBy: transition.confirmedBy,
         confirmedAt: transition.at,
+        confirmationMethod: "explicit_ui_action",
+        identityAssurance: "self_asserted",
       },
       revision: rule.revision + 1,
       updatedAt: transition.at,

@@ -212,6 +212,52 @@ test("知识中心默认使用只读浏览并支持搜索和组合筛选", async
   assert.deepEqual(view.getAllByTestId("knowledge-browser-card").map(node => node.textContent?.includes("反常识开头方法")), [true]);
 });
 
+test("通用禁用规则只能在详情页逐字核对并由用户点击确认后启用", async () => {
+  const fullRuleText = [
+    "判断对象是表达动机，不是具体词汇。",
+    "允许反差、悬念和适度焦虑。",
+    "禁止利用受众的无力感进行情绪操纵，迫使其被动接受或行动。",
+  ].join("\n");
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    entry("knowledge-emotional-coercion", "禁止利用无力感进行情绪绑架", null, {
+      category: "通用禁用规则",
+      rawContent: fullRuleText,
+      sourcePlatform: "智能入库助手",
+      trustStatus: "ai_derived_unverified",
+    }),
+  ]));
+  const { render, within } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const { getActiveGlobalBlockingConstraints } = await import("./global-content-constraint-store");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+
+  await user.click(await view.findByRole("button", { name: "查看禁止利用无力感进行情绪绑架详情" }));
+  const dialog = await view.findByRole("dialog", { name: "知识详情：禁止利用无力感进行情绪绑架" });
+  assert.ok(within(dialog).getByText(/这条知识尚未成为已启用的全局底线/));
+  assert.equal(getActiveGlobalBlockingConstraints(localStorage).length, 0);
+
+  await user.clear(within(dialog).getByLabelText("规则全文"));
+  await user.type(within(dialog).getByLabelText("规则全文"), fullRuleText);
+  await user.type(
+    within(dialog).getByLabelText("禁止的表达动机"),
+    "利用受众的无力感进行情绪操纵，迫使其被动接受或行动",
+  );
+  await user.type(within(dialog).getByLabelText("允许边界（每行一项）"), "反差\n悬念\n适度焦虑\n引用\n批判\n合理语境");
+  await user.type(within(dialog).getByLabelText("高风险检测短语（每行一项）"), "被时代抛弃\n阶级固化");
+  await user.type(within(dialog).getByLabelText("确认名称（本设备自述）"), "彭彭");
+  await user.click(within(dialog).getByRole("checkbox", { name: /我已逐字核对/ }));
+  await user.click(within(dialog).getByRole("button", { name: "确认并启用为所有IP强制底线" }));
+
+  assert.ok(await within(dialog).findByText("已严格回读：已记录本设备显式确认，这条规则现已对所有IP生效"));
+  const activeRules = getActiveGlobalBlockingConstraints(localStorage);
+  assert.equal(activeRules.length, 1);
+  assert.equal(activeRules[0]?.sourceKnowledgeEntryId, "knowledge-emotional-coercion");
+  assert.equal(activeRules[0]?.canonicalText, fullRuleText);
+});
+
 test("知识浏览每页显示12条并支持页码、上一页下一页和直接跳转", async () => {
   localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify(
     Array.from({ length: 26 }, (_, index) => entry(

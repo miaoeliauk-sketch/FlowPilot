@@ -197,46 +197,53 @@ function generatedScript(topic: string, compressionAudit?: Record<string, unknow
   };
 }
 
-async function activateEmotionManipulationConstraint() {
-  const {
-    saveGlobalBlockingConstraintDraft,
-    transitionStoredGlobalBlockingConstraint,
-  } = await import("./global-content-constraint-store");
-  const draft = {
-    schemaVersion: 1,
-    ruleId: "global-constraint-emotional-coercion",
-    sourceKnowledgeEntryId: "knowledge-expression-motive",
-    scope: "all_ips",
-    category: "通用禁用规则",
-    priority: "global_baseline",
-    enforcement: "block",
-    status: "draft",
-    title: "禁止利用无力感进行情绪绑架",
-    canonicalText: "禁止利用受众的无力感进行情绪操纵，迫使其被动接受或行动。",
-    prohibitedIntent: "利用受众无力感迫使其被动接受或行动",
-    allowedBoundaries: ["引用", "批判", "合理语境"],
-    detection: { type: "keyword", matchMode: "any", terms: ["被时代抛弃", "阶级固化"] },
-    humanConfirmation: null,
-    revision: 1,
-    createdAt: "2026-08-29T14:00:00.000Z",
-    updatedAt: "2026-08-29T14:00:00.000Z",
-  };
-  await saveGlobalBlockingConstraintDraft(localStorage, draft);
-  await transitionStoredGlobalBlockingConstraint(localStorage, draft.ruleId, {
-    type: "activate",
-    confirmedBy: "彭彭",
-    at: "2026-08-29T15:00:00.000Z",
-  });
+async function confirmEmotionManipulationConstraintThroughUI() {
+  const fullRuleText = [
+    "判断对象是表达动机，不是具体词汇。",
+    "允许反差、悬念和适度焦虑。",
+    "禁止利用受众的无力感进行情绪操纵，迫使其被动接受或行动。",
+  ].join("\n");
+  const entries = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as KnowledgeEntry[];
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    ...entries,
+    knowledgeEntry("knowledge-expression-motive", "禁止利用无力感进行情绪绑架", null, {
+      category: "通用禁用规则",
+      rawContent: fullRuleText,
+      sourcePlatform: "智能入库助手",
+      trustStatus: "ai_derived_unverified",
+    }),
+  ]));
+  const { render, within } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { loadKnowledgeLibrarySnapshot } = await import("./knowledge-library-view");
+  const { KnowledgeDetailPanel } = await import("../components/knowledge/KnowledgeDetailPanel");
+  const item = loadKnowledgeLibrarySnapshot(SHUIMURAN.id).items
+    .find(candidate => candidate.id === "knowledge-expression-motive");
+  assert.ok(item);
+  const user = userEvent.setup({ document });
+  const confirmationView = render(<KnowledgeDetailPanel item={item} onClose={() => undefined} />);
+  const dialog = confirmationView.getByRole("dialog", { name: "知识详情：禁止利用无力感进行情绪绑架" });
+  await user.type(
+    within(dialog).getByLabelText("禁止的表达动机"),
+    "利用受众的无力感进行情绪操纵，迫使其被动接受或行动",
+  );
+  await user.type(within(dialog).getByLabelText("允许边界（每行一项）"), "反差\n悬念\n适度焦虑\n引用\n批判\n合理语境");
+  await user.type(within(dialog).getByLabelText("高风险检测短语（每行一项）"), "被时代抛弃\n阶级固化");
+  await user.type(within(dialog).getByLabelText("确认名称（本设备自述）"), "彭彭");
+  await user.click(within(dialog).getByRole("checkbox", { name: /我已逐字核对/ }));
+  await user.click(within(dialog).getByRole("button", { name: "确认并启用为所有IP强制底线" }));
+  assert.ok(await within(dialog).findByText("已严格回读：已记录本设备显式确认，这条规则现已对所有IP生效"));
+  confirmationView.unmount();
 }
 
-test("命中通用禁用规则时先展示结果但暂缓保存，人工确认合理语境后才保存", async () => {
+test("真正人工确认启用后，脚本命中通用禁用规则时先展示结果但暂缓保存", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
   localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
     knowledgeEntry("knowledge-review-timing", "人工复核保存时序", null),
   ]));
-  await activateEmotionManipulationConstraint();
+  await confirmEmotionManipulationConstraintThroughUI();
   const matchedScript = generatedScript("合理引用测试");
   matchedScript.outline[0].content = "我们反对用‘被时代抛弃’这种说法贩卖焦虑。";
   const originalFetch = globalThis.fetch;
@@ -297,7 +304,7 @@ test("人工确认违规后丢弃未保存结果并重新生成，只保存后�
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
-  await activateEmotionManipulationConstraint();
+  await confirmEmotionManipulationConstraintThroughUI();
   const matchedScript = generatedScript("违规重写测试");
   matchedScript.outline[0].content = "不马上行动，你就会被时代抛弃。";
   const safeScript = generatedScript("违规重写测试");
@@ -354,7 +361,7 @@ test("人工放行后知识记账失败再次确认时不会重复保存脚本",
   localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
     knowledgeEntry("knowledge-idempotent-review", "人工放行幂等保护", null),
   ]));
-  await activateEmotionManipulationConstraint();
+  await confirmEmotionManipulationConstraintThroughUI();
   const matchedScript = generatedScript("人工放行幂等测试");
   matchedScript.outline[0].content = "我们反对用‘被时代抛弃’制造恐慌。";
   const originalFetch = globalThis.fetch;

@@ -4,9 +4,13 @@ import { detectGlobalBlockingConstraints } from "./global-content-constraint-det
 
 function activeRuleFixture() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ruleId: "global-constraint-emotional-coercion",
     sourceKnowledgeEntryId: "knowledge-expression-motive",
+    sourceSnapshot: {
+      title: "禁止情绪绑架",
+      rawContentSha256: "a".repeat(64),
+    },
     scope: "all_ips",
     category: "通用禁用规则",
     priority: "global_baseline",
@@ -24,6 +28,8 @@ function activeRuleFixture() {
     humanConfirmation: {
       confirmedBy: "彭彭",
       confirmedAt: "2026-08-29T14:00:00.000Z",
+      confirmationMethod: "explicit_ui_action",
+      identityAssurance: "self_asserted",
     },
     revision: 1,
     createdAt: "2026-08-29T14:00:00.000Z",
