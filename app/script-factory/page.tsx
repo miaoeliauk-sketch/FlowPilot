@@ -49,6 +49,11 @@ import {
   readEphemeralCognitionContext,
   type EphemeralCognitionContext,
 } from "@/lib/ip-boundary-interview";
+import {
+  detectGlobalBlockingConstraints,
+  type GlobalBlockingConstraintDetectionResult,
+} from "@/lib/global-content-constraint-detector";
+import { getActiveGlobalBlockingConstraints } from "@/lib/global-content-constraint-store";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -104,6 +109,32 @@ interface ScriptResult {
     missingDimensions: string[];
     confirmedAt: string;
   };
+}
+
+interface PendingConstraintReview {
+  detection: GlobalBlockingConstraintDetectionResult;
+  persist: () => void;
+  phase: "awaiting_decision" | "finalizing";
+}
+
+function buildGlobalConstraintReviewText(data: ScriptResult): string {
+  return [
+    ...data.titles.flatMap(item => [item.title, item.formula, item.whyFitsIP]),
+    ...data.coverCopy,
+    ...data.outline.flatMap(section => [section.label, section.content, ...(section.subPoints ?? [])]),
+    data.commentGuidance.interactionPrompt,
+    ...data.commentGuidance.keywordReplies.flatMap(item => [item.keyword, item.reply]),
+    data.commentGuidance.dmGuidance,
+    data.commentGuidance.materialPackGuidance,
+    ...data.storyboard.flatMap(row => [row.scene, row.voiceover, row.subtitle, row.shot, row.material, row.editingTip]),
+    ...data.shootingSuggestions,
+    ...data.shotPrompts.flatMap(item => [item.scene, item.prompt]),
+    ...data.editingRhythm.subtitleHighlights,
+    ...data.editingRhythm.soundEffects,
+    ...data.editingRhythm.screenRecordingCuts,
+    ...data.editingRhythm.caseInserts,
+    ...data.editingRhythm.pauses,
+  ].filter(value => value.trim()).join("\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -791,6 +822,12 @@ export default function ScriptFactoryPage() {
   const [boundaryTopicId, setBoundaryTopicId] = useState<string | null>(null);
   const [auditedTopicContent, setAuditedTopicContent] = useState<string | null>(null);
   const [pendingBoundaryConfirmation, setPendingBoundaryConfirmation] = useState(false);
+  const [pendingConstraintReview, setPendingConstraintReview] = useState<PendingConstraintReview | null>(null);
+  const pendingConstraintReviewRef = useRef<PendingConstraintReview | null>(null);
+
+  useEffect(() => {
+    pendingConstraintReviewRef.current = pendingConstraintReview;
+  }, [pendingConstraintReview]);
 
   const currentFormat = FORMAT_CATEGORIES.find(f => f.id === formatCategory) ?? FORMAT_CATEGORIES[0];
   const caseCandidates = cognitionData.entries.filter(entry => {
@@ -800,6 +837,7 @@ export default function ScriptFactoryPage() {
   });
   const selectedKnowledgeCase = caseCandidates.find(entry => entry.id === selectedCaseId) ?? null;
   const isDirectorRuleEnabled = generationMode === "ip" && activeDirectorRule !== null;
+  const isConstraintFinalizing = pendingConstraintReview?.phase === "finalizing";
   const isLinkedTopicBoundaryAllowed = !linkedTopic
     || (!cognitionData.error
       && boundaryTopicId === linkedTopic.id
@@ -809,12 +847,17 @@ export default function ScriptFactoryPage() {
           && auditedTopicContent === topic.trim()
           && decideBoundaryAction(boundaryReport) !== "intercept")));
   function switchGenerationMode(nextMode: GenerationMode) {
+    if (isConstraintFinalizing) {
+      setError("请先补全已保存脚本的知识使用记录，再切换生成模式。");
+      return;
+    }
     generationSequenceRef.current += 1;
     setGenerationMode(nextMode);
     setError(null);
     setResult(null);
     setApiMeta(null);
     setPartialDraftSavedAt(null);
+    setPendingConstraintReview(null);
   }
 
   function getIPSourceContext(ipId: string) {
@@ -1017,6 +1060,7 @@ export default function ScriptFactoryPage() {
     setNeedsStoryboard(savedResult.storyboard.length > 0);
     setNeedsShootingTips(savedResult.shootingSuggestions.length > 0 || savedResult.shotPrompts.length > 0);
     setResult(savedResult);
+    setPendingConstraintReview(null);
     setApiMeta(savedResult.apiMeta);
     setPartialDraftSavedAt(null);
     setLinkedTopic(null);
@@ -1042,6 +1086,9 @@ export default function ScriptFactoryPage() {
     generationSequenceRef.current += 1;
     setLinkedTopic(null);
     setResult(null);
+    if (pendingConstraintReviewRef.current?.phase !== "finalizing") {
+      setPendingConstraintReview(null);
+    }
     setApiMeta(null);
     setPartialDraftSavedAt(null);
     if (!activeIP) {
@@ -1068,6 +1115,7 @@ export default function ScriptFactoryPage() {
     if (!activeIP) {
       setLinkedTopic(null);
       setResult(null);
+      setPendingConstraintReview(null);
       setError("需要先选择对应的当前操盘IP，才能恢复这条内容。");
       return;
     }
@@ -1076,6 +1124,7 @@ export default function ScriptFactoryPage() {
       setLinkedTopic(null);
       setTopic("");
       setResult(null);
+      setPendingConstraintReview(null);
       setApiMeta(null);
       setPartialDraftSavedAt(null);
       const script = getScriptAssets(activeIP.id).find(asset => asset.id === scriptId);
@@ -1094,6 +1143,7 @@ export default function ScriptFactoryPage() {
       const currentDraft = getPartialScriptDraft(activeIP.id);
       if (currentDraft?.topicId?.trim() !== asset.id) {
         setResult(null);
+        setPendingConstraintReview(null);
         setApiMeta(null);
         setPartialDraftSavedAt(null);
       }
@@ -1125,6 +1175,15 @@ export default function ScriptFactoryPage() {
   function handleTopicChange(nextTopic: string) {
     topicContentRef.current = nextTopic;
     setTopic(nextTopic);
+    if (pendingConstraintReview?.phase === "awaiting_decision") {
+      generationSequenceRef.current += 1;
+      setPendingConstraintReview(null);
+      setResult(null);
+    } else if (pendingConstraintReview?.phase === "finalizing") {
+      setResult(null);
+      setApiMeta(null);
+      setPartialDraftSavedAt(null);
+    }
     if (!linkedTopic || boundaryStatus === "legacy") return;
     const normalized = nextTopic.trim();
     if (auditedTopicContent === normalized && boundaryStatus === "ready") return;
@@ -1312,6 +1371,10 @@ export default function ScriptFactoryPage() {
   }
 
   async function handleGenerate(allowPartialBoundary = false) {
+    if (pendingConstraintReviewRef.current?.phase === "finalizing") {
+      setError("请先补全已保存脚本的知识使用记录，再生成新脚本。");
+      return;
+    }
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
     if (linkedTopic && !isLinkedTopicBoundaryAllowed) {
@@ -1353,7 +1416,7 @@ export default function ScriptFactoryPage() {
       setError(ownershipError instanceof Error ? ownershipError.message : "选题与当前IP校验失败，请重试。");
       return;
     }
-    setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setLoading(true);
+    setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setPendingConstraintReview(null); setLoading(true);
     try {
       const generatedData = await generateFor(
         requestIP,
@@ -1384,79 +1447,14 @@ export default function ScriptFactoryPage() {
       if (linkedTopicAtRequest) {
         linkedTopicAtRequest = resolveTopicForScript(linkedTopicAtRequest.id, requestIP.id);
       }
-      setResult(data);
-      let savedAssetId: string | undefined;
-      if (data.generationStatus === "partial") {
-        if (!data.partialFailure) {
-          throw new Error("部分成功响应缺少失败阶段信息，无法安全保存临时草稿");
-        }
-        const savedAt = new Date().toISOString();
-        const saved = savePartialScriptDraft<ScriptResult>({
-          version: 1,
-          ipId: requestIP.id,
-          topicId: linkedTopicAtRequest?.id,
-          topic: requestedTopic,
-          savedAt,
-          failedStage: data.partialFailure.stage,
-          warning: data.partialFailure.message,
-          generationSettings: {
-            generationMode: requestMode,
-            platform,
-            formatCategory,
-            durationSeconds: duration,
-            goal,
-            videoType,
-            needsStoryboard,
-            needsShootingTips,
-          },
-          result: data,
-        });
-        if (saved) setPartialDraftSavedAt(savedAt);
-        else {
-          setDraftStorageError("核心脚本可以继续查看，但浏览器未能自动保存临时草稿。刷新或离开前请先复制内容。");
-        }
-      } else {
-        const knowledgeTracking = knowledgeRefsAtRequest.length > 0
-          ? {
-              status: "unavailable" as const,
-              candidateKnowledgeEntryIds: knowledgeRefsAtRequest.map(ref => ref.id),
-              verifiedAt: new Date().toISOString(),
-              usages: [] as [],
-            }
-          : undefined;
-        const scriptInput = {
-          ipId: requestIP.id,
-          title: data.titles?.find(item => item.recommended)?.title || data.titles?.[0]?.title || topic,
-          cover: data.coverCopy?.[0] || "",
-          content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
-          status: "草稿" as const,
-          scriptResult: data,
-          knowledgeTracking,
-        };
-        if (activeIPIdRef.current !== requestIP.id) {
-          throw new Error("保存前检测到当前操盘IP已切换，结果未保存。");
-        }
-        if (linkedTopicAtRequest) {
-          savedAssetId = addScriptAssetForTopic({ ...scriptInput, topicId: linkedTopicAtRequest.id }).id;
-        } else {
-          savedAssetId = addScriptAsset(scriptInput).id;
-        }
-        if (!clearPartialScriptDraft(requestIP.id)) {
-          setDraftStorageError("完整脚本已保存，但浏览器未能清除旧的本地临时草稿。");
-        }
-        knowledgeRefsAtRequest.forEach(ref => {
-          recordKnowledgeUsage(ref.id, {
-            module: "脚本工厂",
-            usedAt: new Date().toISOString(),
-            reason: ref.reason,
-            relevanceTier: ref.relevanceTier as "高度相关" | "中度相关" | "低度相关",
-            relevanceReason: ref.relevanceReason,
-            context: requestedTopic,
-          }, "已用于脚本", savedAssetId);
-        });
-      }
-      setLoading(false);
-      if (requestMode === "ip") {
+      let persistedAssetId: string | undefined;
+      let partialDraftPersisted = false;
+      let persistenceCompleted = false;
+      let postGenerationAuditStarted = false;
+      const recordedKnowledgeEntryIds = new Set<string>();
+      const startPostGenerationAudit = (savedAssetId?: string) => {
+        if (requestMode !== "ip" || postGenerationAuditStarted) return;
+        postGenerationAuditStarted = true;
         void runPostGenerationAudit({
           requestSequence,
           requestIP,
@@ -1467,7 +1465,119 @@ export default function ScriptFactoryPage() {
           generatedData: data,
           savedAssetId,
         });
+      };
+      const persistResult = () => {
+        if (persistenceCompleted) return;
+        if (!persistedAssetId) {
+          if (activeIPIdRef.current !== requestIP.id || generationSequenceRef.current !== requestSequence) {
+            throw new Error("人工确认前当前操盘IP已变化，旧结果未保存；请重新生成。");
+          }
+          if (topicContentRef.current.trim() !== requestedTopic) {
+            throw new Error("人工确认前选题内容已变化，旧结果未保存；请重新生成。");
+          }
+          if (linkedTopicAtRequest) {
+            linkedTopicAtRequest = resolveTopicForScript(linkedTopicAtRequest.id, requestIP.id);
+          }
+        }
+        let savedAssetId = persistedAssetId;
+        if (data.generationStatus === "partial") {
+          if (!data.partialFailure) {
+            throw new Error("部分成功响应缺少失败阶段信息，无法安全保存临时草稿");
+          }
+          if (!partialDraftPersisted) {
+            const savedAt = new Date().toISOString();
+            const saved = savePartialScriptDraft<ScriptResult>({
+              version: 1,
+              ipId: requestIP.id,
+              topicId: linkedTopicAtRequest?.id,
+              topic: requestedTopic,
+              savedAt,
+              failedStage: data.partialFailure.stage,
+              warning: data.partialFailure.message,
+              generationSettings: {
+                generationMode: requestMode,
+                platform,
+                formatCategory,
+                durationSeconds: duration,
+                goal,
+                videoType,
+                needsStoryboard,
+                needsShootingTips,
+              },
+              result: data,
+            });
+            if (saved) {
+              partialDraftPersisted = true;
+              setPartialDraftSavedAt(savedAt);
+            } else {
+              setDraftStorageError("核心脚本可以继续查看，但浏览器未能自动保存临时草稿。刷新或离开前请先复制内容。");
+            }
+          }
+        } else {
+          const knowledgeTracking = knowledgeRefsAtRequest.length > 0
+            ? {
+                status: "unavailable" as const,
+                candidateKnowledgeEntryIds: knowledgeRefsAtRequest.map(ref => ref.id),
+                verifiedAt: new Date().toISOString(),
+                usages: [] as [],
+              }
+            : undefined;
+          const scriptInput = {
+            ipId: requestIP.id,
+            title: data.titles?.find(item => item.recommended)?.title || data.titles?.[0]?.title || topic,
+            cover: data.coverCopy?.[0] || "",
+            content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
+            status: "草稿" as const,
+            scriptResult: data,
+            knowledgeTracking,
+          };
+          if (!savedAssetId && activeIPIdRef.current !== requestIP.id) {
+            throw new Error("保存前检测到当前操盘IP已切换，结果未保存。");
+          }
+          if (!savedAssetId) {
+            if (linkedTopicAtRequest) {
+              savedAssetId = addScriptAssetForTopic({ ...scriptInput, topicId: linkedTopicAtRequest.id }).id;
+            } else {
+              savedAssetId = addScriptAsset(scriptInput).id;
+            }
+            persistedAssetId = savedAssetId;
+            setPendingConstraintReview(current => current
+              ? { ...current, phase: "finalizing" }
+              : current);
+            startPostGenerationAudit(savedAssetId);
+          }
+          if (!clearPartialScriptDraft(requestIP.id)) {
+            setDraftStorageError("完整脚本已保存，但浏览器未能清除旧的本地临时草稿。");
+          }
+          knowledgeRefsAtRequest.forEach(ref => {
+            if (recordedKnowledgeEntryIds.has(ref.id)) return;
+            recordKnowledgeUsage(ref.id, {
+              module: "脚本工厂",
+              usedAt: new Date().toISOString(),
+              reason: ref.reason,
+              relevanceTier: ref.relevanceTier as "高度相关" | "中度相关" | "低度相关",
+              relevanceReason: ref.relevanceReason,
+              context: requestedTopic,
+            }, "已用于脚本", savedAssetId);
+            recordedKnowledgeEntryIds.add(ref.id);
+          });
+        }
+        persistenceCompleted = true;
+        setError(null);
+        setPendingConstraintReview(null);
+        startPostGenerationAudit(savedAssetId);
+      };
+      const detection = detectGlobalBlockingConstraints(
+        buildGlobalConstraintReviewText(data),
+        getActiveGlobalBlockingConstraints(window.localStorage),
+      );
+      setResult(data);
+      if (detection.reviewRequired) {
+        setPendingConstraintReview({ detection, persist: persistResult, phase: "awaiting_decision" });
+      } else {
+        persistResult();
       }
+      setLoading(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "脚本生成失败，请重试");
       if (activeIPIdRef.current === requestIP.id) {
@@ -1517,8 +1627,9 @@ export default function ScriptFactoryPage() {
           type="button"
           aria-label="固定脚本生成"
           aria-pressed={generationMode === "standard"}
+          disabled={isConstraintFinalizing}
           onClick={() => switchGenerationMode("standard")}
-          className={`rounded-[12px] px-4 py-3 text-left transition-all ${generationMode === "standard" ? "bg-[#1C1C1B] text-white" : "bg-[#F7F6F2] text-[#555]"}`}
+          className={`rounded-[12px] px-4 py-3 text-left transition-all disabled:cursor-not-allowed disabled:opacity-55 ${generationMode === "standard" ? "bg-[#1C1C1B] text-white" : "bg-[#F7F6F2] text-[#555]"}`}
         >
           <div className="text-[13.5px] font-bold">固定脚本生成</div>
           <div className={`mt-1 text-[11.5px] ${generationMode === "standard" ? "text-white/70" : "text-[#888]"}`}>输入选题后直接生成固定内容包，不检查观点覆盖度。</div>
@@ -1527,8 +1638,9 @@ export default function ScriptFactoryPage() {
           type="button"
           aria-label="IP专属生成"
           aria-pressed={generationMode === "ip"}
+          disabled={isConstraintFinalizing}
           onClick={() => switchGenerationMode("ip")}
-          className={`rounded-[12px] px-4 py-3 text-left transition-all ${generationMode === "ip" ? "bg-[#1C1C1B] text-white" : "bg-[#F7F6F2] text-[#555]"}`}
+          className={`rounded-[12px] px-4 py-3 text-left transition-all disabled:cursor-not-allowed disabled:opacity-55 ${generationMode === "ip" ? "bg-[#1C1C1B] text-white" : "bg-[#F7F6F2] text-[#555]"}`}
         >
           <div className="text-[13.5px] font-bold">IP专属生成</div>
           <div className={`mt-1 text-[11.5px] ${generationMode === "ip" ? "text-white/70" : "text-[#888]"}`}>调用当前IP的原始内容、表达语料和专属规则。</div>
@@ -1696,7 +1808,7 @@ export default function ScriptFactoryPage() {
               需要{formatCategory === "live" ? "直播间布置建议" : "拍摄/呈现建议"}
             </label>
             <button
-              onClick={() => { void handleGenerate(); }} disabled={loading || !topic.trim() || !activeIP || !isLinkedTopicBoundaryAllowed}
+              onClick={() => { void handleGenerate(); }} disabled={loading || isConstraintFinalizing || !topic.trim() || !activeIP || !isLinkedTopicBoundaryAllowed}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
               {loading ? "生成中…" : generationMode === "standard" ? "生成完整内容" : "生成IP专属内容"}
@@ -1724,6 +1836,25 @@ export default function ScriptFactoryPage() {
           {draftStorageError}
         </div>
       )}
+      {pendingConstraintReview?.phase === "finalizing" && (
+        <div className="mb-6 rounded-[14px] border border-[#E8C96A] bg-[#FFF8DC] px-5 py-4 text-[#755700]" role="alert">
+          <div className="text-[13px] font-bold">脚本已保存，后续记录待补全</div>
+          <p className="mt-1 text-[12px] leading-5">你已确认属于合理语境，脚本已经保存；知识使用记录尚未完成，请重试补全。</p>
+          <button
+            type="button"
+            onClick={() => {
+              try {
+                pendingConstraintReview.persist();
+              } catch (persistError) {
+                setError(persistError instanceof Error ? persistError.message : "补全保存记录失败，请重试。");
+              }
+            }}
+            className="mt-3 rounded-[9px] bg-[#1C1C1B] px-3 py-2 text-[12px] font-semibold text-white"
+          >
+            重试完成保存记录
+          </button>
+        </div>
+      )}
       {loading && (
         <div className="py-16 text-center text-[#8A8A86]">
           <div className="mx-auto mb-4 h-9 w-9 animate-spin rounded-full border-4 border-[#EAF3DE] border-t-[#639922]" />
@@ -1748,6 +1879,45 @@ export default function ScriptFactoryPage() {
           />
           <Card>
             <SectionHead num="②">生成结果</SectionHead>
+            {pendingConstraintReview?.phase === "awaiting_decision" && (
+              <div className="mb-5 rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4 text-[#755700]" role="alert">
+                <div className="text-[13px] font-bold">疑似违反通用禁用规则，等待人工确认</div>
+                <p className="mt-1 text-[12px] leading-5">关键词命中不等于已经违规。系统暂未进行语义裁决，当前结果尚未保存。</p>
+                <ul className="mt-2 list-disc pl-5 text-[12px] leading-5">
+                  {pendingConstraintReview.detection.matches.map((match, index) => (
+                    <li key={`${match.ruleId}-${match.start}-${index}`}>
+                      命中片段“{match.matchedText}”：{match.reason}
+                    </li>
+                  ))}
+                </ul>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        pendingConstraintReview.persist();
+                      } catch (persistError) {
+                        setError(persistError instanceof Error ? persistError.message : "人工确认后保存失败，请重试。");
+                      }
+                    }}
+                    className="rounded-[9px] bg-[#1C1C1B] px-3 py-2 text-[12px] font-semibold text-white"
+                  >
+                    确认属于合理语境，继续保存
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingConstraintReview(null);
+                      setResult(null);
+                      void handleGenerate();
+                    }}
+                    className="rounded-[9px] border border-[#D8B94F] bg-white px-3 py-2 text-[12px] font-semibold text-[#755700]"
+                  >
+                    确认违规，重新生成
+                  </button>
+                </div>
+              </div>
+            )}
             <ResultView
               data={result}
               draftSavedAt={partialDraftSavedAt}

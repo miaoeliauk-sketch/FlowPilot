@@ -106,6 +106,12 @@ function installBrowserEnvironment() {
     IS_REACT_ACT_ENVIRONMENT: true,
     React,
   };
+  Object.defineProperty(dom.window.navigator, "locks", {
+    configurable: true,
+    value: {
+      request: async <T,>(_name: string, operation: () => T) => operation(),
+    },
+  });
   const previous = new Map<string, PropertyDescriptor | undefined>();
 
   for (const [key, value] of Object.entries(browserGlobals)) {
@@ -190,6 +196,242 @@ function generatedScript(topic: string, compressionAudit?: Record<string, unknow
     compressionAudit,
   };
 }
+
+async function activateEmotionManipulationConstraint() {
+  const {
+    saveGlobalBlockingConstraintDraft,
+    transitionStoredGlobalBlockingConstraint,
+  } = await import("./global-content-constraint-store");
+  const draft = {
+    schemaVersion: 1,
+    ruleId: "global-constraint-emotional-coercion",
+    sourceKnowledgeEntryId: "knowledge-expression-motive",
+    scope: "all_ips",
+    category: "通用禁用规则",
+    priority: "global_baseline",
+    enforcement: "block",
+    status: "draft",
+    title: "禁止利用无力感进行情绪绑架",
+    canonicalText: "禁止利用受众的无力感进行情绪操纵，迫使其被动接受或行动。",
+    prohibitedIntent: "利用受众无力感迫使其被动接受或行动",
+    allowedBoundaries: ["引用", "批判", "合理语境"],
+    detection: { type: "keyword", matchMode: "any", terms: ["被时代抛弃", "阶级固化"] },
+    humanConfirmation: null,
+    revision: 1,
+    createdAt: "2026-08-29T14:00:00.000Z",
+    updatedAt: "2026-08-29T14:00:00.000Z",
+  };
+  await saveGlobalBlockingConstraintDraft(localStorage, draft);
+  await transitionStoredGlobalBlockingConstraint(localStorage, draft.ruleId, {
+    type: "activate",
+    confirmedBy: "彭彭",
+    at: "2026-08-29T15:00:00.000Z",
+  });
+}
+
+test("命中通用禁用规则时先展示结果但暂缓保存，人工确认合理语境后才保存", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    knowledgeEntry("knowledge-review-timing", "人工复核保存时序", null),
+  ]));
+  await activateEmotionManipulationConstraint();
+  const matchedScript = generatedScript("合理引用测试");
+  matchedScript.outline[0].content = "我们反对用‘被时代抛弃’这种说法贩卖焦虑。";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/knowledge-search") {
+      return new Response(JSON.stringify({
+        results: [{
+          id: "knowledge-review-timing",
+          reason: "适合当前选题",
+          relevanceTier: "高度相关",
+          relevanceReason: "用于验证保存时序",
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/script-factory") {
+      return new Response(JSON.stringify(matchedScript), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const { getKnowledgeEntries, getScriptAssets } = await import("./ip-store");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "合理引用测试",
+    );
+    assert.ok(await view.findByText(/人工复核保存时序/, {}, { timeout: 2500 }));
+    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+
+    assert.ok(await view.findByText("我们反对用‘被时代抛弃’这种说法贩卖焦虑。"));
+    assert.ok(view.getByText("疑似违反通用禁用规则，等待人工确认"));
+    assert.ok(view.getByText(/命中通用禁用规则《禁止利用无力感进行情绪绑架》/));
+    assert.equal(getScriptAssets(SHUIMURAN.id).length, 0);
+    assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 0);
+
+    await user.click(view.getByRole("button", { name: "确认属于合理语境，继续保存" }));
+    await waitFor(() => assert.equal(getScriptAssets(SHUIMURAN.id).length, 1));
+    assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("人工确认违规后丢弃未保存结果并重新生成，只保存后续安全结果", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  await activateEmotionManipulationConstraint();
+  const matchedScript = generatedScript("违规重写测试");
+  matchedScript.outline[0].content = "不马上行动，你就会被时代抛弃。";
+  const safeScript = generatedScript("违规重写测试");
+  safeScript.outline[0].content = "先看清问题，再决定是否行动。";
+  let generationCount = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory") {
+      generationCount += 1;
+      return new Response(JSON.stringify(generationCount === 1 ? matchedScript : safeScript), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const { getScriptAssets } = await import("./ip-store");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "违规重写测试",
+    );
+    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    assert.ok(await view.findByText("不马上行动，你就会被时代抛弃。"));
+    assert.equal(getScriptAssets(SHUIMURAN.id).length, 0);
+
+    await user.click(view.getByRole("button", { name: "确认违规，重新生成" }));
+    assert.ok(await view.findByText("先看清问题，再决定是否行动。"));
+    await waitFor(() => assert.equal(getScriptAssets(SHUIMURAN.id).length, 1));
+    assert.equal(generationCount, 2);
+    assert.equal(view.queryByText("疑似违反通用禁用规则，等待人工确认"), null);
+    assert.match(getScriptAssets(SHUIMURAN.id)[0]?.content ?? "", /先看清问题/);
+    assert.doesNotMatch(getScriptAssets(SHUIMURAN.id)[0]?.content ?? "", /被时代抛弃/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("人工放行后知识记账失败再次确认时不会重复保存脚本", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN, OTHER_IP]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  localStorage.setItem("ipwr:knowledgeEntries", JSON.stringify([
+    knowledgeEntry("knowledge-idempotent-review", "人工放行幂等保护", null),
+  ]));
+  await activateEmotionManipulationConstraint();
+  const matchedScript = generatedScript("人工放行幂等测试");
+  matchedScript.outline[0].content = "我们反对用‘被时代抛弃’制造恐慌。";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/knowledge-search") {
+      return new Response(JSON.stringify({
+        results: [{
+          id: "knowledge-idempotent-review",
+          reason: "适合当前选题",
+          relevanceTier: "高度相关",
+          relevanceReason: "用于验证重复保存保护",
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/script-factory") {
+      return new Response(JSON.stringify(matchedScript), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render, waitFor } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider, useIP } = await import("./ip-context");
+    const { getKnowledgeEntries, getScriptAssets } = await import("./ip-store");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    function SwitchIP() {
+      const { switchIP } = useIP();
+      return <button type="button" onClick={() => switchIP(OTHER_IP.id)}>切换复核IP</button>;
+    }
+
+    const view = render(<IPProvider><SwitchIP /><ScriptFactoryPage /></IPProvider>);
+
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "人工放行幂等测试",
+    );
+    assert.ok(await view.findByText(/人工放行幂等保护/, {}, { timeout: 2500 }));
+    await user.click(view.getByRole("button", { name: "生成完整内容" }));
+    assert.ok(await view.findByText("疑似违反通用禁用规则，等待人工确认"));
+
+    const originalKnowledge = localStorage.getItem("ipwr:knowledgeEntries");
+    localStorage.setItem("ipwr:knowledgeEntries", "{");
+    await user.click(view.getByRole("button", { name: "确认属于合理语境，继续保存" }));
+    await waitFor(() => assert.equal(getScriptAssets(SHUIMURAN.id).length, 1));
+    assert.ok(await view.findByText("脚本已保存，后续记录待补全"));
+    assert.equal(view.queryByRole("button", { name: "确认违规，重新生成" }), null);
+
+    localStorage.setItem("ipwr:knowledgeEntries", originalKnowledge!);
+    const topicInput = view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文");
+    await user.clear(topicInput);
+    await user.type(topicInput, "切换后的新选题");
+    await user.click(view.getByRole("button", { name: "切换复核IP" }));
+    assert.ok(view.getByText("脚本已保存，后续记录待补全"));
+    assert.equal(view.queryByText("我们反对用‘被时代抛弃’制造恐慌。"), null);
+    assert.equal((view.getByRole("button", { name: "生成完整内容" }) as HTMLButtonElement).disabled, true);
+    assert.equal((view.getByRole("button", { name: "IP专属生成" }) as HTMLButtonElement).disabled, true);
+
+    await user.click(view.getByRole("button", { name: "重试完成保存记录" }));
+    await waitFor(() => assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 1));
+    assert.equal(getScriptAssets(SHUIMURAN.id).length, 1);
+    assert.equal(view.queryByText(/知识库数据已损坏，请先恢复备份/), null);
+    await waitFor(() => assert.equal(
+      (view.getByRole("button", { name: "生成完整内容" }) as HTMLButtonElement).disabled,
+      false,
+    ));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
