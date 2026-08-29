@@ -35,7 +35,7 @@ test("命中已启用规则的高风险短语时返回具体片段、位置和�
   const content = "如果不立刻改变，你就会被时代抛弃。";
 
   assert.deepEqual(detectGlobalBlockingConstraints(content, [activeRuleFixture()]), {
-    blocked: true,
+    reviewRequired: true,
     detectionMode: "keyword",
     semanticAssessment: "not_implemented",
     matches: [
@@ -68,7 +68,7 @@ test("同一短语多次出现时逐处报告，停用规则不参与检测", ()
 
   const result = detectGlobalBlockingConstraints(content, [disabledRule, activeRuleFixture()]);
 
-  assert.equal(result.blocked, true);
+  assert.equal(result.reviewRequired, true);
   assert.deepEqual(
     result.matches.map(match => ({ matchedText: match.matchedText, start: match.start, end: match.end })),
     [
@@ -105,11 +105,11 @@ test("多项命中按原文位置返回，未命中时明确放行但不冒充�
   };
   const content = "先说被时代抛弃，再说阶级固化。";
 
-  const blocked = detectGlobalBlockingConstraints(content, [rule]);
-  assert.deepEqual(blocked.matches.map(match => match.matchedText), ["被时代抛弃", "阶级固化"]);
+  const result = detectGlobalBlockingConstraints(content, [rule]);
+  assert.deepEqual(result.matches.map(match => match.matchedText), ["被时代抛弃", "阶级固化"]);
 
   assert.deepEqual(detectGlobalBlockingConstraints("允许反差、悬念和适度焦虑。", [rule]), {
-    blocked: false,
+    reviewRequired: false,
     detectionMode: "keyword",
     semanticAssessment: "not_implemented",
     matches: [],

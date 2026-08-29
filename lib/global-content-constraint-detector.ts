@@ -10,7 +10,7 @@ export interface GlobalBlockingConstraintMatch {
 }
 
 export interface GlobalBlockingConstraintDetectionResult {
-  blocked: boolean;
+  reviewRequired: boolean;
   detectionMode: "keyword";
   semanticAssessment: "not_implemented";
   matches: GlobalBlockingConstraintMatch[];
@@ -52,7 +52,7 @@ export function detectGlobalBlockingConstraints(
   matches.sort((left, right) => left.start - right.start || left.end - right.end);
 
   return {
-    blocked: matches.length > 0,
+    reviewRequired: matches.length > 0,
     detectionMode: "keyword",
     semanticAssessment: "not_implemented",
     matches,
