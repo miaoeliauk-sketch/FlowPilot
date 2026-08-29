@@ -49,7 +49,11 @@ import {
   readEphemeralCognitionContext,
   type EphemeralCognitionContext,
 } from "@/lib/ip-boundary-interview";
-import type { GlobalBlockingConstraintDetectionResult } from "@/lib/global-content-constraint-detector";
+import type {
+  GlobalBlockingConstraintDetectionResult,
+  GlobalBlockingConstraintMatch,
+} from "@/lib/global-content-constraint-detector";
+import type { ScriptFactoryConstraintMatchSource } from "@/lib/script-factory-global-constraint-audit";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -79,6 +83,11 @@ interface GenerationCaseEvidence {
   verificationStatus: string;
   sourceUrl?: string;
 }
+type ScriptFactoryGlobalConstraintReview = Omit<GlobalBlockingConstraintDetectionResult, "matches"> & {
+  matches: Array<GlobalBlockingConstraintMatch & {
+    sources?: ScriptFactoryConstraintMatchSource[];
+  }>;
+};
 interface ScriptResult {
   generationMode?: GenerationMode;
   outputMode?: "default" | "shuimuran-confirmed";
@@ -93,7 +102,7 @@ interface ScriptResult {
   qualityCheck?: ScriptQualityCheck;
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
-  globalConstraintReview?: GlobalBlockingConstraintDetectionResult & { source: "server_ledger" };
+  globalConstraintReview?: ScriptFactoryGlobalConstraintReview & { source: "server_ledger" };
   evidenceAudit?: EvidenceAudit;
   attributionAudit?: ScriptAttributionAudit;
   factAudit?: ScriptFactAudit;
@@ -109,7 +118,7 @@ interface ScriptResult {
 }
 
 interface PendingConstraintReview {
-  detection: GlobalBlockingConstraintDetectionResult;
+  detection: ScriptFactoryGlobalConstraintReview;
   persist: () => void;
   phase: "awaiting_decision" | "finalizing";
 }
@@ -1864,6 +1873,7 @@ export default function ScriptFactoryPage() {
                   {pendingConstraintReview.detection.matches.map((match, index) => (
                     <li key={`${match.ruleId}-${match.start}-${index}`}>
                       命中片段“{match.matchedText}”：{match.reason}
+                      {match.sources?.length ? `（涉及${match.sources.join("、")}）` : ""}
                     </li>
                   ))}
                 </ul>

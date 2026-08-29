@@ -211,6 +211,7 @@ function serverConstraintReview(reviewRequired: boolean) {
           start: 0,
           end: 6,
           reason: "命中通用禁用规则《禁止利用无力感进行情绪绑架》：利用受众无力感进行情绪操纵",
+          sources: ["口播正文", "分镜口播", "分镜字幕"],
         }]
       : [],
     source: "server_ledger",
@@ -350,6 +351,7 @@ test("服务端已启用规则命中脚本时先展示结果但暂缓保存", as
     assert.ok(await view.findByText("我们反对用‘被时代抛弃’这种说法贩卖焦虑。"));
     assert.ok(view.getByText("疑似违反通用禁用规则，等待人工确认"));
     assert.ok(view.getByText(/命中通用禁用规则《禁止利用无力感进行情绪绑架》/));
+    assert.ok(view.getByText(/涉及口播正文、分镜口播、分镜字幕/));
     assert.equal(getScriptAssets(SHUIMURAN.id).length, 0);
     assert.equal(getKnowledgeEntries()[0]?.usageRecords.length, 0);
 

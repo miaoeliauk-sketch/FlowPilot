@@ -65,7 +65,7 @@ import {
   parseStoredIPSourceAnalysis,
   toV1CompatibleItems,
 } from "@/lib/ip-source-analysis-v2";
-import { detectGlobalBlockingConstraints } from "@/lib/global-content-constraint-detector";
+import { auditScriptFactoryGlobalConstraints } from "@/lib/script-factory-global-constraint-audit";
 import { loadServerGlobalConstraintRecords } from "@/lib/global-content-constraint-server";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
@@ -1536,8 +1536,8 @@ ${rawIPBlock}
       }
     }
 
-    const globalConstraintReview = detectGlobalBlockingConstraints(
-      JSON.stringify({
+    const globalConstraintReview = auditScriptFactoryGlobalConstraints(
+      {
         titles: content.titles,
         coverCopy: content.coverCopy,
         outline,
@@ -1546,7 +1546,7 @@ ${rawIPBlock}
         shootingSuggestions,
         shotPrompts,
         editingRhythm,
-      }),
+      },
       activeGlobalConstraints,
     );
     return NextResponse.json({

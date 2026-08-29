@@ -226,6 +226,89 @@ test("脚本工厂只使用服务端已确认规则并返回真实拦截结果",
   }
 });
 
+test("脚本工厂将同一句口播的分镜和字幕副本合并为一条来源明确的命中", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-script-constraint-sources-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = path.join(directory, "ledger.json");
+  const originalFetch = globalThis.fetch;
+  try {
+    const issued = await (await issueGlobalConstraintChallenge(new NextRequest(
+      "http://localhost/api/global-content-constraint/challenge",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+        body: JSON.stringify({ proposalId: "emotional-coercion-v2" }),
+      },
+    ))).json();
+    const confirmationResponse = await confirmGlobalConstraint(new NextRequest(
+      "http://localhost/api/global-content-constraint/confirm",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+        body: JSON.stringify({
+          proposalId: "emotional-coercion-v2",
+          challengeId: issued.challengeId,
+          challenge: issued.challenge,
+          idempotencyKey: "test-script-constraint-source-grouping",
+          confirmedBy: "彭彭",
+          acknowledgement: "我已逐字核对并确认启用",
+        }),
+      },
+    ));
+    assert.equal(confirmationResponse.status, 200);
+
+    const sentence = `${VALID_CONTENT.outline[0]!.content}我们反对用被时代抛弃这种说法贩卖焦虑。`;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return deepSeekResponse(JSON.stringify({
+          ...VALID_CONTENT,
+          outline: VALID_CONTENT.outline.map((item, index) => index === 0
+            ? { ...item, content: sentence }
+            : item),
+        }), "constraint-source-content");
+      }
+      if (calls === 2) return deepSeekResponse(JSON.stringify({ issues: [] }), "constraint-source-review");
+      return deepSeekResponse(JSON.stringify({
+        storyboard: [{
+          time: "0—5秒",
+          scene: "人物正面口播",
+          voiceover: sentence,
+          subtitle: sentence,
+          shot: "中景",
+          material: "",
+          editingTip: "",
+        }],
+        shootingSuggestions: [],
+        shotPrompts: [],
+        editingRhythm: {
+          subtitleHighlights: [],
+          soundEffects: [],
+          screenRecordingCuts: [],
+          caseInserts: [],
+          pauses: [],
+        },
+      }), "constraint-source-storyboard");
+    };
+
+    const response = await POST(requestFor({ needsStoryboard: true }));
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.globalConstraintReview.matches.length, 1);
+    assert.deepEqual(
+      body.globalConstraintReview.matches[0]?.sources,
+      ["口播正文", "分镜口播", "分镜字幕"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("没有IP原始内容也能生成，但提示词禁止冒充老师已确认观点", async () => {
   await withSuccessfulModel(async prompts => {
     const response = await POST(requestFor({ ipSourceContext: [] }));
