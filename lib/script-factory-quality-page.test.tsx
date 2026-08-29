@@ -133,6 +133,13 @@ function completeResponse() {
       ipUsed: ZHAO_DONG.name,
       mockHit: false,
     },
+    globalConstraintReview: {
+      reviewRequired: false,
+      detectionMode: "keyword",
+      semanticAssessment: "not_implemented",
+      matches: [],
+      source: "server_ledger",
+    },
   };
 }
 

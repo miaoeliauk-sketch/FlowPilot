@@ -104,6 +104,13 @@ function createCompleteScriptResponse(ipId: string, ipName: string, topic: strin
       ipUsed: ipName,
       mockHit: false,
     },
+    globalConstraintReview: {
+      reviewRequired: false,
+      detectionMode: "keyword",
+      semanticAssessment: "not_implemented",
+      matches: [],
+      source: "server_ledger",
+    },
   };
 }
 

@@ -49,11 +49,7 @@ import {
   readEphemeralCognitionContext,
   type EphemeralCognitionContext,
 } from "@/lib/ip-boundary-interview";
-import {
-  detectGlobalBlockingConstraints,
-  type GlobalBlockingConstraintDetectionResult,
-} from "@/lib/global-content-constraint-detector";
-import { getActiveGlobalBlockingConstraints } from "@/lib/global-content-constraint-store";
+import type { GlobalBlockingConstraintDetectionResult } from "@/lib/global-content-constraint-detector";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -97,6 +93,7 @@ interface ScriptResult {
   qualityCheck?: ScriptQualityCheck;
   storyboard: StoryboardRow[]; shootingSuggestions: string[]; shotPrompts: ShotPrompt[]; editingRhythm: EditingRhythm;
   apiMeta: ApiMeta;
+  globalConstraintReview?: GlobalBlockingConstraintDetectionResult & { source: "server_ledger" };
   evidenceAudit?: EvidenceAudit;
   attributionAudit?: ScriptAttributionAudit;
   factAudit?: ScriptFactAudit;
@@ -115,26 +112,6 @@ interface PendingConstraintReview {
   detection: GlobalBlockingConstraintDetectionResult;
   persist: () => void;
   phase: "awaiting_decision" | "finalizing";
-}
-
-function buildGlobalConstraintReviewText(data: ScriptResult): string {
-  return [
-    ...data.titles.flatMap(item => [item.title, item.formula, item.whyFitsIP]),
-    ...data.coverCopy,
-    ...data.outline.flatMap(section => [section.label, section.content, ...(section.subPoints ?? [])]),
-    data.commentGuidance.interactionPrompt,
-    ...data.commentGuidance.keywordReplies.flatMap(item => [item.keyword, item.reply]),
-    data.commentGuidance.dmGuidance,
-    data.commentGuidance.materialPackGuidance,
-    ...data.storyboard.flatMap(row => [row.scene, row.voiceover, row.subtitle, row.shot, row.material, row.editingTip]),
-    ...data.shootingSuggestions,
-    ...data.shotPrompts.flatMap(item => [item.scene, item.prompt]),
-    ...data.editingRhythm.subtitleHighlights,
-    ...data.editingRhythm.soundEffects,
-    ...data.editingRhythm.screenRecordingCuts,
-    ...data.editingRhythm.caseInserts,
-    ...data.editingRhythm.pauses,
-  ].filter(value => value.trim()).join("\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1567,10 +1544,10 @@ export default function ScriptFactoryPage() {
         setPendingConstraintReview(null);
         startPostGenerationAudit(savedAssetId);
       };
-      const detection = detectGlobalBlockingConstraints(
-        buildGlobalConstraintReviewText(data),
-        getActiveGlobalBlockingConstraints(window.localStorage),
-      );
+      const detection = data.globalConstraintReview;
+      if (!detection || detection.source !== "server_ledger") {
+        throw new Error("服务端未返回通用强制规则审计结果，脚本已停止保存。");
+      }
       setResult(data);
       if (detection.reviewRequired) {
         setPendingConstraintReview({ detection, persist: persistResult, phase: "awaiting_decision" });

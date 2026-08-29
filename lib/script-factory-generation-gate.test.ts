@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { NextRequest } from "next/server";
+import { POST as issueGlobalConstraintChallenge } from "../app/api/global-content-constraint/challenge/route";
+import { POST as confirmGlobalConstraint } from "../app/api/global-content-constraint/confirm/route";
 import { POST } from "../app/api/script-factory/route";
 import type { IPProfile } from "./types";
 import {
@@ -20,6 +25,8 @@ const IP: IPProfile = {
   usesScreenRecording: false, needsBroll: false, needsCaseScreenshots: false, needsSubtitleHighlight: false,
   sampleViralTitles: [], styleNotes: "", bio: "", color: "#000000", createdAt: "2026-01-01", updatedAt: "2026-01-01",
 };
+
+const OTHER_IP: IPProfile = { ...IP, id: "ip-2", name: "另一个测试IP" };
 
 const VALID_CONTENT = {
   titles: [{
@@ -148,6 +155,75 @@ test("IP专属生成没有覆盖度结果也能直接生成正文", async () => 
     assert.equal(body.attributionAudit, undefined);
     assert.equal(body.factAudit, undefined);
   });
+});
+
+test("脚本工厂只使用服务端已确认规则并返回真实拦截结果", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-script-constraint-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = path.join(directory, "ledger.json");
+  const originalFetch = globalThis.fetch;
+  try {
+    const challengeResponse = await issueGlobalConstraintChallenge(new NextRequest(
+      "http://localhost/api/global-content-constraint/challenge",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+        body: JSON.stringify({ proposalId: "emotional-coercion-v2" }),
+      },
+    ));
+    const issued = await challengeResponse.json();
+    const confirmationResponse = await confirmGlobalConstraint(new NextRequest(
+      "http://localhost/api/global-content-constraint/confirm",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+        body: JSON.stringify({
+          proposalId: "emotional-coercion-v2",
+          challengeId: issued.challengeId,
+          challenge: issued.challenge,
+          idempotencyKey: "test-script-runtime-confirmation",
+          confirmedBy: "彭彭",
+          acknowledgement: "我已逐字核对并确认启用",
+        }),
+      },
+    ));
+    assert.equal(confirmationResponse.status, 200);
+
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return deepSeekResponse(JSON.stringify({
+          ...VALID_CONTENT,
+          outline: VALID_CONTENT.outline.map((item, index) => index === 0
+            ? { ...item, content: `${item.content}不马上行动，你就会被时代抛弃，永远失去改变命运的机会。普通人现在只能立刻照做。` }
+            : item),
+        }), "constraint-content");
+      }
+      return deepSeekResponse(JSON.stringify({ issues: [] }), `constraint-review-${calls}`);
+    };
+
+    const response = await POST(requestFor());
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.globalConstraintReview.reviewRequired, true);
+    assert.equal(body.globalConstraintReview.source, "server_ledger");
+    assert.equal(body.globalConstraintReview.matches[0]?.ruleId, "global-constraint-emotional-coercion-v2");
+
+    calls = 0;
+    const otherResponse = await POST(requestFor({ ipProfile: OTHER_IP }));
+    const otherBody = await otherResponse.json();
+    assert.equal(otherResponse.status, 200);
+    assert.equal(otherBody.globalConstraintReview.reviewRequired, true);
+    assert.equal(otherBody.globalConstraintReview.source, "server_ledger");
+    assert.equal(otherBody.globalConstraintReview.matches[0]?.ruleId, "global-constraint-emotional-coercion-v2");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("没有IP原始内容也能生成，但提示词禁止冒充老师已确认观点", async () => {

@@ -65,6 +65,8 @@ import {
   parseStoredIPSourceAnalysis,
   toV1CompatibleItems,
 } from "@/lib/ip-source-analysis-v2";
+import { detectGlobalBlockingConstraints } from "@/lib/global-content-constraint-detector";
+import { loadServerGlobalConstraintRecords } from "@/lib/global-content-constraint-server";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -733,6 +735,18 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
   const persistentSourceReferences = sourceContextResult.items;
+  let activeGlobalConstraints;
+  try {
+    activeGlobalConstraints = (await loadServerGlobalConstraintRecords())
+      .map(record => record.rule)
+      .filter(rule => rule.status === "active");
+  } catch {
+    return NextResponse.json({
+      error: "全局强制规则状态暂时无法核实，已停止生成。",
+      errorCode: "GLOBAL_CONSTRAINT_LEDGER_UNAVAILABLE",
+      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+    }, { status: 500 });
+  }
   const sourceProofResult = await verifyScriptFactoryIPSourceContext(persistentSourceReferences, ip.id);
   if (!sourceProofResult.ok) {
     return NextResponse.json({
@@ -1522,6 +1536,19 @@ ${rawIPBlock}
       }
     }
 
+    const globalConstraintReview = detectGlobalBlockingConstraints(
+      JSON.stringify({
+        titles: content.titles,
+        coverCopy: content.coverCopy,
+        outline,
+        commentGuidance: content.commentGuidance,
+        storyboard,
+        shootingSuggestions,
+        shotPrompts,
+        editingRhythm,
+      }),
+      activeGlobalConstraints,
+    );
     return NextResponse.json({
       generationMode,
       outputMode: isShuimuranDedicatedGeneration ? "shuimuran-confirmed" : "default",
@@ -1554,6 +1581,10 @@ ${rawIPBlock}
         ? { ...apiMeta, error: partialFailure.message }
         : apiMeta,
       corpusDebug,
+      globalConstraintReview: {
+        ...globalConstraintReview,
+        source: "server_ledger",
+      },
     });
   } catch (err) {
     const message = getErrorMessage(err);

@@ -10,6 +10,7 @@ import {
   type KnowledgeLibraryTrustStatus,
 } from "@/lib/knowledge-library-view";
 import { KnowledgeDetailPanel } from "@/components/knowledge/KnowledgeDetailPanel";
+import { GlobalConstraintConfirmationPanel } from "@/components/knowledge/GlobalConstraintConfirmationPanel";
 import {
   deleteKnowledgeEntryFromLibrary,
   getKnowledgeDeletionPreview,
@@ -36,6 +37,7 @@ export function KnowledgeLibraryBrowser({
   const [trustStatus, setTrustStatus] = useState<KnowledgeLibraryTrustStatus | "">("");
   const [sourceKind, setSourceKind] = useState<KnowledgeLibrarySourceKind | "">("");
   const [selectedItem, setSelectedItem] = useState<KnowledgeLibraryItem | null>(null);
+  const [showGlobalConstraintConfirmation, setShowGlobalConstraintConfirmation] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [jumpPage, setJumpPage] = useState("1");
 
@@ -45,6 +47,7 @@ export function KnowledgeLibraryBrowser({
     setTrustStatus("");
     setSourceKind("");
     setSelectedItem(null);
+    setShowGlobalConstraintConfirmation(false);
     setCurrentPage(1);
     setJumpPage("1");
     try {
@@ -117,7 +120,16 @@ export function KnowledgeLibraryBrowser({
             这里只陈列来源、可信度和真实效果证据，不替你判断知识是否有效。
           </p>
         </div>
-        <span className="text-[12px] text-[#8A8A86]">共{items.length}条</span>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowGlobalConstraintConfirmation(true)}
+            className="rounded-[9px] border border-[#D9B56D] bg-[#FFF9ED] px-3 py-2 text-[12px] font-semibold text-[#6B5122]"
+          >
+            查看待确认V2强制底线
+          </button>
+          <span className="text-[12px] text-[#8A8A86]">共{items.length}条</span>
+        </div>
       </div>
 
       <div className="grid gap-2 rounded-[14px] border border-[#E5E4DE] bg-white p-3 md:grid-cols-4">
@@ -300,6 +312,9 @@ export function KnowledgeLibraryBrowser({
           })}
           onDelete={() => handleDelete(selectedItem)}
         />
+      )}
+      {showGlobalConstraintConfirmation && (
+        <GlobalConstraintConfirmationPanel onClose={() => setShowGlobalConstraintConfirmation(false)} />
       )}
     </section>
   );
