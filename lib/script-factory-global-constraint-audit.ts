@@ -109,12 +109,14 @@ export function auditScriptFactoryGlobalConstraints(
   rules: readonly unknown[],
 ) {
   const grouped = new Map<string, ScriptFactoryConstraintMatch>();
+  const equivalentMatchCanonical = new Map<string, { surfaceId: string; logicalKey: string }>();
 
   function addSurface(
     id: string,
     source: ScriptFactoryConstraintMatchSource,
     text: string,
     parentCandidates: readonly AuditedSurface[] = [],
+    mergeEquivalentAcrossSurfaces = false,
   ): AuditedSurface {
     const parent = text ? uniqueRelatedParent(text, parentCandidates) : null;
     const detection = detectGlobalBlockingConstraints(text, rules);
@@ -133,8 +135,17 @@ export function auditScriptFactoryGlobalConstraints(
             && candidate.match.start === parent.parentTextOffset + relativeStart
             && candidate.match.end === parent.parentTextOffset + relativeEnd)
           : undefined;
+        const equivalentKey = mergeEquivalentAcrossSurfaces
+          ? `${source}\u0000${match.ruleId}\u0000${match.matchedText}`
+          : null;
+        const canonical = equivalentKey ? equivalentMatchCanonical.get(equivalentKey) : undefined;
         const logicalKey = parentOccurrence?.logicalKey
-          ?? `${id}:${match.ruleId}:${match.start}:${match.end}`;
+          ?? (canonical && canonical.surfaceId !== id
+            ? canonical.logicalKey
+            : `${id}:${match.ruleId}:${match.start}:${match.end}`);
+        if (equivalentKey && !canonical) {
+          equivalentMatchCanonical.set(equivalentKey, { surfaceId: id, logicalKey });
+        }
         const existing = grouped.get(logicalKey);
         if (existing) {
           if (!existing.sources.includes(source)) existing.sources.push(source);
@@ -148,11 +159,11 @@ export function auditScriptFactoryGlobalConstraints(
   }
 
   input.titles.forEach((item, index) => {
-    addSurface(`title:${index}:title`, "标题", item.title);
-    addSurface(`title:${index}:formula`, "标题", item.formula ?? "");
-    addSurface(`title:${index}:platform`, "标题", item.platform ?? "");
-    addSurface(`title:${index}:why`, "标题", item.whyFitsIP ?? "");
-    addSurface(`title:${index}:role`, "标题", item.role ?? "");
+    addSurface(`title:${index}:title`, "标题", item.title, [], true);
+    addSurface(`title:${index}:formula`, "标题", item.formula ?? "", [], true);
+    addSurface(`title:${index}:platform`, "标题", item.platform ?? "", [], true);
+    addSurface(`title:${index}:why`, "标题", item.whyFitsIP ?? "", [], true);
+    addSurface(`title:${index}:role`, "标题", item.role ?? "", [], true);
   });
   input.coverCopy.forEach((text, index) => addSurface(`cover:${index}`, "封面文案", text));
   const outlineSurfaces = input.outline.map((item, index) => {

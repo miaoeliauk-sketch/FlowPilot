@@ -152,3 +152,35 @@ test("标题说明和口播结构字段保持原有审计覆盖面", () => {
   assert.equal(result.matches.length, 2);
   assert.deepEqual(result.matches.map(match => match.sources), [["标题"], ["口播正文"]]);
 });
+
+test("多个标题候选产生完全相同的命中时只展示一条标题记录", () => {
+  const input = {
+    ...emptyAuditInput(),
+    titles: [
+      { title: "别再用被时代抛弃制造焦虑" },
+      { title: "别再用被时代抛弃制造焦虑" },
+    ],
+  };
+
+  const result = auditScriptFactoryGlobalConstraints(input, [activeRuleFixture()]);
+
+  assert.equal(result.matches.length, 1);
+  assert.deepEqual(result.matches[0]?.sources, ["标题"]);
+  assert.equal(result.matches[0]?.matchedText, "被时代抛弃");
+});
+
+test("同一标题句子中的真实多次命中保留且标题说明副本不重复展示", () => {
+  const input = {
+    ...emptyAuditInput(),
+    titles: [{
+      title: "担心被时代抛弃，不等于可以警告别人会被时代抛弃",
+      formula: "被时代抛弃",
+    }],
+  };
+
+  const result = auditScriptFactoryGlobalConstraints(input, [activeRuleFixture()]);
+
+  assert.equal(result.matches.length, 2);
+  assert.deepEqual(result.matches.map(match => match.sources), [["标题"], ["标题"]]);
+  assert.notEqual(result.matches[0]?.start, result.matches[1]?.start);
+});
