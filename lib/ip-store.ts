@@ -981,14 +981,22 @@ export function addScriptAsset(input: NewScriptAssetInput): ScriptAsset {
   return asset;
 }
 
-export function updateScriptAssetResult(id: string, ipId: string, scriptResult: unknown): boolean {
+export function updateScriptAssetResult(id: string, ipId: string, scriptResult: unknown, content?: string): boolean {
   const all = readJSON<ScriptAsset[]>(KEY_SCRIPT_ASSETS, []);
   const target = all.find(asset => asset.id === id);
   if (!target || target.ipId !== ipId) return false;
-  writeJSON(KEY_SCRIPT_ASSETS, all.map(asset =>
-    asset.id === id ? { ...asset, scriptResult } : asset
-  ));
-  return true;
+  try {
+    writeJSONStrict(
+      KEY_SCRIPT_ASSETS,
+      all.map(asset => asset.id === id
+        ? { ...asset, scriptResult, ...(content === undefined ? {} : { content }) }
+        : asset),
+      "脚本历史记录写入失败",
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function deleteScriptAsset(id: string): void {

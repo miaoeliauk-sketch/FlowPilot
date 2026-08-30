@@ -73,13 +73,12 @@ test("生成后审计独立返回覆盖度、段落归属和事实核验", async
         sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
         reason: "段落忠实承接老师原始判断。",
       }],
+      integrityIssues: [],
     }), "attribution");
   };
 
   try {
     const response = await POST(request({
-      topic: "变化背后的原因",
-      angle: "从判断方式切入",
       sources: SOURCES,
       content: CONTENT,
       caseEvidence: null,
@@ -88,10 +87,13 @@ test("生成后审计独立返回覆盖度、段落归属和事实核验", async
 
     assert.equal(response.status, 200);
     assert.equal(body.status, "completed");
+    assert.match(body.auditVersion, /^[a-f0-9]{64}$/);
     assert.equal(body.coverageAssessment.coverage, "FULL");
     assert.equal(body.attributionAudit.auditStatus, "completed");
     assert.equal(body.attributionAudit.confidenceLevel, "high");
     assert.equal(body.attributionAudit.paragraphAttributions[0].attributionType, "faithful_rewrite");
+    assert.equal(body.sourceIntegrityAudit.status, "passed");
+    assert.equal(body.sourceIntegrityAudit.deliveryBlocked, false);
     assert.equal(body.factAudit.overallStatus, "pending");
     assert.deepEqual(body.factAudit.pendingItems, ["案例中的增长数字仍需核验"]);
   } finally {
@@ -109,8 +111,6 @@ test("覆盖度分析失败时返回分析未完成并保留独立事实核验",
 
   try {
     const response = await POST(request({
-      topic: "变化背后的原因",
-      angle: "从判断方式切入",
       sources: SOURCES,
       content: CONTENT,
       caseEvidence: null,
@@ -154,8 +154,6 @@ test("段落归属分析失败时保留覆盖度结果并返回分析未完成",
 
   try {
     const response = await POST(request({
-      topic: "变化背后的原因",
-      angle: "从判断方式切入",
       sources: SOURCES,
       content: CONTENT,
       caseEvidence: null,
@@ -163,7 +161,7 @@ test("段落归属分析失败时保留覆盖度结果并返回分析未完成",
     const body = await response.json();
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 2);
+    assert.equal(calls, 3, "技术性解析失败允许重试一次，但不会触发正文改写");
     assert.equal(body.status, "unavailable");
     assert.equal(body.message, "本次归属分析暂未完成");
     assert.equal(body.coverageAssessment.coverage, "FULL");
@@ -189,6 +187,96 @@ test("生成后审计拒绝非法请求且不调用模型", async () => {
     assert.equal(response.status, 400);
     assert.equal(body.error, "请求格式错误");
     assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("生成后审计物理拒绝IP风格等非证据字段且不调用模型", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return deepSeekResponse("{}", "unexpected");
+  };
+
+  try {
+    for (const forbidden of [
+      { styleProfile: { tone: "沉稳" } },
+      { contentPurpose: "建立信任" },
+      { maturity: "成熟需求" },
+      { formatCategory: "人物访谈" },
+      { challengeResponse: "用户已经确认" },
+      { topic: "不应由审计接口接收的选题" },
+      { angle: "不应由审计接口接收的切入角度" },
+      { sources: SOURCES.map(source => ({ ...source, ipStyle: "沉稳" })) },
+      { content: { ...CONTENT, contentPurpose: "建立信任" } },
+    ]) {
+      const response = await POST(request({
+        sources: SOURCES,
+        content: CONTENT,
+        caseEvidence: null,
+        ...forbidden,
+      }));
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error, "审计接口只接受正文与证据字段");
+    }
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("生成后审计命中表述失真时阻止交付但不自动改写正文", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify({
+        coverage: "FULL",
+        reason: "素材包含相关判断和推理。",
+        coveredDimensions: ["核心判断", "推理过程"],
+        missingDimensions: [],
+        sourceReferences: [
+          { sourceId: "source-1", itemId: "claim-1" },
+          { sourceId: "source-1", itemId: "reasoning-1" },
+        ],
+        caseNeed: "NOT_NEEDED",
+        caseReason: "不需要案例。",
+      }), "coverage-integrity");
+    }
+    return deepSeekResponse(JSON.stringify({
+      paragraphs: [{
+        paragraphId: "S1-P1",
+        attributionType: "faithful_rewrite",
+        sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+        reason: "正文与原素材相关。",
+      }],
+      integrityIssues: [{
+        code: "responsibility_subject_distortion",
+        paragraphId: "S1-P1",
+        sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+        reason: "外部质疑被改写成当事人本人前后矛盾。",
+      }],
+    }), "attribution-integrity");
+  };
+
+  try {
+    const response = await POST(request({
+      sources: SOURCES,
+      content: CONTENT,
+      caseEvidence: null,
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.status, "completed");
+    assert.equal(body.sourceIntegrityAudit.status, "needs_review");
+    assert.equal(body.sourceIntegrityAudit.deliveryBlocked, true);
+    assert.equal(body.sourceIntegrityAudit.issues[0].code, "responsibility_subject_distortion");
+    assert.equal(body.sourceIntegrityAudit.issues[0].excerpt, CONTENT.outline[0].content);
+    assert.equal(calls, 2, "审计失败后不得自动发起第三次改写调用");
   } finally {
     globalThis.fetch = originalFetch;
   }

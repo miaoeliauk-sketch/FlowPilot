@@ -23,6 +23,8 @@ import type {
   ScriptPartialFailure,
   ScriptPostGenerationAudit,
   ScriptQualityCheck,
+  ScriptSourceIntegrityAudit,
+  SourceIntegrityIssue,
 } from "@/lib/script-factory-contract";
 import { parseScriptPostGenerationAudit } from "@/lib/script-factory-contract";
 import { addScriptAssetForTopic, resolveTopicForScript, TopicScriptLinkError } from "@/lib/topic-script-link";
@@ -54,6 +56,12 @@ import type {
   GlobalBlockingConstraintMatch,
 } from "@/lib/global-content-constraint-detector";
 import type { ScriptFactoryConstraintMatchSource } from "@/lib/script-factory-global-constraint-audit";
+import {
+  applyManualScriptRewrite,
+  type ScriptManualRewriteAction,
+  type ScriptManualRewriteRecord,
+} from "@/lib/script-factory-manual-rewrite";
+import { getScriptDeliveryBlockReason } from "@/lib/script-factory-delivery";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
@@ -105,9 +113,13 @@ interface ScriptResult {
   globalConstraintReview?: ScriptFactoryGlobalConstraintReview & { source: "server_ledger" };
   evidenceAudit?: EvidenceAudit;
   attributionAudit?: ScriptAttributionAudit;
+  sourceIntegrityAudit?: ScriptSourceIntegrityAudit;
   factAudit?: ScriptFactAudit;
   postGenerationAuditStatus?: ScriptPostGenerationAudit["status"];
   postGenerationAuditMessage?: string;
+  auditVersion?: string;
+  scriptAssetId?: string;
+  manualRewrite?: ScriptManualRewriteRecord;
   generationApproval?: {
     coverage: CoverageAssessment["coverage"];
     outputStatus: ScriptOutputStatus;
@@ -198,11 +210,21 @@ function normalizeStoredCompleteScriptResult(value: unknown): ScriptResult | nul
 }
 
 function normalizeRestoredAuditState(result: ScriptResult): ScriptResult {
-  if (result.postGenerationAuditStatus !== "pending") return result;
+  const requiresV13Audit = result.generationMode === "ip"
+    || result.outputMode === "shuimuran-confirmed"
+    || result.postGenerationAuditStatus !== undefined
+    || result.attributionAudit !== undefined;
+  const hasV13Audit = result.postGenerationAuditStatus === "completed"
+    && Boolean(result.auditVersion)
+    && Boolean(result.sourceIntegrityAudit);
+  if (!requiresV13Audit || hasV13Audit) return result;
   return {
     ...result,
     postGenerationAuditStatus: "unavailable",
-    postGenerationAuditMessage: "本次归属分析暂未完成，不影响正文使用",
+    postGenerationAuditMessage: "本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付",
+    auditVersion: undefined,
+    attributionAudit: undefined,
+    sourceIntegrityAudit: undefined,
   };
 }
 
@@ -279,6 +301,12 @@ const ATTRIBUTION_LABELS = {
   case_fact: "案例事实补充",
 } as const;
 
+const SOURCE_INTEGRITY_LABELS = {
+  responsibility_subject_distortion: "责任主体失真",
+  unsupported_arbitration: "仲裁结论无出处",
+  certainty_shift: "素材确定度被改变",
+} as const;
+
 const OUTPUT_STATUS_LABELS: Record<ScriptOutputStatus, string> = {
   formal: "正式稿",
   review: "待审核稿",
@@ -305,14 +333,30 @@ function CompressionReviewInfo({ audit }: { audit?: ScriptCompressionAudit }) {
   );
 }
 
-function TeamReviewPanel({ data }: { data: ScriptResult }) {
+function TeamReviewPanel({
+  data,
+  onManualRewrite,
+}: {
+  data: ScriptResult;
+  onManualRewrite?: (
+    issue: SourceIntegrityIssue,
+    action: ScriptManualRewriteAction,
+    replacement: string,
+    deleteConfirmed: boolean,
+  ) => void;
+}) {
   const attribution = data.attributionAudit;
   const fact = data.factAudit;
+  const integrity = data.sourceIntegrityAudit;
+  const displayedOutputStatus = integrity?.deliveryBlocked ? "review" : attribution?.outputStatus;
+  const [editingIssueIndex, setEditingIssueIndex] = useState<number | null>(null);
+  const [deletingIssueIndex, setDeletingIssueIndex] = useState<number | null>(null);
+  const [replacement, setReplacement] = useState("");
   if (data.postGenerationAuditStatus === "pending") {
     return (
       <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-4">
         <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
-        <p className="mt-2 text-[12.5px] text-[#666]">观点归属分析中，不影响正文使用</p>
+        <p className="mt-2 text-[12.5px] text-[#666]">观点归属分析中。正文可查看，审计完成前不得视为正式交付</p>
         <CompressionReviewInfo audit={data.compressionAudit} />
       </section>
     );
@@ -321,7 +365,7 @@ function TeamReviewPanel({ data }: { data: ScriptResult }) {
     return (
       <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4">
         <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
-        <p className="mt-2 text-[12.5px] text-[#755700]">{data.postGenerationAuditMessage ?? "本次归属分析暂未完成，不影响正文使用"}</p>
+        <p className="mt-2 text-[12.5px] text-[#755700]">{data.postGenerationAuditMessage ?? "本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付"}</p>
         <CompressionReviewInfo audit={data.compressionAudit} />
       </section>
     );
@@ -339,11 +383,90 @@ function TeamReviewPanel({ data }: { data: ScriptResult }) {
   return (
     <section aria-label="团队审核信息" className="rounded-[12px] border border-[#D9E8C7] bg-[#FBFEF7] p-4">
       <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
+      {integrity?.deliveryBlocked && (
+        <div className="mt-3 rounded-[10px] border border-[#D98C8C] bg-[#FFF1F1] p-3 text-[#7A2525]" role="alert">
+          <div className="text-[12.5px] font-bold">出处审计未通过，当前稿件暂停交付</div>
+          <p className="mt-1 text-[11.5px] leading-5">系统没有自动改稿。你可以对其中一处执行一次人工替换或删除，完成后系统只重新审计，不会继续循环改写。</p>
+          <div className="mt-3 flex flex-col gap-3">
+            {integrity.issues.map((issue, index) => (
+              <div key={`${issue.code}-${issue.sectionIndex}-${issue.paragraphIndex}-${index}`} className="rounded-[9px] bg-white p-3">
+                <div className="text-[12px] font-bold">{SOURCE_INTEGRITY_LABELS[issue.code]}</div>
+                <p className="mt-1 text-[11.5px] leading-5">原文：{issue.excerpt}</p>
+                <p className="mt-1 text-[11.5px] leading-5 text-[#8A4545]">{issue.reason}</p>
+                {data.manualRewrite ? (
+                  <p className="mt-2 text-[11.5px] font-semibold">这份脚本已经使用过一次人工处理机会；如果复审仍未通过，请在系统外人工编辑。</p>
+                ) : onManualRewrite ? (
+                  <div className="mt-2">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingIssueIndex(index);
+                          setDeletingIssueIndex(null);
+                          setReplacement(issue.excerpt);
+                        }}
+                        className="rounded-[8px] bg-[#1C1C1B] px-3 py-1.5 text-[11.5px] font-semibold text-white"
+                      >
+                        人工替换
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeletingIssueIndex(index);
+                          setEditingIssueIndex(null);
+                        }}
+                        className="rounded-[8px] border border-[#C87D7D] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#7A2525]"
+                      >
+                        删除这段
+                      </button>
+                    </div>
+                    {editingIssueIndex === index && (
+                      <div className="mt-3">
+                        <textarea
+                          aria-label="替换后的正文"
+                          value={replacement}
+                          onChange={event => setReplacement(event.target.value)}
+                          className="min-h-[100px] w-full rounded-[8px] border border-[#D8B2B2] p-2.5 text-[12px] leading-5 text-[#333]"
+                        />
+                        <div className="mt-2 flex gap-2">
+                          <button type="button" onClick={() => {
+                            onManualRewrite(issue, "replace", replacement, false);
+                            setEditingIssueIndex(null);
+                          }} className="rounded-[8px] bg-[#1C1C1B] px-3 py-1.5 text-[11.5px] font-semibold text-white">确认替换</button>
+                          <button type="button" onClick={() => setEditingIssueIndex(null)} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">取消</button>
+                        </div>
+                      </div>
+                    )}
+                    {deletingIssueIndex === index && (
+                      <div className="mt-3 rounded-[8px] border border-[#C87D7D] bg-[#FFF7F7] p-3">
+                        <div className="text-[11.5px] font-bold">请确认：将删除以下原文，删除后无法在本页面撤销。</div>
+                        <p className="mt-1 text-[11.5px] leading-5">{issue.excerpt}</p>
+                        <div className="mt-2 flex gap-2">
+                          <button type="button" onClick={() => {
+                            onManualRewrite(issue, "delete", "", true);
+                            setDeletingIssueIndex(null);
+                          }} className="rounded-[8px] bg-[#8A2F2F] px-3 py-1.5 text-[11.5px] font-semibold text-white">确认删除这段原文</button>
+                          <button type="button" onClick={() => setDeletingIssueIndex(null)} className="rounded-[8px] bg-white px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">取消</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {data.manualRewrite && !integrity?.deliveryBlocked && (
+        <div className="mt-3 rounded-[9px] bg-[#EEF6E7] p-3 text-[11.5px] font-semibold text-[#3B6D11]">
+          这份脚本已经使用过一次人工处理机会，复审已通过。
+        </div>
+      )}
       <div className="mt-3 grid gap-3 md:grid-cols-3">
         <div className="rounded-[10px] bg-white p-3">
           <div className="text-[11px] font-bold text-[#888]">整篇观点归属</div>
           <div className="mt-1 text-[13px] font-semibold text-[#1C1C1B]">
-            {OUTPUT_STATUS_LABELS[attribution.outputStatus]} · 置信度{CONFIDENCE_LABELS[attribution.confidenceLevel]}
+            {displayedOutputStatus ? OUTPUT_STATUS_LABELS[displayedOutputStatus] : "待审核稿"} · 置信度{CONFIDENCE_LABELS[attribution.confidenceLevel]}
           </div>
           {attribution.missingDimensions.length > 0 && <p className="mt-2 text-[11.5px] leading-5 text-[#8A6515]">具体缺口：{attribution.missingDimensions.join("、")}</p>}
           <p className="mt-2 text-[11.5px] leading-5 text-[#666]">{attribution.recommendation}</p>
@@ -384,14 +507,27 @@ function ResultView({
   compact = false,
   draftSavedAt = null,
   onClearDraft,
+  onManualRewrite,
 }: {
   data: ScriptResult;
   compact?: boolean;
   draftSavedAt?: string | null;
   onClearDraft?: () => void;
+  onManualRewrite?: (
+    issue: SourceIntegrityIssue,
+    action: ScriptManualRewriteAction,
+    replacement: string,
+    deleteConfirmed: boolean,
+  ) => void;
 }) {
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const deliveryBlockReason = getScriptDeliveryBlockReason(data);
+  const copyBlocked = deliveryBlockReason !== null;
   const copySpokenScript = async () => {
+    if (copyBlocked) {
+      setCopyStatus(`${deliveryBlockReason}，不能复制交付正文`);
+      return;
+    }
     const title = data.titles[0]?.title?.trim();
     const script = data.outline.map(section => section.content).join("\n\n");
     const text = [title ? `标题：${title}` : "", script].filter(Boolean).join("\n\n");
@@ -403,7 +539,7 @@ function ResultView({
     }
   };
   const reviewPanel = data.attributionAudit || data.factAudit || data.generationMode === "ip" || data.generationMode === undefined
-    ? <TeamReviewPanel data={data} />
+    ? <TeamReviewPanel data={data} onManualRewrite={onManualRewrite} />
     : null;
 
   if (data.outputMode === "shuimuran-confirmed") {
@@ -421,7 +557,7 @@ function ResultView({
         <div>
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-[12px] font-bold text-[#888]">完整口播文案：</div>
-            <button type="button" onClick={() => void copySpokenScript()} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">复制正文</button>
+            <button type="button" disabled={copyBlocked} onClick={() => void copySpokenScript()} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555] disabled:cursor-not-allowed disabled:opacity-50">{copyBlocked ? "审核通过后可复制" : "复制正文"}</button>
           </div>
           <div className="whitespace-pre-wrap rounded-[10px] border border-[#F0EFE9] p-4 text-[13px] leading-7 text-[#333]">
             {fullScript}
@@ -501,7 +637,9 @@ function ResultView({
             </div>
           ))}
           <p className="mt-2 text-[11.5px] text-[#8A6B13]">
-            脚本仍可继续查看和使用，建议正式发布前完成核对。
+            {data.qualityCheck.warnings.some(warning => warning.code === "shuimuran_review_failed" || warning.code === "shuimuran_review_unavailable")
+              ? "脚本未通过现有终审，系统没有自动改稿；人工处理并重新生成前不得正式交付。"
+              : "脚本仍可继续查看和使用，建议正式发布前完成核对。"}
           </p>
         </div>
       )}
@@ -552,7 +690,7 @@ function ResultView({
       <div>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-[12px] font-bold text-[#888]">{data.outputLabels.outline}（{data.outline.length}个阶段）</div>
-          {!compact && <button type="button" onClick={() => void copySpokenScript()} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555]">复制正文</button>}
+          {!compact && <button type="button" disabled={copyBlocked} onClick={() => void copySpokenScript()} className="rounded-[8px] bg-[#F2F1ED] px-3 py-1.5 text-[11.5px] font-semibold text-[#555] disabled:cursor-not-allowed disabled:opacity-50">{copyBlocked ? "审核通过后可复制" : "复制正文"}</button>}
         </div>
         <div className="flex flex-col gap-2">
           {(compact ? data.outline.slice(0, 3) : data.outline).map((seg, i) => (
@@ -1032,7 +1170,10 @@ export default function ScriptFactoryPage() {
     if (!storedResult) {
       return "保存的脚本数据不完整，无法恢复到脚本工厂。";
     }
-    const savedResult = normalizeRestoredAuditState(storedResult);
+    const savedResult = {
+      ...normalizeRestoredAuditState(storedResult),
+      scriptAssetId: script.id,
+    };
     if (savedResult.ipId !== expectedIPId) {
       return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
     }
@@ -1278,8 +1419,6 @@ export default function ScriptFactoryPage() {
   async function runPostGenerationAudit({
     requestSequence,
     requestIP,
-    requestedTopic,
-    requestedAngle,
     sources,
     caseEvidence,
     generatedData,
@@ -1287,8 +1426,6 @@ export default function ScriptFactoryPage() {
   }: {
     requestSequence: number;
     requestIP: IPProfile;
-    requestedTopic: string;
-    requestedAngle: string;
     sources: ReturnType<typeof getIPSourceContext>;
     caseEvidence: GenerationCaseEvidence | null;
     generatedData: ScriptResult;
@@ -1300,9 +1437,15 @@ export default function ScriptFactoryPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          topic: requestedTopic,
-          angle: requestedAngle,
-          sources,
+          sources: sources.map(source => ({
+            sourceId: source.sourceId,
+            sourceTitle: source.sourceTitle,
+            itemId: source.itemId,
+            kind: source.kind,
+            content: source.content,
+            originalExcerpt: source.originalExcerpt,
+            extractionStatus: source.extractionStatus,
+          })),
           content: {
             outline: generatedData.outline.map(section => ({
               ...section,
@@ -1310,7 +1453,13 @@ export default function ScriptFactoryPage() {
             })),
             pendingVerification: generatedData.pendingVerification ?? [],
           },
-          caseEvidence,
+          caseEvidence: caseEvidence ? {
+            title: caseEvidence.title,
+            content: caseEvidence.content,
+            sourceType: caseEvidence.sourceType,
+            verificationStatus: caseEvidence.verificationStatus,
+            sourceUrl: caseEvidence.sourceUrl,
+          } : null,
         }),
       });
       const audit = parseScriptPostGenerationAudit(await response.json());
@@ -1318,26 +1467,35 @@ export default function ScriptFactoryPage() {
       if (audit.status === "completed") {
         auditedData = {
           ...generatedData,
+          scriptAssetId: savedAssetId ?? generatedData.scriptAssetId,
           postGenerationAuditStatus: "completed",
           postGenerationAuditMessage: undefined,
+          auditVersion: audit.auditVersion,
           attributionAudit: audit.attributionAudit,
+          sourceIntegrityAudit: audit.sourceIntegrityAudit,
           factAudit: audit.factAudit,
         };
       } else {
         auditedData = {
           ...generatedData,
+          scriptAssetId: savedAssetId ?? generatedData.scriptAssetId,
           postGenerationAuditStatus: "unavailable",
-          postGenerationAuditMessage: `${audit.status === "unavailable" ? audit.message : "本次归属分析暂未完成"}，不影响正文使用`,
+          postGenerationAuditMessage: `${audit.status === "unavailable" ? audit.message : "本次归属分析暂未完成"}。正文可查看，但不得视为审计通过或正式交付`,
+          auditVersion: audit.status === "unavailable" ? audit.auditVersion : undefined,
           attributionAudit: audit.status === "unavailable" ? audit.attributionAudit : undefined,
+          sourceIntegrityAudit: audit.status === "unavailable" ? audit.sourceIntegrityAudit : undefined,
           factAudit: audit.status === "unavailable" ? audit.factAudit : undefined,
         };
       }
     } catch {
       auditedData = {
         ...generatedData,
+        scriptAssetId: savedAssetId ?? generatedData.scriptAssetId,
         postGenerationAuditStatus: "unavailable",
-        postGenerationAuditMessage: "本次归属分析暂未完成，不影响正文使用",
+        postGenerationAuditMessage: "本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付",
+        auditVersion: undefined,
         attributionAudit: undefined,
+        sourceIntegrityAudit: undefined,
         factAudit: undefined,
       };
     }
@@ -1353,6 +1511,82 @@ export default function ScriptFactoryPage() {
     }
     if (savedAssetId && !updateScriptAssetResult(savedAssetId, requestIP.id, auditedData)) {
       setDraftStorageError("正文已经保存，但团队审核信息未能写入历史记录；不影响当前正文使用。");
+    }
+  }
+
+  function handleManualRewrite(
+    issue: SourceIntegrityIssue,
+    action: ScriptManualRewriteAction,
+    replacement: string,
+    deleteConfirmed: boolean,
+  ) {
+    if (!result || !activeIP || !result.auditVersion) {
+      setError("缺少当前审计版本，不能处理正文。");
+      return;
+    }
+    try {
+      const applied = applyManualScriptRewrite({
+        outline: result.outline,
+        auditVersion: result.auditVersion,
+        previousRewrite: result.manualRewrite ?? null,
+        target: issue,
+        action,
+        replacement,
+        deleteConfirmed,
+      });
+      const savedAsset = result.scriptAssetId
+        ? getScriptAssets(activeIP.id).find(asset => asset.id === result.scriptAssetId)
+        : undefined;
+      const editedData: ScriptResult = {
+        ...result,
+        outline: applied.outline,
+        manualRewrite: applied.rewrite,
+        postGenerationAuditStatus: "pending",
+        postGenerationAuditMessage: undefined,
+        attributionAudit: undefined,
+        sourceIntegrityAudit: undefined,
+        factAudit: undefined,
+      };
+      let rewriteSaved = false;
+      if (result.generationStatus === "partial") {
+        const draft = getPartialScriptDraft(activeIP.id);
+        if (draft && isStoredScriptResult(draft.result)) {
+          rewriteSaved = savePartialScriptDraft({ ...draft, result: editedData });
+        }
+      } else if (savedAsset) {
+        rewriteSaved = updateScriptAssetResult(
+          savedAsset.id,
+          activeIP.id,
+          editedData,
+          editedData.outline.map(section => `【${section.label}】${section.content}`).join("\n\n"),
+        );
+      }
+      if (!rewriteSaved) {
+        setError("人工处理记录未能安全保存，本次没有修改正文，也没有发起复审。请检查浏览器存储空间后重试。");
+        return;
+      }
+      setError(null);
+      setResult(editedData);
+      const caseEvidence = result.factAudit?.caseEvidence
+        ? {
+            title: result.factAudit.caseEvidence.title,
+            content: result.factAudit.caseEvidence.content ?? "",
+            sourceType: result.factAudit.caseEvidence.sourceType,
+            verificationStatus: result.factAudit.caseEvidence.verificationStatus,
+            sourceUrl: result.factAudit.caseEvidence.sourceUrl,
+            occurredAt: result.factAudit.caseEvidence.occurredAt,
+          }
+        : null;
+      void runPostGenerationAudit({
+        requestSequence: generationSequenceRef.current,
+        requestIP: activeIP,
+        sources: getIPSourceContext(activeIP.id),
+        caseEvidence,
+        generatedData: editedData,
+        savedAssetId: savedAsset?.id,
+      });
+    } catch (rewriteError) {
+      setError(rewriteError instanceof Error ? rewriteError.message : "人工处理失败，请重新核对原文。");
     }
   }
 
@@ -1380,7 +1614,6 @@ export default function ScriptFactoryPage() {
     const auditedTopicAtRequest = linkedTopic && boundaryStatus !== "legacy"
       ? auditedTopicContent
       : requestedTopic;
-    const requestedAngle = angle.trim();
     const requestMode = generationMode;
     const knowledgeRefsAtRequest = knowledgeRefs;
     const requestSequence = generationSequenceRef.current + 1;
@@ -1417,9 +1650,11 @@ export default function ScriptFactoryPage() {
         ...generatedData,
         generationMode: requestMode,
         attributionAudit: undefined,
+        sourceIntegrityAudit: undefined,
         factAudit: undefined,
         postGenerationAuditStatus: requestMode === "ip" ? "pending" : undefined,
         postGenerationAuditMessage: undefined,
+        auditVersion: undefined,
       };
       if (data.ipId !== requestIP.id) {
         throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
@@ -1444,8 +1679,6 @@ export default function ScriptFactoryPage() {
         void runPostGenerationAudit({
           requestSequence,
           requestIP,
-          requestedTopic,
-          requestedAngle,
           sources: sourceContext,
           caseEvidence,
           generatedData: data,
@@ -1910,6 +2143,7 @@ export default function ScriptFactoryPage() {
               data={result}
               draftSavedAt={partialDraftSavedAt}
               onClearDraft={partialDraftSavedAt ? handleClearPartialDraft : undefined}
+              onManualRewrite={handleManualRewrite}
             />
           </Card>
         </>

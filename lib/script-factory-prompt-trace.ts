@@ -8,7 +8,6 @@ const pruneQueues = new Map<string, Promise<void>>();
 export type ScriptFactoryPromptTraceStage =
   | "content-initial"
   | "content-format-retry"
-  | "content-rewrite"
   | "content-compression"
   | "shuimuran-review"
   | "argument-review"

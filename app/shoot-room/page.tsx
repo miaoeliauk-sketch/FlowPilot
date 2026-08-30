@@ -12,6 +12,7 @@ import { getKnowledgeEntries, recordKnowledgeUsage, getScriptAssets, addKnowledg
 import { KnowledgeEntry, ScriptAsset } from "@/lib/types";
 import { useIP } from "@/lib/ip-context";
 import { filterKnowledgeVisibleToIP } from "@/lib/knowledge-scope";
+import { getScriptDeliveryBlockReason } from "@/lib/script-factory-delivery";
 
 type ProductionMode = "real" | "digital" | "hybrid";
 
@@ -334,7 +335,13 @@ function DigitalHumanMode() {
     setError(null);
     const finalAvatarId = avatarProfile?.avatarId;
     const finalVoiceId = voiceProfile?.voiceId;
-    const finalScript = scriptSource === "paste" ? scriptText : scripts.find(s => s.id === selectedScriptId)?.content ?? "";
+    const selectedScript = (activeIP ? getScriptAssets(activeIP.id) : scripts)
+      .find(s => s.id === selectedScriptId);
+    const selectedScriptBlockReason = scriptSource === "select"
+      ? getScriptDeliveryBlockReason(selectedScript?.scriptResult)
+      : null;
+    const finalScript = scriptSource === "paste" ? scriptText : selectedScript?.content ?? "";
+    if (selectedScriptBlockReason) { setError(`${selectedScriptBlockReason}，不能进入视频制作。`); return; }
     if (!finalAvatarId) { setError("请先完成数字人形象克隆或填入已有 Avatar ID"); return; }
     if (!finalVoiceId) { setError("请先完成声音克隆或填入已有 Voice ID"); return; }
     if (!finalScript.trim()) { setError("请输入或选择脚本文案"); return; }
@@ -389,11 +396,15 @@ function DigitalHumanMode() {
         </div>
         {scriptSource === "paste"
           ? <textarea value={scriptText} onChange={e => setScriptText(e.target.value)} placeholder="粘贴口播脚本…" rows={5} className="w-full resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3 text-[13.5px] outline-none focus:border-[#639922]" />
-          : <div className="flex flex-col gap-1.5">{scripts.length === 0 ? <p className="text-[12.5px] text-[#999]">脚本库为空，请先去 AI IP脚本工厂 生成脚本</p> : scripts.map(s => (
-              <label key={s.id} className="flex cursor-pointer items-start gap-2.5 rounded-[10px] border p-2.5" style={{ borderColor: selectedScriptId === s.id ? "#639922" : "#E5E4DE" }}>
-                <input type="radio" name="script" value={s.id} checked={selectedScriptId === s.id} onChange={() => setSelectedScriptId(s.id)} className="mt-0.5" />
-                <div><div className="text-[12.5px] font-semibold">{s.title}</div><div className="text-[11.5px] text-[#999]">{s.content.slice(0, 60)}…</div></div>
-              </label>))}</div>}
+          : <div className="flex flex-col gap-1.5">{scripts.length === 0 ? <p className="text-[12.5px] text-[#999]">脚本库为空，请先去 AI IP脚本工厂 生成脚本</p> : scripts.map(s => {
+              const blockReason = getScriptDeliveryBlockReason(s.scriptResult);
+              return (
+                <label key={s.id} className={`flex items-start gap-2.5 rounded-[10px] border p-2.5 ${blockReason ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`} style={{ borderColor: selectedScriptId === s.id ? "#639922" : "#E5E4DE" }}>
+                  <input type="radio" name="script" value={s.id} disabled={Boolean(blockReason)} checked={selectedScriptId === s.id} onChange={() => setSelectedScriptId(s.id)} className="mt-0.5" />
+                  <div><div className="text-[12.5px] font-semibold">{s.title}</div><div className="text-[11.5px] text-[#999]">{s.content.slice(0, 60)}…</div>{blockReason && <div className="mt-1 text-[11px] font-semibold text-[#9A5B19]">{blockReason}，暂不能用于制作</div>}</div>
+                </label>
+              );
+            })}</div>}
       </Card>
 
       {/* 数字人形象 */}

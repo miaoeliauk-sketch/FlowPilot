@@ -453,6 +453,9 @@ test("固定脚本生成不要求观点覆盖度，也不启用IP专属编导规
     assert.match(prompts[0], /仅用于强调的引号全部删除/);
     assert.match(prompts[0], /老师原话必须能追溯到本次提供的原始材料/);
     assert.match(prompts[0], /不能因为加了引号就判定为老师原话/);
+    assert.match(prompts[0], /确定数字.*不得.*模糊/);
+    assert.match(prompts[0], /模糊数量.*不得.*精确/);
+    assert.match(prompts[0], /并不代表所有人/);
     assert.doesNotMatch(prompts[0], /水木然专属内容编导规则/);
     assert.doesNotMatch(prompts[0], /本次已经确认的观点依据/);
     assert.doesNotMatch(prompts[0], /IP原始内容上下文/);
@@ -1598,7 +1601,7 @@ test("水木然没有原始内容时仍生成，但不得冒充老师已确认�
   }
 });
 
-test("水木然脚本任一终审项不通过时定向重生成并再次检查", async () => {
+test("水木然脚本任一终审项不通过时保留正文并交给人工处理", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
   let calls = 0;
@@ -1608,10 +1611,10 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
       messages?: Array<{ content?: string }>;
     };
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
-    if (calls === 1 || calls === 4) {
+    if (calls === 1) {
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `director-content-${calls}`);
     }
-    if (calls === 2 || calls === 5) {
+    if (calls === 2) {
       return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), `director-compression-${calls}`);
     }
     if (calls === 3) {
@@ -1621,10 +1624,7 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
         issues: ["标题直接公布了核心答案"],
       }), "director-review-failed");
     }
-    if (calls === 6) {
-      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
-    }
-    if (calls === 7) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    if (calls === 4) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "unexpected-extra-call");
   };
 
@@ -1635,18 +1635,17 @@ test("水木然脚本任一终审项不通过时定向重生成并再次检查",
     }));
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 7);
-    assert.match(prompts[3], /标题直接公布了核心答案/);
-    assert.doesNotMatch(prompts[4], /70%至80%/);
-    assert.match(prompts[4], /初稿共148个有效字符/);
-    assert.match(prompts[4], /必须控制在119至133个有效字符之间/);
-    assert.match(prompts[5], new RegExp(COMPRESSED_SHUIMURAN_CONTENT.fullScript.slice(0, 20)));
+    const body = await response.json();
+    assert.equal(calls, 4);
+    assert.equal(body.qualityCheck.status, "needs_review");
+    assert.match(body.qualityCheck.warnings[0].message, /标题直接公布了核心答案/);
+    assert.equal(prompts.some(prompt => /上次没有通过水木然老师确认版终审/.test(prompt)), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("破六相硬问题即使被模型放行也会触发重写并在二次终审再次拦截", async () => {
+test("破六相硬问题即使被模型放行也只形成警告，不触发自动重写", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
   let calls = 0;
@@ -1656,13 +1655,14 @@ test("破六相硬问题即使被模型放行也会触发重写并在二次终�
       messages?: Array<{ content?: string }>;
     };
     prompts.push((body.messages ?? []).map(message => message.content ?? "").join("\n"));
-    if (calls === 1 || calls === 4) {
+    if (calls === 1) {
       return deepSeekResponse(JSON.stringify(BREAK_SIX_CONTENT), `break-six-content-${calls}`);
     }
-    if (calls === 2 || calls === 5) {
+    if (calls === 2) {
       return deepSeekResponse(JSON.stringify(COMPRESSED_BREAK_SIX_CONTENT), `break-six-compression-${calls}`);
     }
-    return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), `break-six-review-${calls}`);
+    if (calls === 3) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "break-six-review");
+    return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "break-six-argument-review");
   };
 
   try {
@@ -1671,17 +1671,20 @@ test("破六相硬问题即使被模型放行也会触发重写并在二次终�
       scriptDirectorProfileId: "shuimuran-v1",
     }, "ip", true, "破六相"));
 
-    assert.equal(response.status, 502);
-    assert.equal(calls, 6);
-    assert.match(prompts[3] ?? "", /禁用开头/);
-    assert.match(prompts[3] ?? "", /机械清单/);
-    assert.match(prompts[3] ?? "", /通用结尾/);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(calls, 4);
+    assert.equal(body.qualityCheck.status, "needs_review");
+    assert.match(body.qualityCheck.warnings[0].message, /禁用开头/);
+    assert.match(body.qualityCheck.warnings[0].message, /机械清单/);
+    assert.match(body.qualityCheck.warnings[0].message, /通用结尾/);
+    assert.equal(prompts.some(prompt => /逐项修正后重新生成/.test(prompt)), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("水木然终审拥有独立重写机会，不会被首次内容重试占用", async () => {
+test("水木然终审不通过时只返回人工处理提示，不自动重写正文", async () => {
   const originalFetch = globalThis.fetch;
   const prompts: string[] = [];
   let calls = 0;
@@ -1694,10 +1697,10 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     if (calls === 1) {
       return deepSeekResponse("{内容被截断", "director-content-invalid");
     }
-    if (calls === 2 || calls === 5) {
+    if (calls === 2) {
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `director-content-${calls}`);
     }
-    if (calls === 3 || calls === 6) {
+    if (calls === 3) {
       return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), `director-compression-${calls}`);
     }
     if (calls === 4) {
@@ -1707,10 +1710,7 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
         issues: ["标题直接公布了核心答案"],
       }), "director-review-failed");
     }
-    if (calls === 7) {
-      return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "director-review-passed");
-    }
-    if (calls === 8) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
+    if (calls === 5) return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "argument-review");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "unexpected-extra-call");
   };
 
@@ -1721,17 +1721,18 @@ test("水木然终审拥有独立重写机会，不会被首次内容重试占�
     }));
 
     assert.equal(response.status, 200);
-    assert.equal(calls, 8);
-    assert.match(prompts[4], /标题直接公布了核心答案/);
-    assert.doesNotMatch(prompts[5], /70%至80%/);
-    assert.match(prompts[5], /初稿共148个有效字符/);
-    assert.match(prompts[5], /必须控制在119至133个有效字符之间/);
+    const body = await response.json();
+    assert.equal(calls, 5);
+    assert.equal(body.qualityCheck.status, "needs_review");
+    assert.equal(body.qualityCheck.warnings.some((warning: { code: string }) =>
+      warning.code === "shuimuran_review_failed"), true);
+    assert.equal(prompts.some(prompt => /上次没有通过水木然老师确认版终审/.test(prompt)), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("格式重试、终审重写和二次终审分别写入同一次生成诊断链", async () => {
+test("格式重试保留诊断链，但终审失败不再写入自动重写调用", async () => {
   const originalFetch = globalThis.fetch;
   const originalEnabled = process.env.FLOWPILOT_SCRIPT_FACTORY_DIAGNOSTICS;
   const originalCwd = process.cwd();
@@ -1741,10 +1742,10 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
   globalThis.fetch = async () => {
     calls += 1;
     if (calls === 1) return deepSeekResponse("{内容被截断", "trace-content-invalid");
-    if (calls === 2 || calls === 5) {
+    if (calls === 2) {
       return deepSeekResponse(JSON.stringify(SHUIMURAN_DIRECTOR_CONTENT), `trace-content-${calls}`);
     }
-    if (calls === 3 || calls === 6) {
+    if (calls === 3) {
       return deepSeekResponse(JSON.stringify(COMPRESSED_SHUIMURAN_CONTENT), `trace-compression-${calls}`);
     }
     if (calls === 4) {
@@ -1754,7 +1755,6 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
         issues: ["标题直接公布了核心答案"],
       }), "trace-review-failed");
     }
-    if (calls === 7) return deepSeekResponse(JSON.stringify(VALID_SHUIMURAN_REVIEW), "trace-review-passed");
     return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "trace-argument-review");
   };
   process.chdir(projectDir);
@@ -1776,10 +1776,7 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
       "002-content-format-retry.json",
       "003-content-compression.json",
       "004-shuimuran-review.json",
-      "005-content-rewrite.json",
-      "006-content-compression.json",
-      "007-shuimuran-review.json",
-      "008-argument-review.json",
+      "005-argument-review.json",
     ]);
     const records = await Promise.all(callFiles.map(async file =>
       JSON.parse(await readFile(path.join(generationDir, file), "utf8")) as {
@@ -1792,8 +1789,7 @@ test("格式重试、终审重写和二次终审分别写入同一次生成诊�
     assert.equal(records[0]!.rawResponse, "{内容被截断");
     assert.match(records[0]!.failureCode ?? "", /JSON|INVALID/i);
     assert.match(records[1]!.retryReason ?? "", /JSON|解析|截断/);
-    assert.match(records[4]!.retryReason ?? "", /标题直接公布了核心答案/);
-    assert.equal(records[6]!.retryReason, "终审未通过后的二次检查");
+    assert.equal(records.some(record => record.stage === "content-rewrite"), false);
   } finally {
     globalThis.fetch = originalFetch;
     process.chdir(originalCwd);
@@ -1848,7 +1844,7 @@ test("水木然已学习的风格画像同时进入核心脚本和分镜提示�
   }
 });
 
-test("经典脚本结尾密集堆叠强调式口头禅时只重生成一次再进入论证复核", async () => {
+test("经典脚本结尾密集堆叠时只提示人工调整，不自动重生成", async () => {
   const originalFetch = globalThis.fetch;
   const outboundPrompts: string[] = [];
   let calls = 0;
@@ -1864,9 +1860,6 @@ test("经典脚本结尾密集堆叠强调式口头禅时只重生成一次再�
       return deepSeekResponse(JSON.stringify(DENSE_CLOSING_CONTENT), "dense-content-request");
     }
     if (calls === 2) {
-      return deepSeekResponse(JSON.stringify(VALID_CONTENT), "revised-content-request");
-    }
-    if (calls === 3) {
       return deepSeekResponse(JSON.stringify(VALID_ARGUMENT_REVIEW), "quality-review-request");
     }
     return deepSeekResponse(JSON.stringify(VALID_STORYBOARD), "storyboard-request");
@@ -1878,15 +1871,15 @@ test("经典脚本结尾密集堆叠强调式口头禅时只重生成一次再�
 
     assert.equal(response.status, 200);
     assert.equal(result.generationStatus, "complete");
-    assert.equal(calls, 4);
+    assert.equal(calls, 3);
     assert.match(outboundPrompts[0], /自然、选择性使用/);
     assert.doesNotMatch(outboundPrompts[0], /要主动使用这个IP的常用口头禅/);
     assert.match(outboundPrompts[0], /结尾最多使用一个强调式口头禅或反问/);
     assert.match(outboundPrompts[0], /类比双方必须具有相同的因果机制/);
-    assert.match(outboundPrompts[1], /上次生成的结尾存在强调式口头禅或反问密集堆叠/);
-    assert.match(outboundPrompts[2], /只检查案例是否支持结论/);
-    assert.equal(result.qualityCheck.status, "passed");
-    assert.deepEqual(result.qualityCheck.warnings, []);
+    assert.match(outboundPrompts[1], /只检查案例是否支持结论/);
+    assert.equal(outboundPrompts.some(prompt => /上次生成的结尾存在/.test(prompt)), false);
+    assert.equal(result.qualityCheck.status, "needs_review");
+    assert.equal(result.qualityCheck.warnings[0].code, "dense_closing_style");
   } finally {
     globalThis.fetch = originalFetch;
   }

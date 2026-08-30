@@ -262,6 +262,26 @@ test("语气画像写入失败时明确报错且不伪装保存成功", async ()
   assert.equal(storage.getItem("ipwr:ipStyleProfiles"), null);
 });
 
+test("脚本审计和人工处理记录只有在历史记录真实写入后才返回成功", async () => {
+  const { updateScriptAssetResult } = await import("./ip-store");
+  storage.clear();
+  storage.setItem("ipwr:scriptAssets", JSON.stringify([{
+    id: "script-1",
+    ipId: "ip-1",
+    content: "旧正文",
+    scriptResult: { auditVersion: "old" },
+  }]));
+
+  assert.equal(updateScriptAssetResult("script-1", "ip-1", { auditVersion: "new" }, "新正文"), true);
+  storage.setWriteFailure("ipwr:scriptAssets", true);
+  assert.equal(updateScriptAssetResult("script-1", "ip-1", { auditVersion: "not-saved" }), false);
+  storage.setWriteFailure("ipwr:scriptAssets", false);
+
+  const saved = JSON.parse(storage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ content: string; scriptResult: { auditVersion: string } }>;
+  assert.equal(saved[0]?.scriptResult.auditVersion, "new");
+  assert.equal(saved[0]?.content, "新正文");
+});
+
 test("损坏的旧语气画像数据不会被当成空数组覆盖", async () => {
   const { saveStyleProfile } = await import("./ip-store");
   storage.clear();

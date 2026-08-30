@@ -732,7 +732,7 @@ test("IP专属生成一次点击先展示并保存正文，再在后台补充团
 
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
     assert.ok(view.getByText("团队审核信息"));
-    assert.ok(view.getByText("观点归属分析中，不影响正文使用"));
+    assert.ok(view.getByText("观点归属分析中。正文可查看，审计完成前不得视为正式交付"));
     assert.equal(requestedPaths.includes("/api/script-factory/coverage"), false);
     assert.equal(requestedPaths.includes("/api/script-factory/audit"), true);
     const savedBeforeAudit = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
@@ -740,6 +740,7 @@ test("IP专属生成一次点击先展示并保存正文，再在后台补充团
 
     resolveAudit?.(new Response(JSON.stringify({
       status: "completed",
+      auditVersion: "audit-team-review",
       coverageAssessment: {
         coverage: "NONE",
         reason: "当前没有找到老师的明确观点依据。",
@@ -765,12 +766,109 @@ test("IP专属生成一次点击先展示并保存正文，再在后台补充团
           reason: "基于老师原意重组。",
         }],
       },
+      sourceIntegrityAudit: { status: "passed", deliveryBlocked: false, issues: [] },
       factAudit: { overallStatus: "not_checked", systemVerified: false, pendingItems: [], caseEvidence: null },
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
     assert.ok(await view.findByText(/待审核稿 · 置信度中/));
     const savedAfterAudit = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
     assert.equal(savedAfterAudit[0]?.scriptResult?.postGenerationAuditStatus, "completed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("出处审计阻断后用户只能人工替换一次，替换后自动重新审计但不再自动改稿", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const originalFetch = globalThis.fetch;
+  const auditBodies: Array<Record<string, unknown>> = [];
+  let auditCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const path = String(input);
+    if (path === "/api/script-factory") {
+      return new Response(JSON.stringify(generatedScript("变化背后的判断")), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (path === "/api/script-factory/audit") {
+      auditCalls += 1;
+      auditBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      const first = auditCalls === 1;
+      return new Response(JSON.stringify({
+        status: "completed",
+        auditVersion: first ? "audit-v1" : "audit-v2",
+        coverageAssessment: {
+          coverage: "NONE",
+          reason: "当前没有找到老师的明确观点依据。",
+          coveredDimensions: [],
+          missingDimensions: ["核心判断", "推理过程"],
+          sourceReferences: [],
+          caseNeed: "NOT_ASSESSED",
+          caseReason: "先补充老师的核心判断。",
+        },
+        attributionAudit: {
+          outputStatus: first ? "formal" : "review",
+          confidenceLevel: first ? "high" : "low",
+          coveredDimensions: [],
+          missingDimensions: ["核心判断"],
+          recommendation: "发布前请人工确认。",
+          auditStatus: "completed",
+          paragraphAttributions: [{
+            sectionIndex: 0,
+            paragraphIndex: 0,
+            excerpt: first ? "正文应该先展示，辅助审计随后补充。" : "外部资料对这段说法提出了质疑。",
+            attributionType: "ai_reasoning",
+            sourceReferences: [],
+            reason: "没有老师原始表达。",
+          }],
+        },
+        sourceIntegrityAudit: {
+          status: first ? "needs_review" : "passed",
+          deliveryBlocked: first,
+          issues: first ? [{
+            code: "responsibility_subject_distortion",
+            sectionIndex: 0,
+            paragraphIndex: 0,
+            excerpt: "正文应该先展示，辅助审计随后补充。",
+            sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+            reason: "外部质疑被改写成当事人本人前后矛盾。",
+          }] : [],
+        },
+        factAudit: { overallStatus: "not_checked", systemVerified: false, pendingItems: [], caseEvidence: null },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "变化背后的判断");
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
+    assert.ok(await view.findByText("责任主体失真"));
+    assert.ok(view.getByText(/待审核稿 · 置信度高/));
+    assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
+    assert.deepEqual(Object.keys(auditBodies[0] ?? {}).sort(), ["caseEvidence", "content", "sources"]);
+
+    await user.click(view.getByRole("button", { name: "人工替换" }));
+    const editor = view.getByRole("textbox", { name: "替换后的正文" });
+    await user.clear(editor);
+    await user.type(editor, "外部资料对这段说法提出了质疑。");
+    await user.click(view.getByRole("button", { name: "确认替换" }));
+
+    assert.ok((await view.findAllByText("外部资料对这段说法提出了质疑。")).length >= 1);
+    assert.ok(view.getByText(/已经使用过一次人工处理机会/));
+    assert.ok(view.getByRole("button", { name: "复制正文" }));
+    const rewrittenAssets = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ content?: string }>;
+    assert.match(rewrittenAssets[0]?.content ?? "", /外部资料对这段说法提出了质疑/);
+    assert.doesNotMatch(rewrittenAssets[0]?.content ?? "", /正文应该先展示/);
+    assert.equal(auditCalls, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1017,7 +1115,7 @@ test("分镜或执行建议阶段失败时不提前留下已用于脚本记录",
   }
 });
 
-test("水木然压缩兜底状态显示在团队审核信息且复制正文不包含审核标记", async () => {
+test("水木然压缩兜底状态显示在团队审核信息且审计完成前禁止复制", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
@@ -1062,12 +1160,7 @@ test("水木然压缩兜底状态显示在团队审核信息且复制正文不�
       scriptResult?: { compressionAudit?: { status?: string } };
     }>;
     assert.equal(saved[0]?.scriptResult?.compressionAudit?.status, "closest_fallback");
-    await user.click(view.getByRole("button", { name: "复制正文" }));
-    await view.findByText("正文已复制");
-    const copiedText = await navigator.clipboard.readText();
-    assert.match(copiedText, /正文应该先展示，辅助审计随后补充/);
-    assert.doesNotMatch(copiedText, /压缩未能精确达到目标比例/);
-    assert.doesNotMatch(copiedText, /初稿678字/);
+    assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1101,7 +1194,7 @@ test("生成后审计失败只显示辅助提示，不影响正文和已保存�
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
-    assert.ok(await view.findByText("本次归属分析暂未完成，不影响正文使用"));
+    assert.ok(await view.findByText("本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付"));
     const saved = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
     assert.equal(saved[0]?.scriptResult?.postGenerationAuditStatus, "unavailable");
   } finally {
@@ -1137,7 +1230,7 @@ test("生成后审计返回200但内容残缺时降级为分析未完成且正�
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
-    assert.ok(await view.findByText("本次归属分析暂未完成，不影响正文使用"));
+    assert.ok(await view.findByText("本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付"));
     assert.equal(view.queryByText("历史稿未记录观点归属信息"), null);
     const saved = JSON.parse(localStorage.getItem("ipwr:scriptAssets") ?? "[]") as Array<{ scriptResult?: Record<string, unknown> }>;
     assert.equal(saved[0]?.scriptResult?.postGenerationAuditStatus, "unavailable");
@@ -1272,12 +1365,13 @@ test("重新打开IP专属脚本时恢复对应生成模式", async () => {
 
   const modeButton = await view.findByRole("button", { name: "IP专属生成" });
   assert.equal(modeButton.getAttribute("aria-pressed"), "true");
-  assert.ok(view.getByText(/探索稿 · 置信度低/));
+  assert.ok(view.getByText(/不得视为审计通过或正式交付/));
+  assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
   assert.equal(view.queryByText(/正式稿 · 置信度高/), null);
   assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
   await (await import("@testing-library/user-event")).default.setup({ document }).click(view.getByRole("button", { name: "固定脚本生成" }));
   assert.equal(view.queryByText("完整正文。"), null);
-  assert.equal(view.queryByText(/探索稿 · 置信度低/), null);
+  assert.equal(view.queryByText(/不得视为审计通过或正式交付/), null);
   window.history.replaceState({}, "", "/script-factory");
 });
 
@@ -1330,7 +1424,8 @@ test("水木然IP专属结果只展示标题、完整口播文案和待核验内
   const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
 
   assert.ok(await view.findByText("标题："));
-  assert.ok(view.getByText("历史稿未记录观点归属信息"));
+  assert.ok(view.getByText(/不得视为审计通过或正式交付/));
+  assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
   assert.ok(view.getByText("完整口播文案："));
   assert.ok(view.getByText("待核验内容："));
   assert.ok(view.getByText("《道德经》原文出处待确认"));

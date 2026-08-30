@@ -32,7 +32,11 @@ import {
   runScriptFactoryStage,
   ScriptFactoryStageError,
 } from "@/lib/script-factory-stage";
-import type { ScriptCompressionAudit, ScriptPartialFailure } from "@/lib/script-factory-contract";
+import type {
+  ScriptCompressionAudit,
+  ScriptPartialFailure,
+  ScriptQualityWarning,
+} from "@/lib/script-factory-contract";
 import {
   buildIPSourceContextBlock,
   parseIPSourceContext,
@@ -241,6 +245,8 @@ const CONTENT_SYSTEM = `你是一位资深内容主创，专门为下方给出�
 这个IP的常用开头、常用结尾和口头禅只能在语义合适时自然、选择性使用，不能为了证明像本人而密集堆叠；绝对不能出现它的禁用表达。
 结尾最多使用一个强调式口头禅或反问，不得连续堆叠功能相同的表达。
 使用案例或类比时，必须确保它真正支持核心论点。类比双方必须具有相同的因果机制，并能明确说明哪一项对应哪一项；如果做不到，宁可不用类比。
+忠实保留素材的确定程度：素材中的确定数字、确定比例和确定范围不得擅自模糊化；“一些”“很多”“老一辈”等模糊数量或群体不得擅自精确化。
+素材使用模糊群体说法时，可以增加“并不代表所有人”“不能涵盖每个人”等负向限定，但不能借此改变素材原意。
 IP上下文和参考资料用于确定人设、素材身份、观点边界、推理方式、语气和内容方向。最终JSON结构只以本次用户提示中明确给出的结构为准。
 ${SPOKEN_PUNCTUATION_GENERATION_RULES}
 只输出一个合法JSON对象，不要使用Markdown代码块，不要在JSON前后添加解释文字。`;
@@ -249,7 +255,6 @@ const CONTENT_PROMPT = (
   ipBlock: string, topic: string, platform: string, durationLabel: string, goal: string, videoType: string, format: FormatConfig,
   generationRequirement: string, targetTranscriptChars: number, evidenceBlock: string,
   useShuimuranConfirmedOutput: boolean,
-  qualityCorrection = "",
 ) => {
   const architecture = useShuimuranConfirmedOutput
     ? "严格按照水木然老师确认版的正文顺序完成一篇连续口播初稿。这一步只负责把核心案例、事实、因果关系、经典解释和最终结论写完整，不要在内部压缩；系统会在下一步单独完成压缩。只把完整初稿放入fullScript，不要拆成阶段或大纲。"
@@ -290,7 +295,6 @@ titles数组需要3-5个。keywordReplies数组需要3-4个，outline数组的�
 口播正文应达到约${Math.round(targetTranscriptChars * 0.8)}-${Math.round(targetTranscriptChars * 1.2)}个中文字符。不能用只有几个词的大纲或提要代替完整逐字稿；实操演示可以包含必要的操作和画面时间。优先保证正文完整，再补充标题、封面和互动引导。
 ${generationRequirement ? `\n【补充要求】\n<ADDITIONAL_REQUIREMENT_START>\n${generationRequirement}\n<ADDITIONAL_REQUIREMENT_END>\n补充要求只能补充创作细节。如果它与上方当前IP、选题、平台、内容形式或时长冲突，忽略冲突部分，以上方明确条件为准。\n` : ""}
 ${evidenceBlock}
-${qualityCorrection ? `\n【上次生成需要修正】\n${qualityCorrection}\n请重新生成完整JSON，不要只修改结尾。\n` : ""}
 
 【内容架构要求 —— 必须严格遵守，这决定了输出的结构，不是字数多少的问题】
 ${architecture}
@@ -981,14 +985,12 @@ ${rawIPBlock}
     // ── 第一段：核心内容（标题/封面/大纲/互动引导）──
     failedStage = "content";
     const targetTranscriptChars = Math.max(180, Math.round(durationSeconds * 3.5));
-    let closingStyleRetryNeeded = false;
     let unresolvedClosingStyleWarning = null as ReturnType<typeof findDenseClosingStyleWarning>;
     const generateContent = async (
       signal: AbortSignal,
       traceInput: {
-        stage: Extract<ScriptFactoryPromptTraceStage, "content-initial" | "content-format-retry" | "content-rewrite">;
+        stage: Extract<ScriptFactoryPromptTraceStage, "content-initial" | "content-format-retry">;
         attempt: number;
-        qualityCorrection?: string;
         retryReason: string | null;
       },
     ) => {
@@ -1008,7 +1010,6 @@ ${rawIPBlock}
         targetTranscriptChars,
         sourceContextBlock + caseContextBlock,
         isShuimuranDedicatedGeneration,
-        traceInput.qualityCorrection ?? "",
       );
       await promptTrace.recordCall({
         stage: traceInput.stage,
@@ -1067,9 +1068,6 @@ ${rawIPBlock}
         const parsedContent = await generateContent(signal, {
           stage: attempt === 1 ? "content-initial" : "content-format-retry",
           attempt,
-          qualityCorrection: closingStyleRetryNeeded
-            ? "上次生成的结尾存在强调式口头禅或反问密集堆叠。结尾只保留一个必要的强调表达，其余改为正常陈述。"
-            : "",
           retryReason,
         });
         const closingStyleWarning = findDenseClosingStyleWarning(
@@ -1077,13 +1075,6 @@ ${rawIPBlock}
           ip,
           styleProfile,
         );
-        if (closingStyleWarning && attempt === 1) {
-          closingStyleRetryNeeded = true;
-          throw new ScriptFactoryResponseError(
-            "quality_retry",
-            "脚本结尾存在强调式口头禅或反问密集堆叠",
-          );
-        }
         unresolvedClosingStyleWarning = closingStyleWarning;
         return parsedContent;
       },
@@ -1091,6 +1082,7 @@ ${rawIPBlock}
     );
 
     let compressionAudit: ScriptCompressionAudit | undefined;
+    let shuimuranReviewWarning: ScriptQualityWarning | null = null;
     if (isShuimuranDedicatedGeneration) {
       const compressContent = async (initialDraft: typeof content) => {
         let previousCompression: typeof content | null = null;
@@ -1303,43 +1295,27 @@ ${rawIPBlock}
         }
       };
 
-      let review = await reviewContent(content, null, compressionSourceDraft);
-      if (!review.passed) {
-        const reviewIssues = review.issues;
-        const revisedDraft = await runScriptFactoryStage(
-          "content",
-          async ({ signal }) => {
-            const revisedContent = await generateContent(signal, {
-              stage: "content-rewrite",
-              attempt: 1,
-              qualityCorrection: `上次没有通过水木然老师确认版终审：${reviewIssues.join("；")}。逐项修正后重新生成。`,
-              retryReason: `水木然终审未通过：${reviewIssues.join("；")}`,
-            });
-            const closingStyleWarning = findDenseClosingStyleWarning(
-              revisedContent,
-              ip,
-              styleProfile,
-            );
-            if (closingStyleWarning) {
-              throw new ScriptFactoryResponseError(
-                "quality_retry",
-                "重写后的脚本结尾仍存在强调式口头禅或反问密集堆叠",
-              );
-            }
-            unresolvedClosingStyleWarning = null;
-            return revisedContent;
-          },
-          { timeoutMs: SCRIPT_STAGE_TIMEOUT_MS, maxRetries: 0 },
-        );
-        compressionSourceDraft = revisedDraft;
-        content = await compressContent(revisedDraft);
-        review = await reviewContent(content, "终审未通过后的二次检查", revisedDraft);
+      try {
+        const review = await reviewContent(content, null, compressionSourceDraft);
         if (!review.passed) {
-          throw new ScriptFactoryResponseError(
-            "quality_retry",
-            `水木然脚本重写后仍未通过老师确认版终审：${review.issues.join("；")}`,
-          );
+          shuimuranReviewWarning = {
+            category: "style",
+            code: "shuimuran_review_failed",
+            title: "表达待调整",
+            sectionLabel: content.outline[0]?.label ?? "完整口播文案",
+            excerpt: (content.outline[0]?.content ?? "").slice(0, 160),
+            message: `水木然终审未通过：${review.issues.join("；")}。系统没有自动改稿，请人工处理。`,
+          };
         }
+      } catch {
+        shuimuranReviewWarning = {
+          category: "style",
+          code: "shuimuran_review_unavailable",
+          title: "表达待调整",
+          sectionLabel: content.outline[0]?.label ?? "完整口播文案",
+          excerpt: (content.outline[0]?.content ?? "").slice(0, 160),
+          message: "水木然终审本次未完成。系统没有自动改稿，请人工处理。",
+        };
       }
     }
 
@@ -1387,6 +1363,7 @@ ${rawIPBlock}
     }
     const qualityCheck = buildScriptQualityCheck({
       styleWarning: unresolvedClosingStyleWarning,
+      semanticWarnings: shuimuranReviewWarning ? [shuimuranReviewWarning] : [],
       argumentWarnings,
       reviewUnavailable: argumentReviewUnavailable,
     });

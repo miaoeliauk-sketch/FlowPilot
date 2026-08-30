@@ -51,6 +51,26 @@ export interface ScriptAttributionAudit {
   paragraphAttributions: ParagraphAttribution[];
 }
 
+export type SourceIntegrityIssueCode =
+  | "responsibility_subject_distortion"
+  | "unsupported_arbitration"
+  | "certainty_shift";
+
+export interface SourceIntegrityIssue {
+  code: SourceIntegrityIssueCode;
+  sectionIndex: number;
+  paragraphIndex: number;
+  excerpt: string;
+  sourceReferences: AttributionSourceReference[];
+  reason: string;
+}
+
+export interface ScriptSourceIntegrityAudit {
+  status: "passed" | "needs_review";
+  deliveryBlocked: boolean;
+  issues: SourceIntegrityIssue[];
+}
+
 export interface ScriptFactCaseEvidence {
   title: string;
   content?: string;
@@ -71,15 +91,19 @@ export type ScriptPostGenerationAudit =
   | { status: "pending" }
   | {
       status: "completed";
+      auditVersion: string;
       coverageAssessment: CoverageAssessment;
       attributionAudit: ScriptAttributionAudit;
+      sourceIntegrityAudit: ScriptSourceIntegrityAudit;
       factAudit: ScriptFactAudit;
     }
   | {
       status: "unavailable";
+      auditVersion: string;
       message: string;
       coverageAssessment?: CoverageAssessment;
       attributionAudit?: ScriptAttributionAudit;
+      sourceIntegrityAudit?: ScriptSourceIntegrityAudit;
       factAudit: ScriptFactAudit;
     };
 
@@ -145,6 +169,40 @@ function isAttributionAudit(value: unknown): value is ScriptAttributionAudit {
     && audit.paragraphAttributions.every(isParagraphAttribution);
 }
 
+function isSourceIntegrityAudit(value: unknown): value is ScriptSourceIntegrityAudit {
+  const audit = asRecord(value);
+  if (!audit || (audit.status !== "passed" && audit.status !== "needs_review")) return false;
+  if (typeof audit.deliveryBlocked !== "boolean" || !Array.isArray(audit.issues)) return false;
+  const issueCodes = new Set([
+    "responsibility_subject_distortion",
+    "unsupported_arbitration",
+    "certainty_shift",
+  ]);
+  const validIssues = audit.issues.every(value => {
+    const issue = asRecord(value);
+    return Boolean(
+      issue &&
+      typeof issue.code === "string" &&
+      issueCodes.has(issue.code) &&
+      Number.isInteger(issue.sectionIndex) &&
+      Number.isInteger(issue.paragraphIndex) &&
+      typeof issue.excerpt === "string" &&
+      issue.excerpt.trim() &&
+      Array.isArray(issue.sourceReferences) &&
+      issue.sourceReferences.length > 0 &&
+      issue.sourceReferences.every(reference => {
+        const source = asRecord(reference);
+        return Boolean(source && typeof source.sourceId === "string" && typeof source.itemId === "string");
+      }) &&
+      typeof issue.reason === "string" &&
+      issue.reason.trim()
+    );
+  });
+  return validIssues &&
+    audit.deliveryBlocked === (audit.issues.length > 0) &&
+    audit.status === (audit.issues.length > 0 ? "needs_review" : "passed");
+}
+
 function isFactAudit(value: unknown): value is ScriptFactAudit {
   const audit = asRecord(value);
   if (!audit) return false;
@@ -170,15 +228,24 @@ export function parseScriptPostGenerationAudit(value: unknown): ScriptPostGenera
   if (audit.status === "pending") return { status: "pending" };
   if (audit.status === "completed") {
     if (
-      !isCoverageAssessment(audit.coverageAssessment)
+      typeof audit.auditVersion !== "string"
+      || !audit.auditVersion.trim()
+      || !isCoverageAssessment(audit.coverageAssessment)
       || !isAttributionAudit(audit.attributionAudit)
+      || !isSourceIntegrityAudit(audit.sourceIntegrityAudit)
       || !isFactAudit(audit.factAudit)
     ) return null;
     return audit as unknown as ScriptPostGenerationAudit;
   }
   if (audit.status === "unavailable") {
-    if (typeof audit.message !== "string" || !isFactAudit(audit.factAudit)) return null;
+    if (
+      typeof audit.auditVersion !== "string"
+      || !audit.auditVersion.trim()
+      || typeof audit.message !== "string"
+      || !isFactAudit(audit.factAudit)
+    ) return null;
     if (audit.attributionAudit !== undefined && !isAttributionAudit(audit.attributionAudit)) return null;
+    if (audit.sourceIntegrityAudit !== undefined && !isSourceIntegrityAudit(audit.sourceIntegrityAudit)) return null;
     if (audit.coverageAssessment !== undefined && !isCoverageAssessment(audit.coverageAssessment)) return null;
     return audit as unknown as ScriptPostGenerationAudit;
   }
@@ -193,6 +260,8 @@ export interface ScriptPartialFailure {
 
 export type ScriptQualityWarningCode =
   | "dense_closing_style"
+  | "shuimuran_review_failed"
+  | "shuimuran_review_unavailable"
   | "example_not_supporting_claim"
   | "analogy_mechanism_mismatch"
   | "correlation_as_causation";

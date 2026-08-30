@@ -199,11 +199,13 @@ excerpt必须逐字截取自对应正文，不能概括或改写。
 
 export function buildScriptQualityCheck(input: {
   styleWarning: ScriptQualityWarning | null;
+  semanticWarnings?: ScriptQualityWarning[];
   argumentWarnings: ScriptQualityWarning[];
   reviewUnavailable: boolean;
 }): ScriptQualityCheck {
   const warnings = [
     ...(input.styleWarning ? [input.styleWarning] : []),
+    ...(input.semanticWarnings ?? []),
     ...input.argumentWarnings,
   ];
   if (input.reviewUnavailable) {

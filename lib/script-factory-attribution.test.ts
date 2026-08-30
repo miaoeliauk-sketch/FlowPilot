@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ATTRIBUTION_AUDIT_SYSTEM,
   buildAttributionAudit,
   buildAttributionParagraphs,
   buildFactAudit,
+  parseAttributionAuditResult,
   parseParagraphAttributions,
 } from "./script-factory-attribution";
 
@@ -102,6 +104,71 @@ test("案例事实补充必须真的存在本次案例", () => {
       reason: "来自案例。",
     }],
   }), paragraphs, REFERENCES, false), /没有可对应的案例证据/);
+});
+
+test("出处审计返回责任主体失真、无出处仲裁和确定度漂移，并绑定正文与真实素材", () => {
+  const paragraphs = buildAttributionParagraphs(CONTENT);
+  const result = parseAttributionAuditResult(JSON.stringify({
+    paragraphs: paragraphs.map(paragraph => ({
+      paragraphId: paragraph.id,
+      attributionType: "teacher_explicit",
+      sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+      reason: "正文与老师原始内容有关。",
+    })),
+    integrityIssues: [{
+      code: "responsibility_subject_distortion",
+      paragraphId: "S1-P1",
+      sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+      reason: "原文是外部质疑，正文却写成当事人本人前后矛盾。",
+    }, {
+      code: "unsupported_arbitration",
+      paragraphId: "S1-P2",
+      sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+      reason: "这句正在消解素材张力，但素材没有提供该结论。",
+    }, {
+      code: "certainty_shift",
+      paragraphId: "S1-P1",
+      sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+      reason: "正文改变了原始数值的确定程度。",
+    }],
+  }), paragraphs, REFERENCES, false);
+
+  assert.equal(result.sourceIntegrityAudit.status, "needs_review");
+  assert.equal(result.sourceIntegrityAudit.deliveryBlocked, true);
+  assert.deepEqual(
+    result.sourceIntegrityAudit.issues.map(issue => issue.code),
+    ["responsibility_subject_distortion", "unsupported_arbitration", "certainty_shift"],
+  );
+  assert.equal(result.sourceIntegrityAudit.issues[0]?.excerpt, "持续输出不是每天更换话题。");
+  assert.deepEqual(result.sourceIntegrityAudit.issues[0]?.sourceReferences, [
+    { sourceId: "source-1", itemId: "claim-1" },
+  ]);
+});
+
+test("出处问题缺少真实素材编号时拒绝审计结果", () => {
+  const paragraphs = buildAttributionParagraphs(CONTENT);
+  assert.throws(() => parseAttributionAuditResult(JSON.stringify({
+    paragraphs: paragraphs.map(paragraph => ({
+      paragraphId: paragraph.id,
+      attributionType: "ai_reasoning",
+      sourceReferences: [],
+      reason: "没有老师出处。",
+    })),
+    integrityIssues: [{
+      code: "unsupported_arbitration",
+      paragraphId: "S1-P2",
+      sourceReferences: [],
+      reason: "没有出处。",
+    }],
+  }), paragraphs, REFERENCES, false), /出处问题必须绑定真实原始素材/);
+});
+
+test("出处审计规则不允许我觉得豁免多素材仲裁，也不依赖连接词识别判断句", () => {
+  assert.match(ATTRIBUTION_AUDIT_SYSTEM, /我觉得/);
+  assert.match(ATTRIBUTION_AUDIT_SYSTEM, /无论是否使用连接词/);
+  assert.match(ATTRIBUTION_AUDIT_SYSTEM, /单一素材/);
+  assert.match(ATTRIBUTION_AUDIT_SYSTEM, /负向限定/);
+  assert.match(ATTRIBUTION_AUDIT_SYSTEM, /精确化|模糊化/);
 });
 
 test("置信度和结果身份由覆盖度与审计结果固定计算", () => {

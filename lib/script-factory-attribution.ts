@@ -6,6 +6,9 @@ import type {
   ScriptAttributionAudit,
   ScriptFactAudit,
   ScriptFactCaseEvidence,
+  ScriptSourceIntegrityAudit,
+  SourceIntegrityIssue,
+  SourceIntegrityIssueCode,
 } from "./script-factory-contract";
 
 export interface AttributionParagraph {
@@ -28,6 +31,12 @@ const ATTRIBUTION_TYPES = new Set<ParagraphAttributionType>([
   "faithful_rewrite",
   "ai_reasoning",
   "case_fact",
+]);
+
+const SOURCE_INTEGRITY_ISSUE_CODES = new Set<SourceIntegrityIssueCode>([
+  "responsibility_subject_distortion",
+  "unsupported_arbitration",
+  "certainty_shift",
 ]);
 
 class ScriptAttributionParseError extends Error {
@@ -160,6 +169,76 @@ export function parseParagraphAttributions(
     left.sectionIndex - right.sectionIndex || left.paragraphIndex - right.paragraphIndex);
 }
 
+export function parseAttributionAuditResult(
+  response: string,
+  paragraphs: readonly AttributionParagraph[],
+  allowedReferences: readonly AllowedAttributionReference[],
+  hasCaseEvidence: boolean,
+): {
+  paragraphAttributions: ParagraphAttribution[];
+  sourceIntegrityAudit: ScriptSourceIntegrityAudit;
+} {
+  const paragraphAttributions = parseParagraphAttributions(
+    response,
+    paragraphs,
+    allowedReferences,
+    hasCaseEvidence,
+  );
+  const object = parseJSONObject(response);
+  if (!Array.isArray(object.integrityIssues)) {
+    throw new ScriptAttributionParseError("出处审计缺少问题列表");
+  }
+  const paragraphMap = new Map(paragraphs.map(paragraph => [paragraph.id, paragraph]));
+  const allowedReferenceMap = new Map(
+    allowedReferences.map(reference => [`${reference.sourceId}:${reference.itemId}`, reference]),
+  );
+  const seen = new Set<string>();
+  const issues = object.integrityIssues.map((rawIssue): SourceIntegrityIssue => {
+    const issue = asObject(rawIssue);
+    if (!issue) throw new ScriptAttributionParseError("出处审计包含非法问题");
+    const code = requiredString(issue, "code") as SourceIntegrityIssueCode;
+    if (!SOURCE_INTEGRITY_ISSUE_CODES.has(code)) {
+      throw new ScriptAttributionParseError("出处审计包含未知问题类型");
+    }
+    const paragraphId = requiredString(issue, "paragraphId");
+    const paragraph = paragraphMap.get(paragraphId);
+    const issueKey = `${paragraphId}:${code}`;
+    if (!paragraph || seen.has(issueKey)) {
+      throw new ScriptAttributionParseError("出处审计引用了不存在或重复的正文问题");
+    }
+    seen.add(issueKey);
+    if (!Array.isArray(issue.sourceReferences) || issue.sourceReferences.length === 0) {
+      throw new ScriptAttributionParseError("出处问题必须绑定真实原始素材");
+    }
+    const sourceReferences = issue.sourceReferences.map(rawReference => {
+      const reference = asObject(rawReference);
+      if (!reference) throw new ScriptAttributionParseError("出处问题包含非法素材编号");
+      const sourceId = requiredString(reference, "sourceId");
+      const itemId = requiredString(reference, "itemId");
+      if (!allowedReferenceMap.has(`${sourceId}:${itemId}`)) {
+        throw new ScriptAttributionParseError("出处问题引用了不存在的原始素材");
+      }
+      return { sourceId, itemId };
+    });
+    return {
+      code,
+      sectionIndex: paragraph.sectionIndex,
+      paragraphIndex: paragraph.paragraphIndex,
+      excerpt: paragraph.text,
+      sourceReferences,
+      reason: requiredString(issue, "reason"),
+    };
+  });
+  return {
+    paragraphAttributions,
+    sourceIntegrityAudit: {
+      status: issues.length > 0 ? "needs_review" : "passed",
+      deliveryBlocked: issues.length > 0,
+      issues,
+    },
+  };
+}
+
 export function buildAttributionAudit(input: {
   coverage: CoverageLevel;
   coveredDimensions: string[];
@@ -236,9 +315,14 @@ export function buildFactAudit(input: {
   };
 }
 
-export const ATTRIBUTION_AUDIT_SYSTEM = `你是独立的脚本观点归属审计员。你不负责写稿、改稿或评价文采，只判断正文每一段的内容来源。
+export const ATTRIBUTION_AUDIT_SYSTEM = `你是独立的脚本观点归属与出处审计员。你不负责写稿、改稿或评价文采，只判断正文每一段的内容来源和表述真实性。
 teacher_explicit表示与老师原文直接对应；faithful_rewrite表示忠实重组但没有改变判断；ai_reasoning表示原始内容没有提供这层判断或推理；case_fact表示来自本次案例材料。
-老师表达类标记必须引用真实存在的sourceId和itemId。找不到老师出处时只能标记ai_reasoning。案例事实只能在确有案例材料时使用。每个正文段落必须且只能返回一次。只输出合法JSON对象。`;
+老师表达类标记必须引用真实存在的sourceId和itemId。找不到老师出处时只能标记ai_reasoning。案例事实只能在确有案例材料时使用。每个正文段落必须且只能返回一次。
+同时逐段检查以下三类出处问题：
+1. responsibility_subject_distortion：原始素材只是外部质疑、文献记载或第三方判断，正文却改写为当事人本人陈述前后矛盾。
+2. unsupported_arbitration：正文作出承接、转折、归纳或消解多份素材张力的判断，但原始素材没有提供该结论。无论是否使用连接词都要检查；“我觉得”“我理解”等在场表达不能豁免多素材仲裁。ai_reasoning豁免只限对单一素材的感性延伸，不能用于消解多素材张力。
+3. certainty_shift：正文把原始素材中的确定数字或确定范围擅自模糊化，或把模糊数量、模糊群体擅自精确化。对“老一辈”等模糊群体增加“并不代表所有人”等负向限定是允许的，不属于问题。
+每个出处问题必须引用受影响的真实sourceId和itemId；没有问题时integrityIssues返回空数组。只输出合法JSON对象。`;
 
 export function buildAttributionAuditPrompt(input: {
   paragraphs: AttributionParagraph[];
@@ -265,6 +349,12 @@ ${input.caseEvidence ? JSON.stringify(input.caseEvidence, null, 2) : "无"}
     "attributionType": "teacher_explicit|faithful_rewrite|ai_reasoning|case_fact",
     "sourceReferences": [{"sourceId": "真实sourceId", "itemId": "真实itemId"}],
     "reason": "这段为什么属于该来源类型"
+  }],
+  "integrityIssues": [{
+    "code": "responsibility_subject_distortion|unsupported_arbitration|certainty_shift",
+    "paragraphId": "S1-P1",
+    "sourceReferences": [{"sourceId": "真实sourceId", "itemId": "真实itemId"}],
+    "reason": "正文如何改变了责任主体、加入无出处仲裁，或改变了原始确定程度"
   }]
 }`;
 }
