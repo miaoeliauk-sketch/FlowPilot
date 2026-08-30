@@ -1869,6 +1869,7 @@ export default function ScriptFactoryPage() {
               <div className="mb-5 rounded-[12px] border border-[#E8C96A] bg-[#FFF8DC] p-4 text-[#755700]" role="alert">
                 <div className="text-[13px] font-bold">疑似违反通用禁用规则，等待人工确认</div>
                 <p className="mt-1 text-[12px] leading-5">关键词命中不等于已经违规。系统暂未进行语义裁决，当前结果尚未保存。</p>
+                <p className="mt-1 text-[12px] leading-5">当前检测只能识别明确的高风险表达，可能存在遗漏，最终内容合规性仍需要你自己整体判断。</p>
                 <ul className="mt-2 list-disc pl-5 text-[12px] leading-5">
                   {pendingConstraintReview.detection.matches.map((match, index) => (
                     <li key={`${match.ruleId}-${match.start}-${index}`}>

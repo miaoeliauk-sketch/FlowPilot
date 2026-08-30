@@ -350,6 +350,7 @@ test("服务端已启用规则命中脚本时先展示结果但暂缓保存", as
 
     assert.ok(await view.findByText("我们反对用‘被时代抛弃’这种说法贩卖焦虑。"));
     assert.ok(view.getByText("疑似违反通用禁用规则，等待人工确认"));
+    assert.ok(view.getByText("当前检测只能识别明确的高风险表达，可能存在遗漏，最终内容合规性仍需要你自己整体判断。"));
     assert.ok(view.getByText(/命中通用禁用规则《禁止利用无力感进行情绪绑架》/));
     assert.ok(view.getByText(/涉及口播正文、分镜口播、分镜字幕/));
     assert.equal(getScriptAssets(SHUIMURAN.id).length, 0);

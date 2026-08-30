@@ -2,6 +2,7 @@ import {
   detectGlobalBlockingConstraints,
   type GlobalBlockingConstraintMatch,
 } from "./global-content-constraint-detector";
+import { detectProductionInstructionRisks } from "./global-content-production-intent-detector";
 
 export type ScriptFactoryConstraintMatchSource =
   | "标题"
@@ -117,14 +118,18 @@ export function auditScriptFactoryGlobalConstraints(
     text: string,
     parentCandidates: readonly AuditedSurface[] = [],
     mergeEquivalentAcrossSurfaces = false,
+    inspectProductionIntent = false,
   ): AuditedSurface {
     const parent = text ? uniqueRelatedParent(text, parentCandidates) : null;
     const detection = detectGlobalBlockingConstraints(text, rules);
+    const detectedMatches = inspectProductionIntent
+      ? [...detection.matches, ...detectProductionInstructionRisks(text, rules)]
+      : detection.matches;
     const surface: AuditedSurface = {
       id,
       source,
       text,
-      occurrences: detection.matches.map(match => {
+      occurrences: detectedMatches.map(match => {
         const relativeStart = parent ? match.start - parent.childTextOffset : -1;
         const relativeEnd = parent ? match.end - parent.childTextOffset : -1;
         const parentOccurrence = parent
@@ -158,6 +163,15 @@ export function auditScriptFactoryGlobalConstraints(
     return surface;
   }
 
+  function addProductionSurface(
+    id: string,
+    source: ScriptFactoryConstraintMatchSource,
+    text: string,
+    parentCandidates: readonly AuditedSurface[] = [],
+  ): AuditedSurface {
+    return addSurface(id, source, text, parentCandidates, false, true);
+  }
+
   input.titles.forEach((item, index) => {
     addSurface(`title:${index}:title`, "标题", item.title, [], true);
     addSurface(`title:${index}:formula`, "标题", item.formula ?? "", [], true);
@@ -187,7 +201,7 @@ export function auditScriptFactoryGlobalConstraints(
   const storyboardSceneSurfaces: AuditedSurface[] = [];
   input.storyboard.forEach((row, index) => {
     addSurface(`storyboard:${index}:time`, "分镜时间", row.time);
-    const scene = addSurface(`storyboard:${index}:scene`, "分镜画面", row.scene);
+    const scene = addProductionSurface(`storyboard:${index}:scene`, "分镜画面", row.scene);
     storyboardSceneSurfaces.push(scene);
     const voiceover = addSurface(
       `storyboard:${index}:voiceover`,
@@ -201,27 +215,27 @@ export function auditScriptFactoryGlobalConstraints(
       row.subtitle,
       [voiceover],
     ));
-    addSurface(`storyboard:${index}:shot`, "分镜镜头", row.shot);
-    addSurface(`storyboard:${index}:material`, "分镜素材", row.material);
-    addSurface(`storyboard:${index}:editing`, "分镜剪辑建议", row.editingTip);
+    addProductionSurface(`storyboard:${index}:shot`, "分镜镜头", row.shot);
+    addProductionSurface(`storyboard:${index}:material`, "分镜素材", row.material);
+    addProductionSurface(`storyboard:${index}:editing`, "分镜剪辑建议", row.editingTip);
   });
 
   input.shootingSuggestions.forEach((text, index) =>
-    addSurface(`shooting:${index}`, "拍摄建议", text));
+    addProductionSurface(`shooting:${index}`, "拍摄建议", text));
   input.shotPrompts.forEach((item, index) => {
-    addSurface(`shot-prompt:${index}:scene`, "镜头提示词", item.scene, storyboardSceneSurfaces);
-    addSurface(`shot-prompt:${index}:prompt`, "镜头提示词", item.prompt);
+    addProductionSurface(`shot-prompt:${index}:scene`, "镜头提示词", item.scene, storyboardSceneSurfaces);
+    addProductionSurface(`shot-prompt:${index}:prompt`, "镜头提示词", item.prompt);
   });
   input.editingRhythm.subtitleHighlights.forEach((text, index) =>
-    addSurface(`editing:subtitle:${index}`, "剪辑建议", text, storyboardSubtitleSurfaces));
+    addProductionSurface(`editing:subtitle:${index}`, "剪辑建议", text, storyboardSubtitleSurfaces));
   input.editingRhythm.soundEffects.forEach((text, index) =>
-    addSurface(`editing:sound:${index}`, "剪辑建议", text));
+    addProductionSurface(`editing:sound:${index}`, "剪辑建议", text));
   input.editingRhythm.screenRecordingCuts.forEach((text, index) =>
-    addSurface(`editing:screen:${index}`, "剪辑建议", text));
+    addProductionSurface(`editing:screen:${index}`, "剪辑建议", text));
   input.editingRhythm.caseInserts.forEach((text, index) =>
-    addSurface(`editing:case:${index}`, "剪辑建议", text));
+    addProductionSurface(`editing:case:${index}`, "剪辑建议", text));
   input.editingRhythm.pauses.forEach((text, index) =>
-    addSurface(`editing:pause:${index}`, "剪辑建议", text));
+    addProductionSurface(`editing:pause:${index}`, "剪辑建议", text));
 
   const matches = [...grouped.values()];
   return {

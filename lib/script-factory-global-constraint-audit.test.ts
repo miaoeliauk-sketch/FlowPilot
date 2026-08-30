@@ -184,3 +184,70 @@ test("同一标题句子中的真实多次命中保留且标题说明副本不�
   assert.deepEqual(result.matches.map(match => match.sources), [["标题"], ["标题"]]);
   assert.notEqual(result.matches[0]?.start, result.matches[1]?.start);
 });
+
+test("拍摄制作层的情绪操纵执行指令会被通用规则拦截", () => {
+  const input = emptyAuditInput();
+  input.storyboard = [{
+    time: "0—8秒",
+    scene: "人物正面口播",
+    voiceover: "先解释这种焦虑从哪里来。",
+    subtitle: "先看清焦虑来源",
+    shot: "中景",
+    material: "",
+    editingTip: "加入紧张的心跳声或低频音效，营造焦虑感",
+  }];
+  input.shootingSuggestions = ["通过压低光线强化无力感"];
+  input.editingRhythm.subtitleHighlights = ["放大警告字幕，制造恐慌"];
+
+  const result = auditScriptFactoryGlobalConstraints(input, [activeRuleFixture()]);
+
+  assert.equal(result.reviewRequired, true);
+  assert.deepEqual(
+    result.matches.map(match => ({ matchedText: match.matchedText, sources: match.sources })),
+    [
+      { matchedText: "营造焦虑感", sources: ["分镜剪辑建议"] },
+      { matchedText: "强化无力感", sources: ["拍摄建议"] },
+      { matchedText: "制造恐慌", sources: ["剪辑建议"] },
+    ],
+  );
+});
+
+test("明确风险短语即使处于批评语境也只做召回并交由人工判断", () => {
+  const input = emptyAuditInput();
+  input.storyboard = [{
+    time: "0—8秒",
+    scene: "人物正面口播",
+    voiceover: "先解释这种焦虑从哪里来。",
+    subtitle: "先看清焦虑来源",
+    shot: "中景",
+    material: "",
+    editingTip: "不要加入心跳声营造焦虑感",
+  }];
+  input.shootingSuggestions = ["避免通过压低光线强化无力感"];
+  input.editingRhythm.subtitleHighlights = ["反对用放大字幕制造恐慌"];
+
+  const result = auditScriptFactoryGlobalConstraints(input, [activeRuleFixture()]);
+
+  assert.equal(result.reviewRequired, true);
+  assert.deepEqual(
+    result.matches.map(match => ({ matchedText: match.matchedText, sources: match.sources })),
+    [
+      { matchedText: "营造焦虑感", sources: ["分镜剪辑建议"] },
+      { matchedText: "强化无力感", sources: ["拍摄建议"] },
+      { matchedText: "制造恐慌", sources: ["剪辑建议"] },
+    ],
+  );
+});
+
+test("音效字段中的情绪操纵执行指令会被拦截", () => {
+  const input = emptyAuditInput();
+  input.editingRhythm.soundEffects = ["持续叠加低频心跳声，营造焦虑感"];
+
+  const result = auditScriptFactoryGlobalConstraints(input, [activeRuleFixture()]);
+
+  assert.equal(result.reviewRequired, true);
+  assert.deepEqual(
+    result.matches.map(match => ({ matchedText: match.matchedText, sources: match.sources })),
+    [{ matchedText: "营造焦虑感", sources: ["剪辑建议"] }],
+  );
+});
