@@ -51,9 +51,11 @@ test("所有规则的一次性挑战统一提供至少五分钟有效期", () =>
   const emotional = issueGlobalConstraintChallenge("emotional-coercion-v2");
   const facts = issueGlobalConstraintChallenge("untraceable-facts-v1");
   const voice = issueGlobalConstraintChallenge("unauthorized-ip-voice-v1");
+  const integrity = issueGlobalConstraintChallenge("confirmed-core-integrity-v1");
   const minimumExpiry = issuedAt + 5 * 60 * 1000;
 
   assert.ok(Date.parse(emotional.expiresAt) >= minimumExpiry);
   assert.ok(Date.parse(facts.expiresAt) >= minimumExpiry);
   assert.ok(Date.parse(voice.expiresAt) >= minimumExpiry);
+  assert.ok(Date.parse(integrity.expiresAt) >= minimumExpiry);
 });

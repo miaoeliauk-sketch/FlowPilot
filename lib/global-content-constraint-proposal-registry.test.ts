@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -123,6 +123,51 @@ test("服务端固定提案库完整返回禁止越权发声规则且保持待�
   }
 });
 
+test("服务端固定提案库完整返回禁止静默修改规则及两层保护范围", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-confirmed-core-integrity-proposal-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = path.join(directory, "ledger.json");
+  try {
+    const response = await getGlobalConstraintProposals(new NextRequest(
+      "http://localhost/api/global-content-constraint/proposals",
+    ));
+    const body = await response.json();
+    const item = body.proposals.find((candidate: { proposal: { proposalId: string } }) => (
+      candidate.proposal.proposalId === "confirmed-core-integrity-v1"
+    ));
+
+    assert.equal(response.status, 200);
+    assert.ok(item);
+    assert.equal(item.confirmationStatus, "pending_confirmation");
+    assert.equal(item.runtimeStatus, "detection_pending");
+    assert.equal(item.proposal.title, "禁止静默修改已确权的核心逻辑");
+    assert.equal(item.proposal.detectionTerms, null);
+    assert.equal(item.proposal.activationMode, "confirmed_pending_detection");
+    assert.deepEqual(item.proposal.protectedConfirmedAssets, [
+      "所有IP通用底线。",
+      "IP专属规则。",
+      "已确认的观点、事实、判断和认知节点。",
+      "与上述内容绑定的原始来源、版本和人工确认凭证。",
+    ]);
+    assert.deepEqual(item.proposal.protectedFormalRecords, [
+      "已发布或已保存为终稿的脚本、文案和正式回复不得被静默覆盖。",
+      "后续修改应形成新版本并保留历史记录。",
+      "尚未保存或发布的普通草稿可以自由编辑，不要求每次修改都走正式确认。",
+    ]);
+    assert.match(item.proposal.canonicalText, /【核心判断】/);
+    assert.match(item.proposal.canonicalText, /【第一层保护：核心确权资产】/);
+    assert.match(item.proposal.canonicalText, /【第二层保护：正式内容记录】/);
+    assert.match(item.proposal.canonicalText, /【典型禁止场景】/);
+    assert.match(item.proposal.canonicalText, /【允许边界】/);
+    assert.match(item.proposal.canonicalText, /修改规则正文后继续沿用原来的确认凭证/);
+    assert.match(item.proposal.canonicalText, /系统格式升级可以执行，但必须能够证明升级前后正文、规则含义和确认关系没有改变/);
+  } finally {
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("确认不可溯源事实规则时追加登记并完整保留已生效的禁止情绪绑架规则", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-constraint-append-"));
   const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
@@ -220,6 +265,77 @@ test("确认禁止越权发声规则时追加第三条登记且前两条记录�
     assert.equal(added?.recordType, "confirmed_proposal");
     assert.equal(added?.proposalId, "unauthorized-ip-voice-v1");
     assert.equal(added?.proposal?.detectionTerms, null);
+  } finally {
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("确认禁止静默修改规则时只追加第四条且前三条记录逐字不变", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-constraint-fourth-append-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  const ledgerFile = path.join(directory, "ledger.json");
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = ledgerFile;
+  try {
+    assert.equal((await confirmProposal("emotional-coercion-v2", "existing-emotional-rule")).status, 200);
+    assert.equal((await confirmProposal("untraceable-facts-v1", "existing-untraceable-rule")).status, 200);
+    assert.equal((await confirmProposal("unauthorized-ip-voice-v1", "existing-unauthorized-rule")).status, 200);
+
+    const before = JSON.parse(await readFile(ledgerFile, "utf8")) as { records: unknown[] };
+    const response = await confirmProposal("confirmed-core-integrity-v1", "confirm-core-integrity");
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.confirmationStatus, "confirmed_pending_detection");
+    assert.equal(body.runtimeStatus, "detection_pending");
+    assert.equal(body.rule, null);
+    assert.equal(body.proposal.proposalId, "confirmed-core-integrity-v1");
+    assert.match(body.proposal.canonicalText, /【第一层保护：核心确权资产】/);
+    assert.match(body.proposal.canonicalText, /【第二层保护：正式内容记录】/);
+
+    const after = JSON.parse(await readFile(ledgerFile, "utf8")) as {
+      schemaVersion: number;
+      records: Array<{
+        recordType: string;
+        proposalId: string;
+        proposal?: { proposalId: string; detectionTerms: null };
+      }>;
+    };
+    assert.equal(after.schemaVersion, 2);
+    assert.equal(after.records.length, 4);
+    assert.deepEqual(after.records.slice(0, 3), before.records);
+    assert.equal(after.records[3]?.recordType, "confirmed_proposal");
+    assert.equal(after.records[3]?.proposalId, "confirmed-core-integrity-v1");
+    assert.equal(after.records[3]?.proposal?.proposalId, "confirmed-core-integrity-v1");
+    assert.equal(after.records[3]?.proposal?.detectionTerms, null);
+  } finally {
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("第四条规则确认后若自身正文被静默篡改则整个服务端账本拒绝读取", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-constraint-self-protection-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  const ledgerFile = path.join(directory, "ledger.json");
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = ledgerFile;
+  try {
+    assert.equal((await confirmProposal("confirmed-core-integrity-v1", "confirm-self-protection")).status, 200);
+    const ledger = JSON.parse(await readFile(ledgerFile, "utf8")) as {
+      records: Array<{ proposal?: { canonicalText?: string } }>;
+    };
+    assert.ok(ledger.records[0]?.proposal?.canonicalText);
+    ledger.records[0]!.proposal!.canonicalText = "被静默篡改的规则正文";
+    await writeFile(ledgerFile, `${JSON.stringify(ledger, null, 2)}\n`, "utf8");
+
+    const response = await getGlobalConstraintProposals(new NextRequest(
+      "http://localhost/api/global-content-constraint/proposals",
+    ));
+    const body = await response.json();
+    assert.equal(response.status, 500);
+    assert.equal(body.code, "LEDGER_CORRUPTED");
   } finally {
     if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
     else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;

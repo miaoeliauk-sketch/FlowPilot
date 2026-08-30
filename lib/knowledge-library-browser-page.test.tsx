@@ -402,6 +402,37 @@ test("知识库治理入口列出多条服务端提案并支持逐条核对、�
     activationMode: "confirmed_pending_detection",
     confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
   };
+  const integrityProposal = {
+    proposalId: "confirmed-core-integrity-v1",
+    ruleId: "global-constraint-confirmed-core-integrity-v1",
+    title: "禁止静默修改已确权的核心逻辑",
+    canonicalText: [
+      "【核心判断】",
+      "禁止任何自动化流程静默覆盖已确权内容的核心含义。",
+      "",
+      "【第一层保护：核心确权资产】",
+      "所有IP通用底线、IP专属规则和已确认认知。",
+      "",
+      "【第二层保护：正式内容记录】",
+      "已保存的终稿不得被静默覆盖。",
+      "",
+      "【典型禁止场景】",
+      "修改规则正文后继续沿用原来的确认凭证。",
+      "",
+      "【允许边界】",
+      "系统可以提出新版本草案，但必须保持未确认状态。",
+    ].join("\n"),
+    prohibitedIntent: "静默覆盖或改变已确权内容的核心含义",
+    traceabilityStandards: [],
+    applicableScopes: ["核心确权资产", "正式内容记录"],
+    priorityRedlines: [],
+    prohibitedScenarios: ["修改规则正文后继续沿用原来的确认凭证"],
+    allowedBoundaries: ["可以提出新版本草案，但必须保持未确认状态"],
+    runtimePositioning: "确权资产版本保护，执行范围待配置",
+    detectionTerms: null,
+    activationMode: "confirmed_pending_detection",
+    confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
+  };
   let confirmed = false;
   const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
   const originalFetch = globalThis.fetch;
@@ -429,6 +460,13 @@ test("知识库治理入口列出多条服务端提案并支持逐条核对、�
           },
           {
             proposal: voiceProposal,
+            confirmationStatus: "pending_confirmation",
+            runtimeStatus: "detection_pending",
+            rule: null,
+            sourceFacts: null,
+          },
+          {
+            proposal: integrityProposal,
             confirmationStatus: "pending_confirmation",
             runtimeStatus: "detection_pending",
             rule: null,
@@ -476,6 +514,14 @@ test("知识库治理入口列出多条服务端提案并支持逐条核对、�
     assert.match(dialog.textContent ?? "", /本人逐次确认边界，检测范围待配置/);
     assert.match(dialog.textContent ?? "", /系统不会宣称已经具备该规则的自动检测能力/);
     assert.doesNotMatch(dialog.textContent ?? "", /自动判断事实真假/);
+    assert.ok(within(dialog).getByRole("button", { name: "确认规则内容并登记" }));
+
+    const integrityRuleButton = await within(dialog).findByRole("button", { name: /禁止静默修改已确权的核心逻辑.*待确认/ });
+    await user.click(integrityRuleButton);
+    assert.match(dialog.textContent ?? "", /【第一层保护：核心确权资产】/);
+    assert.match(dialog.textContent ?? "", /【第二层保护：正式内容记录】/);
+    assert.match(dialog.textContent ?? "", /修改规则正文后继续沿用原来的确认凭证/);
+    assert.match(dialog.textContent ?? "", /确权资产版本保护，执行范围待配置/);
     assert.ok(within(dialog).getByRole("button", { name: "确认规则内容并登记" }));
 
     const newRuleButton = await within(dialog).findByRole("button", { name: /禁止编造不可溯源的事实.*待确认/ });

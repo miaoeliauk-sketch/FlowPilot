@@ -20,6 +20,8 @@ export interface GlobalConstraintProposal {
   judgmentStandards?: readonly string[];
   highRiskScenarios?: readonly string[];
   keyExamples?: readonly string[];
+  protectedConfirmedAssets?: readonly string[];
+  protectedFormalRecords?: readonly string[];
 }
 
 export const EMOTIONAL_COERCION_PROPOSAL = Object.freeze({
@@ -195,10 +197,82 @@ export const UNAUTHORIZED_IP_VOICE_PROPOSAL = Object.freeze({
   keyExamples: UNAUTHORIZED_IP_VOICE_KEY_EXAMPLES,
 } satisfies GlobalConstraintProposal);
 
+const CONFIRMED_CORE_INTEGRITY_CORE = [
+  "禁止任何自动化流程、模型调用或后台同步，静默覆盖或改变已确权规则、认知及正式内容的核心含义。任何语义变化必须生成新版本，保留旧版本和变更记录，并重新取得人工确认；原确认凭证不得沿用。",
+  "禁止的是静默覆盖，不是禁止修正。系统可以提出修改草案，但不能把草案冒充成已经确认的新事实。",
+] as const;
+
+const CONFIRMED_CORE_INTEGRITY_ASSETS = [
+  "所有IP通用底线。",
+  "IP专属规则。",
+  "已确认的观点、事实、判断和认知节点。",
+  "与上述内容绑定的原始来源、版本和人工确认凭证。",
+] as const;
+
+const CONFIRMED_CORE_INTEGRITY_FORMAL_RECORDS = [
+  "已发布或已保存为终稿的脚本、文案和正式回复不得被静默覆盖。",
+  "后续修改应形成新版本并保留历史记录。",
+  "尚未保存或发布的普通草稿可以自由编辑，不要求每次修改都走正式确认。",
+] as const;
+
+const CONFIRMED_CORE_INTEGRITY_PROHIBITED_SCENARIOS = [
+  "把“可以尝试”静默改成“必须执行”。",
+  "合并重复知识时丢失适用条件、限制或例外。",
+  "用旧版本覆盖用户后来确认的新立场。",
+  "自动学习后直接改写IP观点或通用底线。",
+  "修改规则正文后继续沿用原来的确认凭证。",
+  "切换IP或同步数据时，将另一个IP的规则覆盖进当前IP。",
+  "将AI提出的修改建议直接写成正式知识，不经过人工确认。",
+] as const;
+
+const CONFIRMED_CORE_INTEGRITY_ALLOWED_BOUNDARIES = [
+  "系统可以生成修改建议或新版本草案，但必须明确保持未确认状态。",
+  "排版、显示样式和排序调整不属于核心含义变化。",
+  "搜索索引、向量、缓存等派生数据可以重新生成，但不得反向覆盖原始确权内容。",
+  "不改变含义的展示性元数据可以调整，并应留下必要的操作记录。",
+  "系统格式升级可以执行，但必须能够证明升级前后正文、规则含义和确认关系没有改变。",
+] as const;
+
+export const CONFIRMED_CORE_INTEGRITY_PROPOSAL = Object.freeze({
+  proposalId: "confirmed-core-integrity-v1",
+  ruleId: "global-constraint-confirmed-core-integrity-v1",
+  title: "禁止静默修改已确权的核心逻辑",
+  canonicalText: [
+    "【核心判断】",
+    ...CONFIRMED_CORE_INTEGRITY_CORE,
+    "",
+    "【第一层保护：核心确权资产】",
+    ...CONFIRMED_CORE_INTEGRITY_ASSETS.map((item, index) => `${index + 1}. ${item}`),
+    "任何含义变化都必须形成新版本，重新人工确认，并保留旧版本供回溯。",
+    "",
+    "【第二层保护：正式内容记录】",
+    ...CONFIRMED_CORE_INTEGRITY_FORMAL_RECORDS.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【典型禁止场景】",
+    ...CONFIRMED_CORE_INTEGRITY_PROHIBITED_SCENARIOS.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【允许边界】",
+    ...CONFIRMED_CORE_INTEGRITY_ALLOWED_BOUNDARIES.map((item, index) => `${index + 1}. ${item}`),
+  ].join("\n"),
+  prohibitedIntent: CONFIRMED_CORE_INTEGRITY_CORE.join("\n"),
+  traceabilityStandards: [],
+  applicableScopes: ["核心确权资产", "正式内容记录"],
+  priorityRedlines: [],
+  prohibitedScenarios: CONFIRMED_CORE_INTEGRITY_PROHIBITED_SCENARIOS,
+  allowedBoundaries: CONFIRMED_CORE_INTEGRITY_ALLOWED_BOUNDARIES,
+  runtimePositioning: "确权资产版本保护，执行范围待配置",
+  detectionTerms: null,
+  activationMode: "confirmed_pending_detection",
+  confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
+  protectedConfirmedAssets: CONFIRMED_CORE_INTEGRITY_ASSETS,
+  protectedFormalRecords: CONFIRMED_CORE_INTEGRITY_FORMAL_RECORDS,
+} satisfies GlobalConstraintProposal);
+
 export const GLOBAL_CONSTRAINT_PROPOSALS = Object.freeze([
   EMOTIONAL_COERCION_PROPOSAL,
   UNTRACEABLE_FACTS_PROPOSAL,
   UNAUTHORIZED_IP_VOICE_PROPOSAL,
+  CONFIRMED_CORE_INTEGRITY_PROPOSAL,
 ] satisfies readonly GlobalConstraintProposal[]);
 
 export function getGlobalConstraintProposal(proposalId: unknown): GlobalConstraintProposal | null {
