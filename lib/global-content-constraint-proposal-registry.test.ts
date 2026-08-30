@@ -35,9 +35,9 @@ async function confirmProposal(proposalId: string, idempotencyKey: string) {
     challenge: issued.challenge,
     idempotencyKey,
     confirmedBy: "彭彭",
-    acknowledgement: proposalId === "untraceable-facts-v1"
-      ? "我已逐字核对并确认规则内容，检测范围待配置"
-      : "我已逐字核对并确认启用",
+    acknowledgement: proposalId === "emotional-coercion-v2"
+      ? "我已逐字核对并确认启用"
+      : "我已逐字核对并确认规则内容，检测范围待配置",
   }));
 }
 
@@ -75,6 +75,47 @@ test("服务端固定提案库完整返回不可溯源事实规则且浏览器�
     assert.match(item.proposal.canonicalText, /【允许边界】/);
     assert.match(item.proposal.canonicalText, /精确数据、直接引语以及医疗、金融等高风险领域的结论，需要额外对外标明来源/);
     assert.match(item.proposal.canonicalText, /文学创作可以虚构，但不得冒充真实报道、真实案例或IP亲历/);
+  } finally {
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("服务端固定提案库完整返回禁止越权发声规则且保持待确认、待配置状态", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-unauthorized-voice-proposal-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = path.join(directory, "ledger.json");
+  try {
+    const response = await getGlobalConstraintProposals(new NextRequest(
+      "http://localhost/api/global-content-constraint/proposals",
+    ));
+    const body = await response.json();
+    const item = body.proposals.find((candidate: { proposal: { proposalId: string } }) => (
+      candidate.proposal.proposalId === "unauthorized-ip-voice-v1"
+    ));
+
+    assert.equal(response.status, 200);
+    assert.ok(item);
+    assert.equal(item.confirmationStatus, "pending_confirmation");
+    assert.equal(item.runtimeStatus, "detection_pending");
+    assert.equal(item.proposal.title, "禁止越权代表IP主体发声");
+    assert.equal(item.proposal.detectionTerms, null);
+    assert.equal(item.proposal.activationMode, "confirmed_pending_detection");
+    assert.deepEqual(item.proposal.judgmentStandards, [
+      "第一条底线判断“这件事是否真实、有无依据”。",
+      "本条底线判断“即使事情真实，系统是否有权代表IP公开说出或发送”。",
+      "第一人称只是一种表达方式，不自动构成越权。依据已确权观点进行自然代笔属于允许范围。",
+    ]);
+    assert.equal(item.proposal.highRiskScenarios.length, 6);
+    assert.match(item.proposal.canonicalText, /【核心判断】/);
+    assert.match(item.proposal.canonicalText, /【判断标准】/);
+    assert.match(item.proposal.canonicalText, /【适用范围】/);
+    assert.match(item.proposal.canonicalText, /【必须逐次确认的高风险场景】/);
+    assert.match(item.proposal.canonicalText, /【允许边界】/);
+    assert.match(item.proposal.canonicalText, /【关键例子】/);
+    assert.match(item.proposal.canonicalText, /“我下个月要涨价”/);
+    assert.match(item.proposal.canonicalText, /决定权始终属于IP本人/);
   } finally {
     if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
     else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
@@ -136,6 +177,49 @@ test("确认不可溯源事实规则时追加登记并完整保留已生效的�
     assert.equal(existingStatus.runtimeStatus, "active");
     assert.equal(addedStatus.confirmationStatus, "confirmed_pending_detection");
     assert.equal(addedStatus.runtimeStatus, "detection_pending");
+  } finally {
+    if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+    else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("确认禁止越权发声规则时追加第三条登记且前两条记录保持不变", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-constraint-third-append-"));
+  const previousLedgerFile = process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
+  const ledgerFile = path.join(directory, "ledger.json");
+  process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = ledgerFile;
+  try {
+    assert.equal((await confirmProposal("emotional-coercion-v2", "existing-emotional-rule")).status, 200);
+    assert.equal((await confirmProposal("untraceable-facts-v1", "existing-untraceable-rule")).status, 200);
+
+    const before = await readFile(ledgerFile, "utf8");
+    const response = await confirmProposal("unauthorized-ip-voice-v1", "confirm-unauthorized-ip-voice");
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.confirmationStatus, "confirmed_pending_detection");
+    assert.equal(body.runtimeStatus, "detection_pending");
+    assert.equal(body.rule, null);
+    assert.equal(body.proposal.proposalId, "unauthorized-ip-voice-v1");
+    assert.match(body.proposal.canonicalText, /“我下个月要涨价”/);
+
+    const beforeLedger = JSON.parse(before) as { records: unknown[] };
+    const afterLedger = JSON.parse(await readFile(ledgerFile, "utf8")) as {
+      schemaVersion: number;
+      records: Array<{
+        recordType: string;
+        proposalId: string;
+        proposal?: { detectionTerms: null };
+      }>;
+    };
+    assert.equal(afterLedger.schemaVersion, 2);
+    assert.equal(afterLedger.records.length, 3);
+    assert.deepEqual(afterLedger.records.slice(0, 2), beforeLedger.records);
+    const added = afterLedger.records[2];
+    assert.equal(added?.recordType, "confirmed_proposal");
+    assert.equal(added?.proposalId, "unauthorized-ip-voice-v1");
+    assert.equal(added?.proposal?.detectionTerms, null);
   } finally {
     if (previousLedgerFile === undefined) delete process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE;
     else process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE = previousLedgerFile;

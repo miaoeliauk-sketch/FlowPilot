@@ -162,7 +162,7 @@ export function GlobalConstraintConfirmationPanel({ onClose }: { onClose: () => 
             {selected.proposal.detectionTerms === null && (
               <section className="rounded-[14px] border border-[#E8D7B7] bg-[#FFF9ED] p-4 text-[12px] leading-5 text-[#6B5122]">
                 <p className="font-semibold">检测词和召回范围尚未配置</p>
-                <p className="mt-1">本次只确认规则内容。系统不会宣称已经能够自动判断事实真假，也不会在检测范围确定前将它作为运行时拦截规则。</p>
+                <p className="mt-1">本次只确认规则内容。系统不会宣称已经具备该规则的自动检测能力，也不会在检测范围确定前将它作为运行时拦截规则。</p>
               </section>
             )}
 

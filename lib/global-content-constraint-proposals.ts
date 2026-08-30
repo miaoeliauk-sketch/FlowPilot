@@ -17,6 +17,9 @@ export interface GlobalConstraintProposal {
   detectionTerms: readonly string[] | null;
   activationMode: GlobalConstraintActivationMode;
   confirmationAcknowledgement: string;
+  judgmentStandards?: readonly string[];
+  highRiskScenarios?: readonly string[];
+  keyExamples?: readonly string[];
 }
 
 export const EMOTIONAL_COERCION_PROPOSAL = Object.freeze({
@@ -116,9 +119,86 @@ export const UNTRACEABLE_FACTS_PROPOSAL = Object.freeze({
   confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
 } satisfies GlobalConstraintProposal);
 
+const UNAUTHORIZED_IP_VOICE_CORE =
+  "普通观点可以依据已确权知识自然代笔；承诺、决定、敏感立场以及直接对外互动，必须由本人逐次确认。内容真实不等于系统已经获得公开表达或发送的授权。";
+
+const UNAUTHORIZED_IP_VOICE_JUDGMENT_STANDARDS = [
+  "第一条底线判断“这件事是否真实、有无依据”。",
+  "本条底线判断“即使事情真实，系统是否有权代表IP公开说出或发送”。",
+  "第一人称只是一种表达方式，不自动构成越权。依据已确权观点进行自然代笔属于允许范围。",
+] as const;
+
+const UNAUTHORIZED_IP_VOICE_APPLICABLE_SCOPES = [
+  "脚本、标题、发布文案和公开声明。",
+  "评论区回复、私信话术、公开回复及其他直接对外互动。",
+  "合作、价格、服务、交付、退款和效果承诺。",
+  "对个人、机构、行业事件及敏感议题的公开支持、反对或评价。",
+] as const;
+
+const UNAUTHORIZED_IP_VOICE_HIGH_RISK_SCENARIOS = [
+  "新增承诺：价格、退款、交付期限、收益和效果保证。",
+  "新增立场：公开支持、反对、评价某个人或机构。",
+  "新增决定：合作、涨价、停更、离职、投资等尚未确认的安排。",
+  "冒充经历：把已确权资料中不存在的事情写成“我亲身经历过”。",
+  "敏感发声：道歉、承认责任、法律回应、医疗或金融建议。",
+  "直接互动：发送评论、私信、公开回复或其他代表IP的对外消息。",
+] as const;
+
+const UNAUTHORIZED_IP_VOICE_ALLOWED_BOUNDARIES = [
+  "将已确权的IP观点改写成自然的第一人称。",
+  "引用原始资料中IP真实说过的话。",
+  "普通语气表达，例如“我更倾向于……”，前提是能对应到已确认观点。",
+  "明确标为草稿、模板或假设的内容，且尚未对外发送。",
+  "带占位符的文案，例如“我将在【日期】公布结果”，但系统不得擅自补造日期。",
+  "AI可以起草评论或私信，但不得未经本人确认直接发送。",
+] as const;
+
+const UNAUTHORIZED_IP_VOICE_KEY_EXAMPLES = [
+  "“我下个月要涨价”可能来自真实的内部计划，因此未必违反第一条规则；但未经本人批准公开，仍然违反本条规则。是否公开、何时公开以及以什么方式公开，决定权始终属于IP本人。",
+] as const;
+
+export const UNAUTHORIZED_IP_VOICE_PROPOSAL = Object.freeze({
+  proposalId: "unauthorized-ip-voice-v1",
+  ruleId: "global-constraint-unauthorized-ip-voice-v1",
+  title: "禁止越权代表IP主体发声",
+  canonicalText: [
+    "【核心判断】",
+    UNAUTHORIZED_IP_VOICE_CORE,
+    "",
+    "【判断标准】",
+    ...UNAUTHORIZED_IP_VOICE_JUDGMENT_STANDARDS.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【适用范围】",
+    ...UNAUTHORIZED_IP_VOICE_APPLICABLE_SCOPES.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【必须逐次确认的高风险场景】",
+    ...UNAUTHORIZED_IP_VOICE_HIGH_RISK_SCENARIOS.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【允许边界】",
+    ...UNAUTHORIZED_IP_VOICE_ALLOWED_BOUNDARIES.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【关键例子】",
+    ...UNAUTHORIZED_IP_VOICE_KEY_EXAMPLES,
+  ].join("\n"),
+  prohibitedIntent: "未经本人逐次确认，代表IP公开作出承诺、决定、敏感立场或直接发送对外互动消息。",
+  traceabilityStandards: [],
+  applicableScopes: UNAUTHORIZED_IP_VOICE_APPLICABLE_SCOPES,
+  priorityRedlines: [],
+  prohibitedScenarios: [],
+  allowedBoundaries: UNAUTHORIZED_IP_VOICE_ALLOWED_BOUNDARIES,
+  runtimePositioning: "本人逐次确认边界，检测范围待配置",
+  detectionTerms: null,
+  activationMode: "confirmed_pending_detection",
+  confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
+  judgmentStandards: UNAUTHORIZED_IP_VOICE_JUDGMENT_STANDARDS,
+  highRiskScenarios: UNAUTHORIZED_IP_VOICE_HIGH_RISK_SCENARIOS,
+  keyExamples: UNAUTHORIZED_IP_VOICE_KEY_EXAMPLES,
+} satisfies GlobalConstraintProposal);
+
 export const GLOBAL_CONSTRAINT_PROPOSALS = Object.freeze([
   EMOTIONAL_COERCION_PROPOSAL,
   UNTRACEABLE_FACTS_PROPOSAL,
+  UNAUTHORIZED_IP_VOICE_PROPOSAL,
 ] satisfies readonly GlobalConstraintProposal[]);
 
 export function getGlobalConstraintProposal(proposalId: unknown): GlobalConstraintProposal | null {

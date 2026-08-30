@@ -319,7 +319,7 @@ test("知识库独立治理入口通过服务端固定正文和一次性挑战�
   }
 });
 
-test("知识库治理入口列出多条服务端提案并逐字确认不可溯源事实规则", async () => {
+test("知识库治理入口列出多条服务端提案并支持逐条核对、独立确认", async () => {
   const newRuleText = [
     "【核心判断】",
     "禁止将未经验证、来源不明或超出原始证据的信息，以确定事实、真实案例、精确数据、直接引语或IP亲历的形式对外输出。",
@@ -374,6 +374,34 @@ test("知识库治理入口列出多条服务端提案并逐字确认不可溯�
     activationMode: "confirmed_pending_detection",
     confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
   };
+  const voiceProposal = {
+    proposalId: "unauthorized-ip-voice-v1",
+    ruleId: "global-constraint-unauthorized-ip-voice-v1",
+    title: "禁止越权代表IP主体发声",
+    canonicalText: [
+      "【核心判断】",
+      "内容真实不等于系统已经获得公开表达或发送的授权。",
+      "",
+      "【判断标准】",
+      "即使事情真实，系统是否有权代表IP公开说出或发送。",
+      "",
+      "【必须逐次确认的高风险场景】",
+      "新增承诺、决定、敏感立场和直接互动。",
+      "",
+      "【关键例子】",
+      "“我下个月要涨价”未经本人批准公开，仍然属于越权。",
+    ].join("\n"),
+    prohibitedIntent: "未经本人逐次确认，代表IP公开作出高风险表态或发送消息",
+    traceabilityStandards: [],
+    applicableScopes: ["脚本、标题、发布文案、公开声明和直接互动"],
+    priorityRedlines: [],
+    prohibitedScenarios: [],
+    allowedBoundaries: ["已确权普通观点的自然代笔", "仅起草但不发送"],
+    runtimePositioning: "本人逐次确认边界，检测范围待配置",
+    detectionTerms: null,
+    activationMode: "confirmed_pending_detection",
+    confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
+  };
   let confirmed = false;
   const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
   const originalFetch = globalThis.fetch;
@@ -398,6 +426,13 @@ test("知识库治理入口列出多条服务端提案并逐字确认不可溯�
             runtimeStatus: "detection_pending",
             rule: null,
             sourceFacts: confirmed ? { sourceType: "user_confirmed", confirmedBy: "彭彭" } : null,
+          },
+          {
+            proposal: voiceProposal,
+            confirmationStatus: "pending_confirmation",
+            runtimeStatus: "detection_pending",
+            rule: null,
+            sourceFacts: null,
           },
         ],
       }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -433,6 +468,16 @@ test("知识库治理入口列出多条服务端提案并逐字确认不可溯�
     const dialog = await view.findByRole("dialog", { name: "通用禁用规则人工确认" });
 
     assert.ok(await within(dialog).findByRole("button", { name: /禁止利用无力感进行情绪绑架.*已启用/ }));
+    const voiceRuleButton = await within(dialog).findByRole("button", { name: /禁止越权代表IP主体发声.*待确认/ });
+    await user.click(voiceRuleButton);
+    assert.match(dialog.textContent ?? "", /【判断标准】/);
+    assert.match(dialog.textContent ?? "", /【必须逐次确认的高风险场景】/);
+    assert.match(dialog.textContent ?? "", /“我下个月要涨价”/);
+    assert.match(dialog.textContent ?? "", /本人逐次确认边界，检测范围待配置/);
+    assert.match(dialog.textContent ?? "", /系统不会宣称已经具备该规则的自动检测能力/);
+    assert.doesNotMatch(dialog.textContent ?? "", /自动判断事实真假/);
+    assert.ok(within(dialog).getByRole("button", { name: "确认规则内容并登记" }));
+
     const newRuleButton = await within(dialog).findByRole("button", { name: /禁止编造不可溯源的事实.*待确认/ });
     await user.click(newRuleButton);
     assert.match(dialog.textContent ?? "", /【核心判断】/);
