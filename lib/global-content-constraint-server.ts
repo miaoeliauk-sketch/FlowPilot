@@ -11,7 +11,7 @@ import {
 } from "./global-content-constraint-proposals";
 import { calculateSHA256 } from "./sha256";
 
-const CHALLENGE_TTL_MS = 2 * 60 * 1000;
+const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
 export interface GlobalConstraintSourceFacts {
   sourceType: "user_confirmed";
@@ -61,6 +61,15 @@ interface ChallengeRecord {
   consumedBy: string | null;
 }
 
+interface GlobalConstraintRuntimeState {
+  challenges: Map<string, ChallengeRecord>;
+  confirmationQueue: Promise<unknown>;
+}
+
+type RuntimeGlobal = typeof globalThis & {
+  __flowpilotGlobalConstraintRuntimeState?: GlobalConstraintRuntimeState;
+};
+
 export class GlobalConstraintServerError extends Error {
   constructor(
     message: string,
@@ -72,8 +81,14 @@ export class GlobalConstraintServerError extends Error {
   }
 }
 
-const challenges = new Map<string, ChallengeRecord>();
-let confirmationQueue: Promise<unknown> = Promise.resolve();
+function getGlobalConstraintRuntimeState(): GlobalConstraintRuntimeState {
+  const runtimeGlobal = globalThis as RuntimeGlobal;
+  runtimeGlobal.__flowpilotGlobalConstraintRuntimeState ??= {
+    challenges: new Map<string, ChallengeRecord>(),
+    confirmationQueue: Promise.resolve(),
+  };
+  return runtimeGlobal.__flowpilotGlobalConstraintRuntimeState;
+}
 
 function ledgerFile(): string {
   return process.env.FLOWPILOT_GLOBAL_CONSTRAINT_LEDGER_FILE
@@ -263,6 +278,7 @@ export function issueGlobalConstraintChallenge(proposalId: unknown) {
   if (!proposal) {
     throw new GlobalConstraintServerError("待确认规则不存在", "UNKNOWN_PROPOSAL", 404);
   }
+  const { challenges } = getGlobalConstraintRuntimeState();
   const now = Date.now();
   for (const [id, record] of challenges) {
     if (record.expiresAt <= now) challenges.delete(id);
@@ -282,7 +298,8 @@ export function confirmGlobalConstraintOnServer(input: {
   confirmedBy: unknown;
   acknowledgement: unknown;
 }): Promise<ServerGlobalConstraintRecord> {
-  const operation = confirmationQueue.then(async () => {
+  const runtimeState = getGlobalConstraintRuntimeState();
+  const operation = runtimeState.confirmationQueue.then(async () => {
     const proposal = getGlobalConstraintProposal(input.proposalId);
     if (!proposal
       || typeof input.challengeId !== "string" || !input.challengeId
@@ -296,7 +313,7 @@ export function confirmGlobalConstraintOnServer(input: {
         400,
       );
     }
-    const challengeRecord = challenges.get(input.challengeId);
+    const challengeRecord = runtimeState.challenges.get(input.challengeId);
     if (!challengeRecord
       || challengeRecord.proposalId !== input.proposalId
       || challengeRecord.challenge !== input.challenge
@@ -388,7 +405,7 @@ export function confirmGlobalConstraintOnServer(input: {
     challengeRecord.consumedBy = input.idempotencyKey;
     return record;
   });
-  confirmationQueue = operation.catch(() => undefined);
+  runtimeState.confirmationQueue = operation.catch(() => undefined);
   return operation;
 }
 
