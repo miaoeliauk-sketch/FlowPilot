@@ -738,6 +738,7 @@ export async function POST(req: NextRequest) {
   let activeGlobalConstraints;
   try {
     activeGlobalConstraints = (await loadServerGlobalConstraintRecords())
+      .filter(record => record.recordType === "active_rule")
       .map(record => record.rule)
       .filter(rule => rule.status === "active");
   } catch {

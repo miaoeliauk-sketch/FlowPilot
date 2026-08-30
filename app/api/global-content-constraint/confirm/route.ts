@@ -48,7 +48,21 @@ export async function POST(request: NextRequest) {
   }
   try {
     const record = await confirmGlobalConstraintOnServer(requestRecord as Parameters<typeof confirmGlobalConstraintOnServer>[0]);
-    return NextResponse.json({ rule: record.rule, sourceFacts: record.sourceFacts });
+    if (record.recordType === "active_rule") {
+      return NextResponse.json({
+        confirmationStatus: "active",
+        runtimeStatus: "active",
+        rule: record.rule,
+        sourceFacts: record.sourceFacts,
+      });
+    }
+    return NextResponse.json({
+      confirmationStatus: record.confirmationStatus,
+      runtimeStatus: record.runtimeStatus,
+      proposal: record.proposal,
+      rule: null,
+      sourceFacts: record.sourceFacts,
+    });
   } catch (error) {
     if (error instanceof GlobalConstraintServerError) {
       return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });

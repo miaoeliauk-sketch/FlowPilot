@@ -232,8 +232,15 @@ test("知识库独立治理入口通过服务端固定正文和一次性挑战�
     title: "禁止利用无力感进行情绪绑架",
     canonicalText: fullRuleText,
     prohibitedIntent: "利用受众的无力感进行情绪操纵，迫使其被动接受或行动",
+    traceabilityStandards: [],
+    applicableScopes: ["所有IP的脚本生成"],
+    priorityRedlines: ["不得利用受众的无力感迫使其行动"],
+    prohibitedScenarios: [],
     allowedBoundaries: ["反差", "悬念", "适度焦虑", "引用", "批判", "合理语境"],
+    runtimePositioning: "明确高风险表达召回＋人工判断语境",
     detectionTerms: ["被时代抛弃", "阶级固化"],
+    activationMode: "active_on_confirmation",
+    confirmationAcknowledgement: "我已逐字核对并确认启用",
   };
   let confirmed = false;
   const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
@@ -243,12 +250,15 @@ test("知识库独立治理入口通过服务端固定正文和一次性挑战�
     const method = init?.method ?? "GET";
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
     requests.push({ url, method, body });
-    if (url === "/api/global-content-constraint" && method === "GET") {
+    if (url === "/api/global-content-constraint/proposals" && method === "GET") {
       return new Response(JSON.stringify({
-        proposal,
-        active: confirmed,
-        rule: confirmed ? { ruleId: proposal.ruleId, status: "active", canonicalText: fullRuleText } : null,
-        sourceFacts: confirmed ? { sourceType: "user_confirmed", confirmedBy: "彭彭" } : null,
+        proposals: [{
+          proposal,
+          confirmationStatus: confirmed ? "active" : "pending_confirmation",
+          runtimeStatus: confirmed ? "active" : "detection_pending",
+          rule: confirmed ? { ruleId: proposal.ruleId, status: "active", canonicalText: fullRuleText } : null,
+          sourceFacts: confirmed ? { sourceType: "user_confirmed", confirmedBy: "彭彭" } : null,
+        }],
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (url === "/api/global-content-constraint/challenge" && method === "POST") {
@@ -304,6 +314,154 @@ test("知识库独立治理入口通过服务端固定正文和一次性挑战�
     const storedKnowledge = JSON.parse(localStorage.getItem("ipwr:knowledgeEntries") ?? "[]") as KnowledgeEntry[];
     assert.equal(storedKnowledge[0]?.rawContent, fullRuleText);
     assert.equal(storedKnowledge[0]?.trustStatus, "ai_derived_unverified");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("知识库治理入口列出多条服务端提案并逐字确认不可溯源事实规则", async () => {
+  const newRuleText = [
+    "【核心判断】",
+    "禁止将未经验证、来源不明或超出原始证据的信息，以确定事实、真实案例、精确数据、直接引语或IP亲历的形式对外输出。",
+    "",
+    "【可溯源标准】",
+    "1. 系统内部必须能够追溯到具体的原始资料、原文段落或用户确认记录。",
+    "",
+    "【适用范围】",
+    "1. 选题、标题、封面文案、口播脚本、图文正文和发布文案。",
+    "",
+    "【四项最高优先级红线】",
+    "1. IP本人经历",
+    "2. 客户案例",
+    "3. 业绩数据",
+    "4. 权威引语",
+    "",
+    "【典型禁止场景】",
+    "1. 无依据地写出具体比例、金额、人数、增长率或调查结论。",
+    "",
+    "【允许边界】",
+    "1. 明确标注为“假设”“示例”或“虚构情境”的内容。",
+  ].join("\n");
+  const emotionalProposal = {
+    proposalId: "emotional-coercion-v2",
+    ruleId: "global-constraint-emotional-coercion-v2",
+    title: "禁止利用无力感进行情绪绑架",
+    canonicalText: "判断对象是表达动机，不是具体词汇。",
+    prohibitedIntent: "禁止利用受众的无力感进行情绪操纵",
+    traceabilityStandards: [],
+    applicableScopes: ["所有IP的脚本生成"],
+    priorityRedlines: ["不得利用无力感迫使行动"],
+    prohibitedScenarios: [],
+    allowedBoundaries: ["反差", "悬念"],
+    runtimePositioning: "明确高风险表达召回＋人工判断语境",
+    detectionTerms: ["被时代抛弃"],
+    activationMode: "active_on_confirmation",
+    confirmationAcknowledgement: "我已逐字核对并确认启用",
+  };
+  const newProposal = {
+    proposalId: "untraceable-facts-v1",
+    ruleId: "global-constraint-untraceable-facts-v1",
+    title: "禁止编造不可溯源的事实",
+    canonicalText: newRuleText,
+    prohibitedIntent: "禁止把未经验证的信息作为确定事实对外输出",
+    traceabilityStandards: ["系统内部必须能追溯到具体依据"],
+    applicableScopes: ["选题、标题、脚本和发布文案"],
+    priorityRedlines: ["IP本人经历", "客户案例", "业绩数据", "权威引语"],
+    prohibitedScenarios: ["无依据地写出精确数据"],
+    allowedBoundaries: ["明确标注为假设、示例或虚构情境"],
+    runtimePositioning: "高风险事实召回＋人工核验来源",
+    detectionTerms: null,
+    activationMode: "confirmed_pending_detection",
+    confirmationAcknowledgement: "我已逐字核对并确认规则内容，检测范围待配置",
+  };
+  let confirmed = false;
+  const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
+    requests.push({ url, method, body });
+    if (url === "/api/global-content-constraint/proposals" && method === "GET") {
+      return new Response(JSON.stringify({
+        proposals: [
+          {
+            proposal: emotionalProposal,
+            confirmationStatus: "active",
+            runtimeStatus: "active",
+            rule: { ruleId: emotionalProposal.ruleId, status: "active", canonicalText: emotionalProposal.canonicalText },
+            sourceFacts: { sourceType: "user_confirmed", confirmedBy: "彭彭" },
+          },
+          {
+            proposal: newProposal,
+            confirmationStatus: confirmed ? "confirmed_pending_detection" : "pending_confirmation",
+            runtimeStatus: "detection_pending",
+            rule: null,
+            sourceFacts: confirmed ? { sourceType: "user_confirmed", confirmedBy: "彭彭" } : null,
+          },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/global-content-constraint/challenge" && method === "POST") {
+      return new Response(JSON.stringify({
+        challengeId: "challenge-for-untraceable-facts",
+        challenge: "fake-challenge-for-test",
+        expiresAt: "2026-08-30T12:02:00.000Z",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/global-content-constraint/confirm" && method === "POST") {
+      confirmed = true;
+      return new Response(JSON.stringify({
+        confirmationStatus: "confirmed_pending_detection",
+        runtimeStatus: "detection_pending",
+        proposal: newProposal,
+        rule: null,
+        sourceFacts: { sourceType: "user_confirmed", confirmedBy: "彭彭" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ error: "unexpected request" }), { status: 500 });
+  };
+
+  const { render, within } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const KnowledgeHubPage = (await import("../app/knowledge-hub/page")).default;
+  const user = userEvent.setup({ document });
+  try {
+    const view = render(<IPProvider><KnowledgeHubPage /></IPProvider>);
+    await user.click(await view.findByRole("button", { name: "查看待确认V2强制底线" }));
+    const dialog = await view.findByRole("dialog", { name: "通用禁用规则人工确认" });
+
+    assert.ok(await within(dialog).findByRole("button", { name: /禁止利用无力感进行情绪绑架.*已启用/ }));
+    const newRuleButton = await within(dialog).findByRole("button", { name: /禁止编造不可溯源的事实.*待确认/ });
+    await user.click(newRuleButton);
+    assert.match(dialog.textContent ?? "", /【核心判断】/);
+    assert.match(dialog.textContent ?? "", /【四项最高优先级红线】/);
+    assert.match(dialog.textContent ?? "", /IP本人经历/);
+    assert.match(dialog.textContent ?? "", /高风险事实召回＋人工核验来源/);
+    assert.match(dialog.textContent ?? "", /检测词和召回范围尚未配置/);
+    assert.equal(within(dialog).queryByLabelText("规则全文"), null);
+
+    await user.click(within(dialog).getByRole("checkbox", { name: /我已逐字核对服务端固定的规则全文/ }));
+    await user.click(within(dialog).getByRole("button", { name: "确认规则内容并登记" }));
+
+    assert.ok(await within(dialog).findByText("规则内容已确认，检测范围待配置"));
+    const challengeCall = requests.find(request => request.url.endsWith("/challenge"));
+    const confirmCall = requests.find(request => request.url.endsWith("/confirm"));
+    assert.deepEqual(challengeCall?.body, { proposalId: "untraceable-facts-v1" });
+    assert.deepEqual(Object.keys(confirmCall?.body ?? {}).sort(), [
+      "acknowledgement",
+      "challenge",
+      "challengeId",
+      "confirmedBy",
+      "idempotencyKey",
+      "proposalId",
+    ]);
+    assert.equal(
+      confirmCall?.body?.acknowledgement,
+      "我已逐字核对并确认规则内容，检测范围待配置",
+    );
+    assert.equal(confirmCall?.body?.canonicalText, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
