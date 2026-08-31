@@ -392,7 +392,7 @@ test("重新审计只发送未检查节点并按编号合并回原有全量结�
   let cleanupPage: (() => void) | undefined;
   try {
     const { default: CognitionGraphPage } = await import("../app/cognition-graph/page");
-    const { cleanup, fireEvent, render } = await import("@testing-library/react");
+    const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
     cleanupPage = cleanup;
     const view = render(<IPProvider><CognitionGraphPage /></IPProvider>);
 
@@ -401,8 +401,10 @@ test("重新审计只发送未检查节点并按编号合并回原有全量结�
     });
     fireEvent.click(view.getByRole("button", { name: "开始关联审计" }));
     assert.ok(await view.findByText("原有相关理由"));
-    assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
-    assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 1);
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
+      assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 1);
+    });
     const reauditButton = view.getByRole("button", { name: "重新审计未检查节点" });
     fireEvent.click(reauditButton);
     fireEvent.click(reauditButton);
@@ -427,9 +429,11 @@ test("重新审计只发送未检查节点并按编号合并回原有全量结�
     assert.ok(view.getByText("原有相关理由"));
     assert.ok(view.getByText("节点编号：" + nodeIds[2]));
     assert.equal(view.queryByText("本次未检查"), null);
-    assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
-    assert.equal(view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').length, 1);
-    assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 0);
+    await waitFor(() => {
+      assert.equal(view.container.querySelectorAll('[data-audit-status="RELATED"]').length, 4);
+      assert.equal(view.container.querySelectorAll('[data-audit-status="CONFLICTING"]').length, 1);
+      assert.equal(view.container.querySelectorAll('[data-audit-status="UNASSESSED"]').length, 0);
+    });
     assert.deepEqual(requestBodies[1]!.candidateNodeIds, [nodeIds[1]]);
   } finally {
     cleanupPage?.();
