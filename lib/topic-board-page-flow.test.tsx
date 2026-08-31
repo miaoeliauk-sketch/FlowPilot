@@ -1037,6 +1037,379 @@ test("董事会评审只发送通用和当前IP可见的历史证据", async () 
   }
 });
 
+test("离开页面后的迟到评审不得保存或污染下一次评审", async () => {
+  const topicA = "评审A：已经离开的旧页面";
+  const topicB = "评审B：当前页面的有效选题";
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  let restoreBrowser: (() => void) | null = installBrowserEnvironment();
+  let cleanupPage: (() => void) | null = null;
+  let resolveAStarted!: () => void;
+  const aStarted = new Promise<void>(resolve => { resolveAStarted = resolve; });
+  let resolveAResponse!: (response: Response) => void;
+  const aResponse = new Promise<Response>(resolve => { resolveAResponse = resolve; });
+
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      originalSetTimeout(
+        handler,
+        [500, 600, 700, 800, 1000].includes(Number(timeout)) ? 0 : timeout,
+        ...args,
+      )
+    )) as typeof setTimeout,
+  });
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/topic-review") {
+        resolveAStarted();
+        return aResponse;
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const firstPage = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    fireEvent.change(firstPage.getByPlaceholderText(/例如：/), { target: { value: topicA } });
+    await act(async () => {
+      fireEvent.click(firstPage.getByRole("button", { name: "召开董事会" }));
+      await aStarted;
+    });
+
+    cleanupPage();
+    cleanupPage = null;
+    restoreBrowser();
+    restoreBrowser = installBrowserEnvironment();
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/topic-review") {
+        return new Response(JSON.stringify({ ...createValidTopicBoardResult(), topic: topicB }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const secondPage = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    cleanupPage = cleanup;
+    fireEvent.change(secondPage.getByPlaceholderText(/例如：/), { target: { value: topicB } });
+    fireEvent.click(secondPage.getByRole("button", { name: "召开董事会" }));
+    await secondPage.findByText("评估已保存到水木然的选题库。", {}, { timeout: 7000 });
+
+    await act(async () => {
+      resolveAResponse(new Response(JSON.stringify({ ...createValidTopicBoardResult(), topic: topicA }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise(resolve => originalSetTimeout(resolve, 0));
+    });
+
+    assert.deepEqual(
+      getTopicAssets(SHUIMURAN.id).map(asset => asset.title),
+      [topicB],
+    );
+    assert.equal(secondPage.queryByText(topicA), null);
+    assert.equal(secondPage.getAllByRole("button", { name: /生成脚本/ }).length, 1);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "setTimeout", {
+      configurable: true,
+      writable: true,
+      value: originalSetTimeout,
+    });
+    restoreBrowser?.();
+  }
+});
+
+test("评审A未结束时直接发起评审B，A的迟到结果不得保存或污染B", async () => {
+  const topicA = "评审A：尚未结束的旧选题";
+  const topicB = "评审B：用户重新发起的新选题";
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const restoreBrowser = installBrowserEnvironment();
+  let cleanupPage: (() => void) | undefined;
+  let reviewRequestCount = 0;
+  let resolveAStarted!: () => void;
+  const aStarted = new Promise<void>(resolve => { resolveAStarted = resolve; });
+  let resolveAResponse!: (response: Response) => void;
+  const aResponse = new Promise<Response>(resolve => { resolveAResponse = resolve; });
+
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      originalSetTimeout(
+        handler,
+        [500, 600, 700, 800, 1000].includes(Number(timeout)) ? 0 : timeout,
+        ...args,
+      )
+    )) as typeof setTimeout,
+  });
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/topic-review") {
+        reviewRequestCount += 1;
+        if (reviewRequestCount === 1) {
+          resolveAStarted();
+          return aResponse;
+        }
+        return new Response(JSON.stringify({ ...createValidTopicBoardResult(), topic: topicB }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    fireEvent.change(page.getByPlaceholderText(/例如：/), { target: { value: topicA } });
+    await act(async () => {
+      fireEvent.click(page.getByRole("button", { name: "召开董事会" }));
+      await aStarted;
+    });
+
+    fireEvent.change(page.getByPlaceholderText(/例如：/), { target: { value: topicB } });
+    const restartButton = page.getByRole("button", { name: "重新发起评审" }) as HTMLButtonElement;
+    assert.equal(restartButton.disabled, false);
+    fireEvent.click(restartButton);
+    await page.findByText("评估已保存到水木然的选题库。", {}, { timeout: 7000 });
+
+    await act(async () => {
+      resolveAResponse(new Response(JSON.stringify({ ...createValidTopicBoardResult(), topic: topicA }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+      await Promise.resolve();
+      await new Promise(resolve => originalSetTimeout(resolve, 0));
+    });
+
+    assert.deepEqual(
+      getTopicAssets(SHUIMURAN.id).map(asset => asset.title),
+      [topicB],
+    );
+    assert.equal(page.queryByText(topicA), null);
+    assert.equal(page.getAllByRole("button", { name: /生成脚本/ }).length, 1);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "setTimeout", {
+      configurable: true,
+      writable: true,
+      value: originalSetTimeout,
+    });
+    restoreBrowser();
+  }
+});
+
+test("旧评审进行中重新发起的新评审读取知识库失败时结束旧加载并显示真实失败", async () => {
+  const topicA = "评审A：尚未结束的旧选题";
+  const topicB = "评审B：读取知识库失败的新选题";
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const restoreBrowser = installBrowserEnvironment();
+  let cleanupPage: (() => void) | undefined;
+  let resolveAStarted!: () => void;
+  const aStarted = new Promise<void>(resolve => { resolveAStarted = resolve; });
+  let resolveAResponse!: (response: Response) => void;
+  const aResponse = new Promise<Response>(resolve => { resolveAResponse = resolve; });
+
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      originalSetTimeout(
+        handler,
+        [500, 600, 700, 800, 1000].includes(Number(timeout)) ? 0 : timeout,
+        ...args,
+      )
+    )) as typeof setTimeout,
+  });
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/topic-review") {
+        resolveAStarted();
+        return aResponse;
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const { IPProvider } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    const page = render(<IPProvider><TopicBoardPage /></IPProvider>);
+    fireEvent.change(page.getByPlaceholderText(/例如：/), { target: { value: topicA } });
+    await act(async () => {
+      fireEvent.click(page.getByRole("button", { name: "召开董事会" }));
+      await aStarted;
+    });
+
+    localStorage.setItem("ipwr:knowledgeEntries", "{损坏的知识库数据");
+    fireEvent.change(page.getByPlaceholderText(/例如：/), { target: { value: topicB } });
+    fireEvent.click(page.getByRole("button", { name: "重新发起评审" }));
+
+    assert.ok(await page.findByText("认知底座加载异常，请先重新加载。"));
+    assert.ok(page.getByRole("button", { name: "召开董事会" }));
+    assert.equal(page.queryByRole("button", { name: "重新发起评审" }), null);
+    assert.equal(page.queryByText(/阶段 \d+ \/ 7/), null);
+
+    await act(async () => {
+      resolveAResponse(new Response(JSON.stringify({ ...createValidTopicBoardResult(), topic: topicA }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+      await Promise.resolve();
+      await new Promise(resolve => originalSetTimeout(resolve, 0));
+    });
+
+    assert.equal(page.queryByText(topicA), null);
+    assert.equal(getTopicAssets(SHUIMURAN.id).length, 0);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "setTimeout", {
+      configurable: true,
+      writable: true,
+      value: originalSetTimeout,
+    });
+    restoreBrowser();
+  }
+});
+
+test("切换IP后旧评审的知识、进度和错误不得写回当前页面", async () => {
+  const topicA = "普通人如何判断一个机会是否适合自己";
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const restoreBrowser = installBrowserEnvironment();
+  let cleanupPage: (() => void) | undefined;
+  let releaseReviewResponse!: () => void;
+  const reviewResponseGate = new Promise<void>(resolve => { releaseReviewResponse = resolve; });
+  let resolveReviewStarted!: () => void;
+  const reviewStarted = new Promise<void>(resolve => { resolveReviewStarted = resolve; });
+
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+      originalSetTimeout(
+        handler,
+        [500, 600, 700, 800].includes(Number(timeout)) ? 0 : timeout,
+        ...args,
+      )
+    )) as typeof setTimeout,
+  });
+
+  try {
+    localStorage.clear();
+    localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN, SHIKONG]));
+    localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+    localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+    const waterKnowledge = addBoardKnowledge({ idLabel: "水木然", ipId: SHUIMURAN.id });
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/topic-review") {
+        resolveReviewStarted();
+        await reviewResponseGate;
+        return new Response(JSON.stringify({ error: "旧IP评审失败，不应显示在当前页面" }), {
+          status: 502,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ results: [], debug: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+    cleanupPage = cleanup;
+    const { IPProvider, useIP } = await import("./ip-context");
+    const TopicBoardPage = (await import("../app/topic-board/page")).default;
+    function SwitchToShikong() {
+      const { switchIP } = useIP();
+      return <button type="button" onClick={() => switchIP(SHIKONG.id)}>切换到设计师石空</button>;
+    }
+    const page = render(
+      <IPProvider>
+        <SwitchToShikong />
+        <TopicBoardPage />
+      </IPProvider>,
+    );
+    await page.findByText(/评估背景：当前操盘IP为水木然/);
+    fireEvent.change(page.getByPlaceholderText(/例如：/), { target: { value: topicA } });
+    fireEvent.click(page.getByRole("button", { name: "召开董事会" }));
+    fireEvent.click(page.getByRole("button", { name: "切换到设计师石空" }));
+    await act(async () => {
+      await waitWithTimeout(reviewStarted, 3000);
+    });
+
+    await act(async () => {
+      releaseReviewResponse();
+      await reviewResponseGate;
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise(resolve => originalSetTimeout(resolve, 50));
+    });
+
+    assert.ok(page.getByText(/评估背景：当前操盘IP为设计师石空/));
+    assert.equal(Boolean(page.queryByText(new RegExp(waterKnowledge.title))), false);
+    assert.equal(Boolean(page.queryByText("旧IP评审失败，不应显示在当前页面")), false);
+    assert.equal(Boolean(page.queryByText(/阶段 \d+ \/ 7/)), false);
+    assert.equal(getTopicAssets(SHUIMURAN.id).length, 0);
+    assert.equal(getTopicAssets(SHIKONG.id).length, 0);
+  } finally {
+    cleanupPage?.();
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "setTimeout", {
+      configurable: true,
+      writable: true,
+      value: originalSetTimeout,
+    });
+    restoreBrowser();
+  }
+});
+
 async function renderBoundaryAuditScenario(report: {
   coverage: "FULL" | "PARTIAL" | "NONE";
   stance: "ALIGNED" | "CONFLICTING" | "UNDETERMINED";

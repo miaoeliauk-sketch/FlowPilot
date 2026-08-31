@@ -510,6 +510,7 @@ export default function TopicBoardPage() {
   const [topicHistory, setTopicHistory] = useState<TopicAsset[]>([]);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const activeIPIdRef = useRef<string | null>(activeIP?.id ?? null);
+  const reviewRequestSeqRef = useRef(0);
   const boundaryRequestSeqRef = useRef(0);
   const interviewRequestSeqRef = useRef(0);
   const [boundaryStatus, setBoundaryStatus] = useState<BoundaryAuditStatus>("idle");
@@ -570,7 +571,13 @@ export default function TopicBoardPage() {
     setInterviewSession(null);
     setInterviewExistingClaims([]);
     replaceTemporaryCognition(null);
+    setLoading(false);
+    setPhase(0);
   }, [activeIP?.id]);
+
+  useEffect(() => () => {
+    reviewRequestSeqRef.current += 1;
+  }, []);
 
   useEffect(() => {
     contentAdaptationRequestSeqRef.current += 1;
@@ -980,6 +987,13 @@ export default function TopicBoardPage() {
     const requestIP = activeIP;
     if (!requestIP) { setError("请先选择当前操盘IP"); return; }
     const requestedTopic = topic.trim();
+    const requestSeq = reviewRequestSeqRef.current + 1;
+    reviewRequestSeqRef.current = requestSeq;
+    const isCurrentReview = () => reviewRequestSeqRef.current === requestSeq;
+    const canUpdateReviewUI = () => (
+      isCurrentReview()
+      && activeIPIdRef.current === requestIP.id
+    );
     let boardKnowledgeEntries: KnowledgeEntry[];
     try {
       boardKnowledgeEntries = getBoardKnowledgeEntries(requestIP);
@@ -988,6 +1002,8 @@ export default function TopicBoardPage() {
       setKnowledgeDataError("部分认知数据损坏，系统已停止检索和边界审计。");
       setKnowledgeLoading(false);
       setError("认知底座加载异常，请先重新加载。");
+      setLoading(false);
+      setPhase(0);
       return;
     }
     invalidateContentAdaptation();
@@ -997,7 +1013,8 @@ export default function TopicBoardPage() {
     const delays = [500, 1000, 800, 700, 600, 500];
     for (let i = 0; i < delays.length; i++) {
       await new Promise(r => setTimeout(r, delays[i]));
-      setPhase(i + 2);
+      if (!isCurrentReview()) return;
+      if (canUpdateReviewUI()) setPhase(i + 2);
     }
 
     try {
@@ -1005,8 +1022,10 @@ export default function TopicBoardPage() {
       const stableKnowledgeContext = collectKnowledgeContext(requestedTopic, requestIP, boardKnowledgeEntries);
       const historicalData = collectHistoricalData(requestedTopic, requestIP);
       const stableRefs = refsFromMatches(stableKnowledgeContext as KnowledgeSearchMatch[], boardKnowledgeEntries);
-      setKnowledgeRefs(stableRefs);
-      setKnowledgeSearched(true);
+      if (canUpdateReviewUI()) {
+        setKnowledgeRefs(stableRefs);
+        setKnowledgeSearched(true);
+      }
       const res = await apiFetch("/api/topic-review", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildTopicReviewRequestPayload({
@@ -1025,6 +1044,8 @@ export default function TopicBoardPage() {
           : `请求失败（${res.status}）`;
         throw new Error(apiError);
       }
+
+      if (!isCurrentReview()) return;
 
       const saved = saveTopicBoardEvaluation(requestIP, data);
       if (!saved.boardResult) throw new Error("选题评估保存失败");
@@ -1051,6 +1072,8 @@ export default function TopicBoardPage() {
         void runBoundaryAudit(saved, requestIP);
       }
     } catch (err) {
+      if (!isCurrentReview()) return;
+      if (!canUpdateReviewUI()) return;
       if (err instanceof TopicBoardOwnershipError) {
         setError("评估结果IP与发起请求时的IP不一致，已阻止保存，请重试。");
       } else if (err instanceof TopicBoardContractError) {
@@ -1058,7 +1081,12 @@ export default function TopicBoardPage() {
       } else {
         setError(err instanceof Error ? err.message : "分析失败，请重试");
       }
-    } finally { setLoading(false); setPhase(0); }
+    } finally {
+      if (canUpdateReviewUI()) {
+        setLoading(false);
+        setPhase(0);
+      }
+    }
   }
 
   function openHistoryResult(asset: TopicAsset) {
@@ -1161,10 +1189,10 @@ export default function TopicBoardPage() {
           <textarea value={topic} onChange={e => { invalidateContentAdaptation(); setTopic(e.target.value); }}
             placeholder={`例如：${DEMO_TOPIC}`}
             className="min-h-[52px] flex-1 resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"/>
-          <button onClick={handleSubmit} disabled={loading || !activeIP}
+          <button onClick={handleSubmit} disabled={!activeIP}
             className="flex h-[52px] items-center justify-center gap-2 whitespace-nowrap rounded-[14px] bg-[#1C1C1B] px-8 text-[14px] font-semibold text-white disabled:opacity-60">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M5 12H19M19 12L13 6M19 12L13 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            {loading ? "评审中…" : "召开董事会"}
+            {loading ? "重新发起评审" : "召开董事会"}
           </button>
         </div>
         <p className="mt-3 rounded-[10px] bg-[#F7FCF0] px-3 py-2 text-[12px] leading-5 text-[#4F6F32]">
