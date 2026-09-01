@@ -269,6 +269,7 @@ async function unlockGeneration(
   user: Awaited<ReturnType<typeof import("@testing-library/user-event").default.setup>>,
 ) {
   await user.click(view.getByRole("button", { name: "IP专属生成" }));
+  await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
   return view.getByRole("button", { name: "生成IP专属内容" });
 }
 

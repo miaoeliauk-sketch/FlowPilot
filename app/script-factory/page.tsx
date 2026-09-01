@@ -75,6 +75,16 @@ import { getScriptDeliveryBlockReason } from "@/lib/script-factory-delivery";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
 type GenerationMode = "standard" | "ip";
+type ScriptInputIntent = "topic_material" | "teacher_original";
+
+interface TeacherOriginalSourceRegistration {
+  status: "created";
+  sourceId: string;
+  ipId: string;
+  contentSha256: string;
+  provenance: "user_declared_teacher_original";
+  createdAt: string;
+}
 
 // ── Types ──
 interface TitleOption { title: string; formula: string; platform: string; whyFitsIP: string; role?: "主推" | "流量" | "安全"; recommended?: boolean; }
@@ -969,6 +979,13 @@ export default function ScriptFactoryPage() {
   const { activeIP, loading: ipLoading } = useIP();
   const cognitionData = useCognitionData();
   const [generationMode, setGenerationMode] = useState<GenerationMode>("standard");
+  const [inputIntent, setInputIntent] = useState<ScriptInputIntent | null>(null);
+  const [teacherOriginalConfirmed, setTeacherOriginalConfirmed] = useState(false);
+  const sourceRegistrationRef = useRef<{
+    ipId: string;
+    rawContent: string;
+    idempotencyKey: string;
+  } | null>(null);
   const [topic, setTopic] = useState("");
   const [angle, setAngle] = useState("");
   const [caseDecision, setCaseDecision] = useState<CaseDecision | null>(null);
@@ -1089,6 +1106,9 @@ export default function ScriptFactoryPage() {
     }
     generationSequenceRef.current += 1;
     setGenerationMode(nextMode);
+    setInputIntent(null);
+    setTeacherOriginalConfirmed(false);
+    sourceRegistrationRef.current = null;
     setError(null);
     setResult(null);
     setApiMeta(null);
@@ -1315,6 +1335,9 @@ export default function ScriptFactoryPage() {
 
   useEffect(() => {
     boundaryRequestSeqRef.current += 1;
+    setInputIntent(null);
+    setTeacherOriginalConfirmed(false);
+    sourceRegistrationRef.current = null;
     setBoundaryStatus("idle");
     setBoundaryReport(null);
     setBoundaryEvidence([]);
@@ -1427,6 +1450,8 @@ export default function ScriptFactoryPage() {
   function handleTopicChange(nextTopic: string) {
     topicContentRef.current = nextTopic;
     setTopic(nextTopic);
+    setTeacherOriginalConfirmed(false);
+    sourceRegistrationRef.current = null;
     if (pendingConstraintReview?.phase === "awaiting_decision") {
       generationSequenceRef.current += 1;
       setPendingConstraintReview(null);
@@ -1471,6 +1496,59 @@ export default function ScriptFactoryPage() {
       };
     }
     return null;
+  }
+
+  async function registerTeacherOriginalSource(
+    ip: IPProfile,
+    rawContent: string,
+  ): Promise<TeacherOriginalSourceRegistration> {
+    const previous = sourceRegistrationRef.current;
+    const idempotencyKey = previous?.ipId === ip.id && previous.rawContent === rawContent
+      ? previous.idempotencyKey
+      : `script-source-${globalThis.crypto.randomUUID()}`;
+    sourceRegistrationRef.current = { ipId: ip.id, rawContent, idempotencyKey };
+
+    let response: Response;
+    try {
+      response = await apiFetch("/api/script-factory/sources", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inputIntent: "teacher_original",
+          confirmation: "TEACHER_ORIGINAL_CONFIRMED",
+          ipId: ip.id,
+          title: rawContent.split(/\r?\n/, 1)[0].trim().slice(0, 300),
+          rawContent,
+          idempotencyKey,
+        }),
+      });
+    } catch {
+      throw new Error("老师原文来源登记失败，已停止生成，请稍后重试。");
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error("老师原文来源登记返回异常，已停止生成。");
+    }
+    if (!response.ok) {
+      throw new Error(isRecord(payload) && typeof payload.error === "string"
+        ? payload.error
+        : "老师原文来源登记失败，已停止生成，请稍后重试。");
+    }
+    if (
+      !isRecord(payload)
+      || payload.status !== "created"
+      || typeof payload.sourceId !== "string" || !/^ipsrc_[0-9a-f-]{36}$/.test(payload.sourceId)
+      || payload.ipId !== ip.id
+      || typeof payload.contentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(payload.contentSha256)
+      || payload.provenance !== "user_declared_teacher_original"
+      || typeof payload.createdAt !== "string" || !payload.createdAt.trim()
+    ) {
+      throw new Error("老师原文来源登记返回不完整，已停止生成。");
+    }
+    return payload as unknown as TeacherOriginalSourceRegistration;
   }
 
   async function generateFor(
@@ -1963,6 +2041,14 @@ export default function ScriptFactoryPage() {
     }
     if (!topic.trim()) { setError("请输入视频选题"); return; }
     if (!activeIP) { setError("请先在「IP身份中心」选择一个当前操盘IP"); return; }
+    if (generationMode === "ip" && inputIntent === null) {
+      setError("请先选择本次输入是老师本人原文，还是选题或素材。");
+      return;
+    }
+    if (generationMode === "ip" && inputIntent === "teacher_original" && !teacherOriginalConfirmed) {
+      setError("请先勾选确认以上内容是当前IP老师本人原文。");
+      return;
+    }
     if (linkedTopic && !isLinkedTopicBoundaryAllowed) {
       setError("这条关联选题尚未通过认知边界审计，已停止脚本生成。");
       return;
@@ -1981,6 +2067,7 @@ export default function ScriptFactoryPage() {
       ? auditedTopicContent
       : requestedTopic;
     const requestMode = generationMode;
+    const requestInputIntent = requestMode === "ip" ? inputIntent : null;
     const knowledgeRefsAtRequest = knowledgeRefs;
     const requestSequence = generationSequenceRef.current + 1;
     generationSequenceRef.current = requestSequence;
@@ -2003,6 +2090,16 @@ export default function ScriptFactoryPage() {
     }
     setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setPendingConstraintReview(null); setLoading(true);
     try {
+      if (requestMode === "ip" && requestInputIntent === "teacher_original") {
+        await registerTeacherOriginalSource(requestIP, requestedTopic);
+        if (
+          activeIPIdRef.current !== requestIP.id
+          || generationSequenceRef.current !== requestSequence
+          || topicContentRef.current.trim() !== requestedTopic
+        ) {
+          throw new Error("老师原文登记期间输入内容或当前IP已变化，请重新确认后生成。");
+        }
+      }
       const generatedData = await generateFor(
         requestIP,
         requestedTopic,
@@ -2202,7 +2299,7 @@ export default function ScriptFactoryPage() {
           <p className="mt-1.5 max-w-[640px] text-[13.5px] leading-6 text-[#8A8A86]">
             {generationMode === "standard"
               ? "固定脚本生成保留原来的直接产出流程；需要严格依据老师原始观点时，再切换到IP专属生成。"
-              : "输入选题或原文后直接生成；观点归属和事实核验会在正文展示后自动补充。"}
+              : "输入内容后需先声明类型；老师本人原文会在明确确认并登记来源后进入生成流程。"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -2315,6 +2412,53 @@ export default function ScriptFactoryPage() {
             placeholder={TOPIC_PLACEHOLDER}
             className="min-h-[52px] resize-y rounded-[14px] border border-[#E5E4DE] bg-[#F7F6F2] px-4 py-3.5 text-[14px] text-[#1C1C1B] outline-none focus:border-[#639922] focus:ring-2 focus:ring-[#EAF3DE]"
           />
+          {generationMode === "ip" && (
+            <fieldset className="rounded-[14px] border border-[#E5E4DE] bg-white p-4">
+              <legend className="px-1 text-[13px] font-bold text-[#1C1C1B]">请声明本次输入类型</legend>
+              <p className="mb-3 text-[12px] leading-5 text-[#777]">只有经你明确确认的老师本人原文，才会先登记到服务端来源账本。选题或普通素材不会创建来源编号。</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="flex items-start gap-2 rounded-[10px] bg-[#F7F6F2] px-3 py-2.5 text-[12.5px] text-[#444]">
+                  <input
+                    type="radio"
+                    name="script-input-intent"
+                    checked={inputIntent === "teacher_original"}
+                    onChange={() => {
+                      setInputIntent("teacher_original");
+                      setTeacherOriginalConfirmed(false);
+                      sourceRegistrationRef.current = null;
+                    }}
+                    className="mt-1"
+                  />
+                  <span>这是老师本人原文</span>
+                </label>
+                <label className="flex items-start gap-2 rounded-[10px] bg-[#F7F6F2] px-3 py-2.5 text-[12.5px] text-[#444]">
+                  <input
+                    type="radio"
+                    name="script-input-intent"
+                    checked={inputIntent === "topic_material"}
+                    onChange={() => {
+                      setInputIntent("topic_material");
+                      setTeacherOriginalConfirmed(false);
+                      sourceRegistrationRef.current = null;
+                    }}
+                    className="mt-1"
+                  />
+                  <span>这是选题或素材，不是老师本人原文</span>
+                </label>
+              </div>
+              {inputIntent === "teacher_original" && (
+                <label className="mt-3 flex items-start gap-2 rounded-[10px] border border-[#D8E9C2] bg-[#F2F8EA] px-3 py-2.5 text-[12px] leading-5 text-[#3B5D1E]">
+                  <input
+                    type="checkbox"
+                    checked={teacherOriginalConfirmed}
+                    onChange={event => setTeacherOriginalConfirmed(event.target.checked)}
+                    className="mt-1"
+                  />
+                  <span>我确认以上内容是当前IP老师本人原文，并同意由服务端保存原文、生成不可篡改的来源编号。</span>
+                </label>
+              )}
+            </fieldset>
+          )}
           {generationMode === "ip" && <input
             aria-label="本次切入角度"
             value={angle}
@@ -2408,7 +2552,7 @@ export default function ScriptFactoryPage() {
               需要{formatCategory === "live" ? "直播间布置建议" : "拍摄/呈现建议"}
             </label>
             <button
-              onClick={() => { void handleGenerate(); }} disabled={loading || isConstraintFinalizing || !topic.trim() || !activeIP || !isLinkedTopicBoundaryAllowed}
+              onClick={() => { void handleGenerate(); }} disabled={loading || isConstraintFinalizing || !topic.trim() || !activeIP || !isLinkedTopicBoundaryAllowed || (generationMode === "ip" && (inputIntent === null || (inputIntent === "teacher_original" && !teacherOriginalConfirmed)))}
               className="ml-auto flex h-[42px] items-center gap-2 whitespace-nowrap rounded-[12px] bg-[#1C1C1B] px-7 text-[13.5px] font-semibold text-white disabled:opacity-60"
             >
               {loading ? "生成中…" : generationMode === "standard" ? "生成完整内容" : "生成IP专属内容"}
@@ -2465,7 +2609,7 @@ export default function ScriptFactoryPage() {
       {!loading && !result && !error && (
         <div className="py-16 text-center text-[#8A8A86]">
           <h3 className="mb-2 text-[17px] font-semibold text-[#1C1C1B]">还没有生成结果</h3>
-          <p className="text-[13.5px]">{generationMode === "standard" ? "输入选题、设置内容形式和时长后，即可生成完整内容包。" : "输入选题或原文后即可直接生成；观点归属和事实核验会在生成后补充。"}</p>
+          <p className="text-[13.5px]">{generationMode === "standard" ? "输入选题、设置内容形式和时长后，即可生成完整内容包。" : "输入内容并声明类型；老师本人原文需明确确认并登记来源后才能生成。"}</p>
         </div>
       )}
 

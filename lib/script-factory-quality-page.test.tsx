@@ -198,6 +198,7 @@ test("脚本工厂非阻断展示论证待核对提示并保留生成结果", as
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     const topicInput = view.container.querySelector("textarea") as HTMLTextAreaElement;
     await user.type(topicInput, "Jellycat为什么能卖出情绪溢价");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText(/论证待核对/));

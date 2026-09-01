@@ -511,6 +511,7 @@ test("IP专属稿通过通用规则人工确认后仍须等待v1.3门禁开放�
       view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "双重门禁测试",
     );
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
     assert.ok(await view.findByText("疑似违反通用禁用规则，等待人工确认"));
 
@@ -701,6 +702,198 @@ test("脚本工厂默认恢复固定脚本生成，并保留IP专属生成入口
   assert.doesNotMatch(view.container.textContent ?? "", /设计师石空|比例关系|材质关系|灯光关系/);
 });
 
+test("IP专属生成必须主动声明输入类型且老师原文确认随正文变化失效", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+
+  const { render } = await import("@testing-library/react");
+  const userEvent = (await import("@testing-library/user-event")).default;
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const user = userEvent.setup({ document });
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  await user.click(view.getByRole("button", { name: "IP专属生成" }));
+  const input = view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文");
+  await user.type(input, "这是老师本人讲过的一段完整原文。");
+  const generate = view.getByRole("button", { name: "生成IP专属内容" }) as HTMLButtonElement;
+  assert.equal(generate.disabled, true);
+
+  const teacherOriginal = view.getByRole("radio", { name: "这是老师本人原文" }) as HTMLInputElement;
+  const topicOrMaterial = view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }) as HTMLInputElement;
+  assert.equal(teacherOriginal.checked, false);
+  assert.equal(topicOrMaterial.checked, false);
+
+  await user.click(teacherOriginal);
+  const confirmation = view.getByRole("checkbox", { name: /我确认以上内容是当前IP老师本人原文/ }) as HTMLInputElement;
+  assert.equal(generate.disabled, true);
+  await user.click(confirmation);
+  assert.equal(generate.disabled, false);
+
+  await user.type(input, "补充内容");
+  assert.equal(confirmation.checked, false);
+  assert.equal(generate.disabled, true);
+});
+
+test("老师原文确认后先登记服务端来源编号，登记成功后才生成", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const path = String(input);
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+    calls.push({ path, body });
+    if (path === "/api/script-factory/sources") {
+      return new Response(JSON.stringify({
+        status: "created",
+        sourceId: "ipsrc_11111111-1111-4111-8111-111111111111",
+        ipId: SHUIMURAN.id,
+        contentSha256: "a".repeat(64),
+        provenance: "user_declared_teacher_original",
+        createdAt: "2026-09-01T00:00:00.000Z",
+      }), { status: 201, headers: { "Content-Type": "application/json" } });
+    }
+    if (path === "/api/script-factory") {
+      return new Response(JSON.stringify(generatedScript("老师本人原文测试")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ status: "unavailable" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "这是老师本人讲过的一段完整原文。",
+    );
+    await user.click(view.getByRole("radio", { name: "这是老师本人原文" }));
+    await user.click(view.getByRole("checkbox", { name: /我确认以上内容是当前IP老师本人原文/ }));
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
+
+    assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
+    const sourceIndex = calls.findIndex(call => call.path === "/api/script-factory/sources");
+    const generationIndex = calls.findIndex(call => call.path === "/api/script-factory");
+    assert.ok(sourceIndex >= 0);
+    assert.ok(generationIndex > sourceIndex);
+    assert.deepEqual(calls[sourceIndex]?.body, {
+      inputIntent: "teacher_original",
+      confirmation: "TEACHER_ORIGINAL_CONFIRMED",
+      ipId: SHUIMURAN.id,
+      title: "这是老师本人讲过的一段完整原文。",
+      rawContent: "这是老师本人讲过的一段完整原文。",
+      idempotencyKey: calls[sourceIndex]?.body.idempotencyKey,
+    });
+    assert.equal(typeof calls[sourceIndex]?.body.idempotencyKey, "string");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("选题或素材路径不会创建老师原文来源编号", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const paths: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    const path = String(input);
+    paths.push(path);
+    if (path === "/api/script-factory") {
+      return new Response(JSON.stringify(generatedScript("普通选题测试")), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ status: "unavailable" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "企业AI落地的核心卡点",
+    );
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
+
+    assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
+    assert.equal(paths.includes("/api/script-factory/sources"), false);
+    assert.equal(paths.includes("/api/script-factory"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("老师原文来源登记失败时停止生成", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  let generationCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    const path = String(input);
+    if (path === "/api/script-factory/sources") {
+      return new Response(JSON.stringify({ error: "老师原文来源账本写入失败，请稍后重试。" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (path === "/api/script-factory") generationCalls += 1;
+    return new Response(JSON.stringify({ status: "unavailable" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const user = userEvent.setup({ document });
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    await user.click(view.getByRole("button", { name: "IP专属生成" }));
+    await user.type(
+      view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
+      "这是老师本人讲过的一段完整原文。",
+    );
+    await user.click(view.getByRole("radio", { name: "这是老师本人原文" }));
+    await user.click(view.getByRole("checkbox", { name: /我确认以上内容是当前IP老师本人原文/ }));
+    await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
+
+    assert.ok(await view.findByText("老师原文来源账本写入失败，请稍后重试。"));
+    assert.equal(generationCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("脚本工厂可以打开只读灵感抽屉并搜索筛选和查看知识详情", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
@@ -853,6 +1046,7 @@ test("水木然迁移规则待测试时不会自动启用且底层IP存储格式
       view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "水木然专属测试",
     );
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
 
     // 模拟旧同步数据把同一个IP编号写成未JSON序列化的字符串。
     localStorage.setItem("ipwr:activeIpId", SHUIMURAN.id);
@@ -894,6 +1088,7 @@ test("IP专属生成先展示待审正文，交付门禁开放后才写入正式
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "变化背后的判断");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     assert.equal(view.queryByRole("button", { name: "检查观点覆盖度" }), null);
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
@@ -1046,6 +1241,7 @@ test("主审计返回OPEN但仍带阻断项时不得写入正式脚本库", asyn
       view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "矛盾OPEN门禁",
     );
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText("存在待核验内容"));
@@ -1156,6 +1352,7 @@ test("主审计待审保存失败时不得复用同会话同版本旧稿正式�
       view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "新正文待审保存失败",
     );
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText(/待审正文未能保存到独立草稿区|正式脚本已保存，但待审记录尚未完成清理标记/));
@@ -1282,6 +1479,7 @@ test("用户可通过正规入口人工确认高风险无依据陈述并解除�
       view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"),
       "人工确认具体陈述",
     );
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok((await view.findAllByText("模型新增了输入素材没有提供的具体经历。")).length >= 1);
@@ -1759,6 +1957,7 @@ test("门禁阻断的待审正文刷新后仍可恢复且不会进入正式脚�
 
     await user.click(firstView.getByRole("button", { name: "IP专属生成" }));
     await user.type(firstView.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "刷新恢复待审稿");
+    await user.click(firstView.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(firstView.getByRole("button", { name: "生成IP专属内容" }));
     assert.ok(await firstView.findByText("责任主体失真"));
     assert.equal(getScriptAssets(SHUIMURAN.id).length, 0);
@@ -2013,6 +2212,7 @@ test("人工替换复审时不会复用同一审计会话的旧版本正式稿",
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "变化背后的判断");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
     assert.ok(await view.findByText("责任主体失真"));
     assert.ok(view.getByText(/待审核稿 · 置信度高/));
@@ -2321,6 +2521,7 @@ test("水木然压缩兜底状态显示在团队审核信息且审计完成前�
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "压缩兜底");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText("本次压缩未能精确达到目标比例，已采用最接近的版本。"));
@@ -2359,6 +2560,7 @@ test("生成后审计失败时正文仍可查看但不得写入正式脚本库",
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "审计失败也能使用");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
@@ -2401,6 +2603,7 @@ test("生成后审计返回200但内容残缺时正文仍可查看但不得写�
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "残缺审计不影响正文");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
 
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
@@ -2438,6 +2641,7 @@ test("切换生成模式后丢弃旧稿迟到的审计结果", async () => {
 
     await user.click(view.getByRole("button", { name: "IP专属生成" }));
     await user.type(view.getByPlaceholderText("输入选题，或粘贴一段需要按当前IP改写的原文"), "旧稿");
+    await user.click(view.getByRole("radio", { name: "这是选题或素材，不是老师本人原文" }));
     await user.click(view.getByRole("button", { name: "生成IP专属内容" }));
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
     await user.click(view.getByRole("button", { name: "固定脚本生成" }));
