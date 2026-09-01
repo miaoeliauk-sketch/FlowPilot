@@ -26,6 +26,9 @@ export type ParagraphAttributionType =
   | "faithful_rewrite"
   | "ai_reasoning"
   | "case_fact";
+export type AIReasoningSubtype =
+  | "unsupported_opinion"
+  | "unsupported_specific_claim";
 
 export interface AttributionSourceReference {
   sourceId: string;
@@ -37,6 +40,7 @@ export interface ParagraphAttribution {
   paragraphIndex: number;
   excerpt: string;
   attributionType: ParagraphAttributionType;
+  reasoningSubtype?: AIReasoningSubtype;
   sourceReferences: AttributionSourceReference[];
   reason: string;
 }
@@ -80,22 +84,57 @@ export interface ScriptFactCaseEvidence {
   occurredAt?: string;
 }
 
+export function isFactCaseEvidenceConfirmed(
+  caseEvidence: ScriptFactCaseEvidence | null,
+): boolean {
+  return caseEvidence?.verificationStatus === "人工已核实" ||
+    (
+      caseEvidence?.verificationStatus === "有明确来源" &&
+      Boolean(caseEvidence.sourceUrl?.trim())
+    );
+}
+
 export interface ScriptFactAudit {
   overallStatus: "not_checked" | "pending" | "user_confirmed";
   systemVerified: false;
-  pendingItems: string[];
+  pendingItems: Array<string | ScriptFactPendingItem>;
   caseEvidence: ScriptFactCaseEvidence | null;
+}
+
+export type ScriptFactResolutionStatus =
+  | "PENDING"
+  | "CONFIRMED_ALLOWED"
+  | "SUPPORTED"
+  | "REMOVED";
+
+export interface ScriptFactPendingItem {
+  id: string;
+  sectionIndex: number | null;
+  paragraphIndex: number;
+  subtype: "unsupported_specific_claim" | "declared_pending_verification";
+  excerpt: string;
+  reason: string;
+  resolutionStatus: ScriptFactResolutionStatus;
+}
+
+export interface ScriptDeliveryGate {
+  status: "OPEN" | "BLOCKED";
+  auditVersion: string;
+  blockerCodes: string[];
+  pendingItemIds: string[];
 }
 
 export type ScriptPostGenerationAudit =
   | { status: "pending" }
   | {
       status: "completed";
+      auditSessionId: string;
       auditVersion: string;
       coverageAssessment: CoverageAssessment;
       attributionAudit: ScriptAttributionAudit;
       sourceIntegrityAudit: ScriptSourceIntegrityAudit;
       factAudit: ScriptFactAudit;
+      deliveryGate: ScriptDeliveryGate;
     }
   | {
       status: "unavailable";
@@ -137,11 +176,16 @@ function isParagraphAttribution(value: unknown): value is ParagraphAttribution {
   const paragraph = asRecord(value);
   if (!paragraph) return false;
   const attributionTypes = new Set(["teacher_explicit", "faithful_rewrite", "ai_reasoning", "case_fact"]);
+  const validReasoningSubtype = paragraph.attributionType !== "ai_reasoning"
+    ? paragraph.reasoningSubtype === undefined
+    : paragraph.reasoningSubtype === "unsupported_opinion"
+      || paragraph.reasoningSubtype === "unsupported_specific_claim";
   return Number.isInteger(paragraph.sectionIndex)
     && Number.isInteger(paragraph.paragraphIndex)
     && typeof paragraph.excerpt === "string"
     && typeof paragraph.attributionType === "string"
     && attributionTypes.has(paragraph.attributionType)
+    && validReasoningSubtype
     && Array.isArray(paragraph.sourceReferences)
     && paragraph.sourceReferences.every(reference => {
       const source = asRecord(reference);
@@ -215,11 +259,36 @@ function isFactAudit(value: unknown): value is ScriptFactAudit {
     && typeof caseObject.sourceType === "string"
     && typeof caseObject.verificationStatus === "string",
   );
+  const validPendingItems = Array.isArray(audit.pendingItems) && audit.pendingItems.every(item => {
+    if (typeof item === "string") return true;
+    const pendingItem = asRecord(item);
+    return Boolean(
+      pendingItem
+      && typeof pendingItem.id === "string"
+      && (pendingItem.sectionIndex === null || Number.isInteger(pendingItem.sectionIndex))
+      && Number.isInteger(pendingItem.paragraphIndex)
+      && ["unsupported_specific_claim", "declared_pending_verification"].includes(String(pendingItem.subtype))
+      && typeof pendingItem.excerpt === "string"
+      && typeof pendingItem.reason === "string"
+      && ["PENDING", "CONFIRMED_ALLOWED", "SUPPORTED", "REMOVED"].includes(String(pendingItem.resolutionStatus))
+    );
+  });
   return typeof audit.overallStatus === "string"
     && statuses.has(audit.overallStatus)
     && audit.systemVerified === false
-    && isStringArray(audit.pendingItems)
+    && validPendingItems
     && validCaseEvidence;
+}
+
+function isDeliveryGate(value: unknown, auditVersion: string): value is ScriptDeliveryGate {
+  const gate = asRecord(value);
+  return Boolean(
+    gate
+    && (gate.status === "OPEN" || gate.status === "BLOCKED")
+    && gate.auditVersion === auditVersion
+    && isStringArray(gate.blockerCodes)
+    && isStringArray(gate.pendingItemIds)
+  );
 }
 
 export function parseScriptPostGenerationAudit(value: unknown): ScriptPostGenerationAudit | null {
@@ -230,10 +299,13 @@ export function parseScriptPostGenerationAudit(value: unknown): ScriptPostGenera
     if (
       typeof audit.auditVersion !== "string"
       || !audit.auditVersion.trim()
+      || typeof audit.auditSessionId !== "string"
+      || !audit.auditSessionId.trim()
       || !isCoverageAssessment(audit.coverageAssessment)
       || !isAttributionAudit(audit.attributionAudit)
       || !isSourceIntegrityAudit(audit.sourceIntegrityAudit)
       || !isFactAudit(audit.factAudit)
+      || !isDeliveryGate(audit.deliveryGate, audit.auditVersion)
     ) return null;
     return audit as unknown as ScriptPostGenerationAudit;
   }

@@ -1,8 +1,10 @@
 import type { CoverageLevel } from "./script-factory-coverage";
 import type { ScriptContentResponse } from "./script-factory-response";
+import { isFactCaseEvidenceConfirmed } from "./script-factory-contract";
 import type {
   ParagraphAttribution,
   ParagraphAttributionType,
+  AIReasoningSubtype,
   ScriptAttributionAudit,
   ScriptFactAudit,
   ScriptFactCaseEvidence,
@@ -31,6 +33,10 @@ const ATTRIBUTION_TYPES = new Set<ParagraphAttributionType>([
   "faithful_rewrite",
   "ai_reasoning",
   "case_fact",
+]);
+const AI_REASONING_SUBTYPES = new Set<AIReasoningSubtype>([
+  "unsupported_opinion",
+  "unsupported_specific_claim",
 ]);
 
 const SOURCE_INTEGRITY_ISSUE_CODES = new Set<SourceIntegrityIssueCode>([
@@ -122,6 +128,12 @@ export function parseParagraphAttributions(
       throw new ScriptAttributionParseError("观点归属审计包含未知来源类型");
     }
     const reason = requiredString(item, "reason");
+    const reasoningSubtype = attributionType === "ai_reasoning"
+      ? requiredString(item, "reasoningSubtype") as AIReasoningSubtype
+      : undefined;
+    if (reasoningSubtype && !AI_REASONING_SUBTYPES.has(reasoningSubtype)) {
+      throw new ScriptAttributionParseError("AI推理补充包含未知风险子类型");
+    }
     if (!Array.isArray(item.sourceReferences)) {
       throw new ScriptAttributionParseError("观点归属审计缺少来源引用列表");
     }
@@ -157,6 +169,7 @@ export function parseParagraphAttributions(
       paragraphIndex: paragraph.paragraphIndex,
       excerpt: paragraph.text,
       attributionType,
+      reasoningSubtype,
       sourceReferences,
       reason,
     };
@@ -300,11 +313,7 @@ export function buildFactAudit(input: {
   caseEvidence: ScriptFactCaseEvidence | null;
 }): ScriptFactAudit {
   const pendingItems = input.pendingItems.map(item => item.trim()).filter(Boolean);
-  const caseConfirmed = input.caseEvidence?.verificationStatus === "人工已核实" ||
-    (
-      input.caseEvidence?.verificationStatus === "有明确来源" &&
-      Boolean(input.caseEvidence.sourceUrl?.trim())
-    );
+  const caseConfirmed = isFactCaseEvidenceConfirmed(input.caseEvidence);
   return {
     overallStatus: pendingItems.length > 0 || (input.caseEvidence && !caseConfirmed)
       ? "pending"
@@ -317,6 +326,7 @@ export function buildFactAudit(input: {
 
 export const ATTRIBUTION_AUDIT_SYSTEM = `你是独立的脚本观点归属与出处审计员。你不负责写稿、改稿或评价文采，只判断正文每一段的内容来源和表述真实性。
 teacher_explicit表示与老师原文直接对应；faithful_rewrite表示忠实重组但没有改变判断；ai_reasoning表示原始内容没有提供这层判断或推理；case_fact表示来自本次案例材料。
+ai_reasoning必须继续区分：unsupported_opinion表示缺少来源的观点或分析性判断；unsupported_specific_claim表示模型新增了输入素材没有提供的具体经历、案例或数据。后者只表示没有输入依据，不代表已经判定现实中为假。
 老师表达类标记必须引用真实存在的sourceId和itemId。找不到老师出处时只能标记ai_reasoning。案例事实只能在确有案例材料时使用。每个正文段落必须且只能返回一次。
 同时逐段检查以下三类出处问题：
 1. responsibility_subject_distortion：原始素材只是外部质疑、文献记载或第三方判断，正文却改写为当事人本人陈述前后矛盾。
@@ -347,6 +357,7 @@ ${input.caseEvidence ? JSON.stringify(input.caseEvidence, null, 2) : "无"}
   "paragraphs": [{
     "paragraphId": "S1-P1",
     "attributionType": "teacher_explicit|faithful_rewrite|ai_reasoning|case_fact",
+    "reasoningSubtype": "仅ai_reasoning填写：unsupported_opinion|unsupported_specific_claim",
     "sourceReferences": [{"sourceId": "真实sourceId", "itemId": "真实itemId"}],
     "reason": "这段为什么属于该来源类型"
   }],

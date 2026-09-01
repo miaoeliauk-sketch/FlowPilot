@@ -114,6 +114,48 @@ function createCompleteScriptResponse(ipId: string, ipName: string, topic: strin
   };
 }
 
+function createOpenAuditResponse() {
+  return {
+    status: "completed",
+    auditSessionId: "audit-session-linked-topic",
+    auditVersion: "audit-linked-topic",
+    coverageAssessment: {
+      coverage: "NONE",
+      reason: "本次没有可直接引用的老师原文。",
+      coveredDimensions: [],
+      missingDimensions: ["核心判断", "推理过程"],
+      sourceReferences: [],
+      caseNeed: "NOT_ASSESSED",
+      caseReason: "没有使用案例。",
+    },
+    attributionAudit: {
+      outputStatus: "exploratory",
+      confidenceLevel: "low",
+      coveredDimensions: [],
+      missingDimensions: ["核心判断", "推理过程"],
+      recommendation: "作为探索稿查看。",
+      auditStatus: "completed",
+      paragraphAttributions: [{
+        sectionIndex: 0,
+        paragraphIndex: 0,
+        excerpt: "先给出反常识判断",
+        attributionType: "ai_reasoning",
+        reasoningSubtype: "unsupported_opinion",
+        sourceReferences: [],
+        reason: "这是缺少素材支撑的分析性判断。",
+      }],
+    },
+    sourceIntegrityAudit: { status: "passed", deliveryBlocked: false, issues: [] },
+    factAudit: { overallStatus: "not_checked", systemVerified: false, pendingItems: [], caseEvidence: null },
+    deliveryGate: {
+      status: "OPEN",
+      auditVersion: "audit-linked-topic",
+      blockerCodes: [],
+      pendingItemIds: [],
+    },
+  };
+}
+
 function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("页面没有发出脚本生成请求")), timeoutMs);
@@ -1051,6 +1093,12 @@ test("关联选题完整生成成功后保存真实topicId和同一IP", async ()
       if (!isRecord(requestBody)) throw new Error("脚本工厂请求体不是对象");
       resolveCapturedRequest(requestBody);
       return new Response(JSON.stringify(createCompleteScriptResponse(ip.id, ip.name, topic.title)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (String(input) === "/api/script-factory/audit") {
+      return new Response(JSON.stringify(createOpenAuditResponse()), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });

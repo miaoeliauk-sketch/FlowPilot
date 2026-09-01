@@ -17,7 +17,9 @@ import {
 import type {
   ScriptAttributionAudit,
   ScriptCompressionAudit,
+  ScriptDeliveryGate,
   ScriptFactAudit,
+  ScriptFactPendingItem,
   ScriptGenerationStatus,
   ScriptOutputStatus,
   ScriptPartialFailure,
@@ -26,7 +28,15 @@ import type {
   ScriptSourceIntegrityAudit,
   SourceIntegrityIssue,
 } from "@/lib/script-factory-contract";
-import { parseScriptPostGenerationAudit } from "@/lib/script-factory-contract";
+import {
+  isFactCaseEvidenceConfirmed,
+  parseScriptPostGenerationAudit,
+} from "@/lib/script-factory-contract";
+import {
+  getPendingScriptAuditDraft,
+  promoteScriptAuditDraft,
+  saveScriptAuditDraft,
+} from "@/lib/script-factory-audit-draft";
 import { addScriptAssetForTopic, resolveTopicForScript, TopicScriptLinkError } from "@/lib/topic-script-link";
 import type { CaseDecision, CoverageAssessment, CoverageSourceReference } from "@/lib/script-factory-coverage";
 import type { ScriptDirectorRule } from "@/lib/script-director-rule";
@@ -112,12 +122,16 @@ interface ScriptResult {
   apiMeta: ApiMeta;
   globalConstraintReview?: ScriptFactoryGlobalConstraintReview & { source: "server_ledger" };
   evidenceAudit?: EvidenceAudit;
+  coverageAssessment?: CoverageAssessment;
   attributionAudit?: ScriptAttributionAudit;
   sourceIntegrityAudit?: ScriptSourceIntegrityAudit;
   factAudit?: ScriptFactAudit;
   postGenerationAuditStatus?: ScriptPostGenerationAudit["status"];
   postGenerationAuditMessage?: string;
   auditVersion?: string;
+  auditSessionId?: string;
+  deliveryGate?: ScriptDeliveryGate;
+  deliveryPersistenceStatus?: "blocked";
   scriptAssetId?: string;
   manualRewrite?: ScriptManualRewriteRecord;
   generationApproval?: {
@@ -135,8 +149,46 @@ interface PendingConstraintReview {
   phase: "awaiting_decision" | "finalizing";
 }
 
+interface ScriptAuditResolutionResponse {
+  status: "resolved";
+  auditSessionId: string;
+  auditVersion: string;
+  pendingItem: ScriptFactPendingItem;
+  deliveryGate: ScriptDeliveryGate;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseScriptAuditResolutionResponse(value: unknown): ScriptAuditResolutionResponse | null {
+  if (!isRecord(value) || value.status !== "resolved") return null;
+  const pendingItem = isRecord(value.pendingItem) ? value.pendingItem : null;
+  const deliveryGate = isRecord(value.deliveryGate) ? value.deliveryGate : null;
+  if (
+    typeof value.auditSessionId !== "string" || !value.auditSessionId.trim()
+    || typeof value.auditVersion !== "string" || !value.auditVersion.trim()
+    || !pendingItem
+    || typeof pendingItem.id !== "string" || !pendingItem.id.trim()
+    || (pendingItem.sectionIndex !== null && !Number.isInteger(pendingItem.sectionIndex))
+    || !Number.isInteger(pendingItem.paragraphIndex)
+    || !["unsupported_specific_claim", "declared_pending_verification"].includes(String(pendingItem.subtype))
+    || typeof pendingItem.excerpt !== "string"
+    || typeof pendingItem.reason !== "string"
+    || pendingItem.resolutionStatus !== "CONFIRMED_ALLOWED"
+    || !deliveryGate
+    || !["OPEN", "BLOCKED"].includes(String(deliveryGate.status))
+    || deliveryGate.auditVersion !== value.auditVersion
+    || !Array.isArray(deliveryGate.blockerCodes)
+    || !deliveryGate.blockerCodes.every(item => typeof item === "string")
+    || !Array.isArray(deliveryGate.pendingItemIds)
+    || !deliveryGate.pendingItemIds.every(item => typeof item === "string")
+    || (deliveryGate.status === "OPEN"
+      && (deliveryGate.blockerCodes.length > 0 || deliveryGate.pendingItemIds.length > 0))
+  ) {
+    return null;
+  }
+  return value as unknown as ScriptAuditResolutionResponse;
 }
 
 function hasStoredScriptResultShape(value: Record<string, unknown>): boolean {
@@ -214,17 +266,31 @@ function normalizeRestoredAuditState(result: ScriptResult): ScriptResult {
     || result.outputMode === "shuimuran-confirmed"
     || result.postGenerationAuditStatus !== undefined
     || result.attributionAudit !== undefined;
-  const hasV13Audit = result.postGenerationAuditStatus === "completed"
-    && Boolean(result.auditVersion)
-    && Boolean(result.sourceIntegrityAudit);
+  const restoredAudit = result.postGenerationAuditStatus === "completed"
+    ? parseScriptPostGenerationAudit({
+        status: result.postGenerationAuditStatus,
+        auditSessionId: result.auditSessionId,
+        auditVersion: result.auditVersion,
+        coverageAssessment: result.coverageAssessment,
+        attributionAudit: result.attributionAudit,
+        sourceIntegrityAudit: result.sourceIntegrityAudit,
+        factAudit: result.factAudit,
+        deliveryGate: result.deliveryGate,
+      })
+    : null;
+  const hasV13Audit = restoredAudit?.status === "completed";
   if (!requiresV13Audit || hasV13Audit) return result;
   return {
     ...result,
     postGenerationAuditStatus: "unavailable",
     postGenerationAuditMessage: "本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付",
+    auditSessionId: undefined,
     auditVersion: undefined,
+    coverageAssessment: undefined,
     attributionAudit: undefined,
     sourceIntegrityAudit: undefined,
+    factAudit: undefined,
+    deliveryGate: undefined,
   };
 }
 
@@ -336,6 +402,7 @@ function CompressionReviewInfo({ audit }: { audit?: ScriptCompressionAudit }) {
 function TeamReviewPanel({
   data,
   onManualRewrite,
+  onConfirmPendingItem,
 }: {
   data: ScriptResult;
   onManualRewrite?: (
@@ -344,6 +411,7 @@ function TeamReviewPanel({
     replacement: string,
     deleteConfirmed: boolean,
   ) => void;
+  onConfirmPendingItem?: (pendingItemId: string) => Promise<void>;
 }) {
   const attribution = data.attributionAudit;
   const fact = data.factAudit;
@@ -352,6 +420,7 @@ function TeamReviewPanel({
   const [editingIssueIndex, setEditingIssueIndex] = useState<number | null>(null);
   const [deletingIssueIndex, setDeletingIssueIndex] = useState<number | null>(null);
   const [replacement, setReplacement] = useState("");
+  const [resolvingPendingItemId, setResolvingPendingItemId] = useState<string | null>(null);
   if (data.postGenerationAuditStatus === "pending") {
     return (
       <section aria-label="团队审核信息" className="rounded-[12px] border border-[#E5E4DE] bg-[#FAFAF8] p-4">
@@ -383,6 +452,12 @@ function TeamReviewPanel({
   return (
     <section aria-label="团队审核信息" className="rounded-[12px] border border-[#D9E8C7] bg-[#FBFEF7] p-4">
       <div className="text-[13px] font-bold text-[#1C1C1B]">团队审核信息</div>
+      {data.postGenerationAuditMessage && (
+        <div className="mt-3 rounded-[10px] border border-[#D98C8C] bg-[#FFF1F1] p-3 text-[#7A2525]" role="alert">
+          <div className="text-[12.5px] font-bold">门禁响应矛盾</div>
+          <p className="mt-1 text-[11.5px] leading-5">{data.postGenerationAuditMessage}</p>
+        </div>
+      )}
       {integrity?.deliveryBlocked && (
         <div className="mt-3 rounded-[10px] border border-[#D98C8C] bg-[#FFF1F1] p-3 text-[#7A2525]" role="alert">
           <div className="text-[12.5px] font-bold">出处审计未通过，当前稿件暂停交付</div>
@@ -492,7 +567,42 @@ function TeamReviewPanel({
               {fact.overallStatus === "user_confirmed" ? "用户已确认" : fact.overallStatus === "pending" ? "存在待核验内容" : "系统未核验"}
             </p>
             <p className="mt-1 text-[11px] text-[#777]">系统联网核验：未执行</p>
-            {fact.pendingItems.length > 0 && <ul className="mt-2 list-disc pl-5 text-[11.5px] leading-5 text-[#8A6515]">{fact.pendingItems.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+            {fact.pendingItems.length > 0 && (
+              <div className="mt-2 flex flex-col gap-2">
+                {fact.pendingItems.map((item, index) => {
+                  if (typeof item === "string") {
+                    return <div key={index} className="rounded-[8px] bg-[#FFF8DC] px-3 py-2 text-[11.5px] leading-5 text-[#8A6515]">{item}</div>;
+                  }
+                  const isPendingSpecificClaim = item.subtype === "unsupported_specific_claim"
+                    && item.resolutionStatus === "PENDING";
+                  return (
+                    <div key={item.id} className="rounded-[8px] border border-[#E8C96A] bg-[#FFF8DC] px-3 py-2 text-[11.5px] leading-5 text-[#755700]">
+                      <p>{item.excerpt}</p>
+                      <p className="mt-1 text-[#8A6515]">{item.reason}</p>
+                      {item.resolutionStatus === "CONFIRMED_ALLOWED" && (
+                        <p className="mt-2 font-semibold text-[#3B6D11]">人工确认允许使用（仍无出处）</p>
+                      )}
+                      {isPendingSpecificClaim && onConfirmPendingItem && (
+                        <button
+                          type="button"
+                          disabled={resolvingPendingItemId !== null}
+                          onClick={() => {
+                            setResolvingPendingItemId(item.id);
+                            void onConfirmPendingItem(item.id).finally(() => setResolvingPendingItemId(null));
+                          }}
+                          className="mt-2 rounded-[8px] bg-[#1C1C1B] px-3 py-1.5 text-[11.5px] font-semibold text-white disabled:opacity-50"
+                        >
+                          {resolvingPendingItemId === item.id ? "正在登记人工决定…" : "人工确认允许使用"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                {fact.pendingItems.some(item => typeof item !== "string" && item.resolutionStatus === "PENDING") && (
+                  <p className="text-[11px] leading-5 text-[#777]">补充出处和删除正文尚需后续安全流程，本页不会直接把它们标记为已处理。</p>
+                )}
+              </div>
+            )}
           </>
         ) : <p className="mt-1 text-[11.5px] text-[#777]">历史稿未记录事实核验状态。</p>}
       </div>
@@ -508,6 +618,7 @@ function ResultView({
   draftSavedAt = null,
   onClearDraft,
   onManualRewrite,
+  onConfirmPendingItem,
 }: {
   data: ScriptResult;
   compact?: boolean;
@@ -519,6 +630,7 @@ function ResultView({
     replacement: string,
     deleteConfirmed: boolean,
   ) => void;
+  onConfirmPendingItem?: (pendingItemId: string) => Promise<void>;
 }) {
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const deliveryBlockReason = getScriptDeliveryBlockReason(data);
@@ -539,7 +651,7 @@ function ResultView({
     }
   };
   const reviewPanel = data.attributionAudit || data.factAudit || data.generationMode === "ip" || data.generationMode === undefined
-    ? <TeamReviewPanel data={data} onManualRewrite={onManualRewrite} />
+    ? <TeamReviewPanel data={data} onManualRewrite={onManualRewrite} onConfirmPendingItem={onConfirmPendingItem} />
     : null;
 
   if (data.outputMode === "shuimuran-confirmed") {
@@ -1221,8 +1333,21 @@ export default function ScriptFactoryPage() {
     if (!activeIP) {
       return;
     }
+    const auditDraft = typeof window !== "undefined"
+      ? getPendingScriptAuditDraft<ScriptResult>(window.sessionStorage, activeIP.id)
+      : null;
+    const restoredAuditResult = auditDraft
+      ? normalizeStoredCompleteScriptResult(auditDraft.result)
+      : null;
     const draft = getPartialScriptDraft(activeIP.id);
-    if (draft && isStoredScriptResult(draft.result)) {
+    if (restoredAuditResult) {
+      const restored = restoredAuditResult;
+      setGenerationMode(restored.generationMode ?? "ip");
+      setTopic(restored.topic);
+      setResult(restored);
+      setApiMeta(restored.apiMeta);
+      setDraftStorageError(null);
+    } else if (draft && isStoredScriptResult(draft.result)) {
       setDraftStorageError(restorePartialDraft(draft as PartialScriptDraft<ScriptResult>, activeIP.id));
     }
     else {
@@ -1423,6 +1548,8 @@ export default function ScriptFactoryPage() {
     caseEvidence,
     generatedData,
     savedAssetId,
+    existingAuditSessionId,
+    onDeliveryGateOpen,
   }: {
     requestSequence: number;
     requestIP: IPProfile;
@@ -1430,6 +1557,8 @@ export default function ScriptFactoryPage() {
     caseEvidence: GenerationCaseEvidence | null;
     generatedData: ScriptResult;
     savedAssetId: string | undefined;
+    existingAuditSessionId?: string;
+    onDeliveryGateOpen?: (auditedData: ScriptResult) => string | undefined;
   }) {
     let auditedData: ScriptResult;
     try {
@@ -1437,6 +1566,7 @@ export default function ScriptFactoryPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(existingAuditSessionId ? { auditSessionId: existingAuditSessionId } : {}),
           sources: sources.map(source => ({
             sourceId: source.sourceId,
             sourceTitle: source.sourceTitle,
@@ -1465,12 +1595,19 @@ export default function ScriptFactoryPage() {
       const audit = parseScriptPostGenerationAudit(await response.json());
       if (!response.ok || !audit) throw new Error("审计接口返回异常");
       if (audit.status === "completed") {
+        const hasContradictoryOpenGate = audit.deliveryGate.status === "OPEN"
+          && (audit.deliveryGate.blockerCodes.length > 0 || audit.deliveryGate.pendingItemIds.length > 0);
         auditedData = {
           ...generatedData,
           scriptAssetId: savedAssetId ?? generatedData.scriptAssetId,
           postGenerationAuditStatus: "completed",
-          postGenerationAuditMessage: undefined,
+          postGenerationAuditMessage: hasContradictoryOpenGate
+            ? "系统检测到响应内部逻辑矛盾：门禁标记为开放，但仍存在阻断原因或待核验项。已禁止正式入库和复制，请重新审计。"
+            : undefined,
           auditVersion: audit.auditVersion,
+          auditSessionId: audit.auditSessionId,
+          deliveryGate: audit.deliveryGate,
+          coverageAssessment: audit.coverageAssessment,
           attributionAudit: audit.attributionAudit,
           sourceIntegrityAudit: audit.sourceIntegrityAudit,
           factAudit: audit.factAudit,
@@ -1482,6 +1619,7 @@ export default function ScriptFactoryPage() {
           postGenerationAuditStatus: "unavailable",
           postGenerationAuditMessage: `${audit.status === "unavailable" ? audit.message : "本次归属分析暂未完成"}。正文可查看，但不得视为审计通过或正式交付`,
           auditVersion: audit.status === "unavailable" ? audit.auditVersion : undefined,
+          coverageAssessment: undefined,
           attributionAudit: audit.status === "unavailable" ? audit.attributionAudit : undefined,
           sourceIntegrityAudit: audit.status === "unavailable" ? audit.sourceIntegrityAudit : undefined,
           factAudit: audit.status === "unavailable" ? audit.factAudit : undefined,
@@ -1494,6 +1632,7 @@ export default function ScriptFactoryPage() {
         postGenerationAuditStatus: "unavailable",
         postGenerationAuditMessage: "本次归属分析暂未完成。正文可查看，但不得视为审计通过或正式交付",
         auditVersion: undefined,
+        coverageAssessment: undefined,
         attributionAudit: undefined,
         sourceIntegrityAudit: undefined,
         factAudit: undefined,
@@ -1501,6 +1640,68 @@ export default function ScriptFactoryPage() {
     }
 
     if (generationSequenceRef.current !== requestSequence || activeIPIdRef.current !== requestIP.id) return;
+    if (typeof window !== "undefined" && !saveScriptAuditDraft(window.sessionStorage, {
+      ipId: requestIP.id,
+      auditSessionId: auditedData.auditSessionId,
+      auditVersion: auditedData.auditVersion,
+      result: auditedData,
+    })) {
+      setDraftStorageError("待审正文未能保存到独立草稿区；刷新前请先复制内容。");
+      setResult({ ...auditedData, deliveryPersistenceStatus: "blocked" });
+      return;
+    }
+    if (getScriptDeliveryBlockReason(auditedData) === null && onDeliveryGateOpen) {
+      try {
+        if (!auditedData.auditSessionId || !auditedData.auditVersion || typeof window === "undefined") {
+          throw new Error("审计会话或版本缺失，无法安全提升正式脚本");
+        }
+        const auditSessionId = auditedData.auditSessionId;
+        const auditVersion = auditedData.auditVersion;
+        const promotion = promoteScriptAuditDraft(window.sessionStorage, {
+          ipId: requestIP.id,
+          auditSessionId,
+          auditVersion,
+          findExistingAsset: () => {
+            const asset = getScriptAssets(requestIP.id).find(item => {
+              const stored = item.scriptResult as { auditSessionId?: string; auditVersion?: string } | undefined;
+              if (!stored) return false;
+              return stored.auditSessionId === auditSessionId
+                && stored.auditVersion === auditVersion;
+            });
+            return asset ? {
+              id: asset.id,
+              auditSessionId,
+              auditVersion,
+            } : null;
+          },
+          createFormalAsset: () => {
+            const assetId = onDeliveryGateOpen(auditedData);
+            if (!assetId) throw new Error("正式脚本写入未返回记录标识");
+            return assetId;
+          },
+          verifyFormalAsset: assetId => getScriptAssets(requestIP.id).some(asset => {
+            const stored = asset.scriptResult as { auditSessionId?: string; auditVersion?: string } | undefined;
+            if (asset.id !== assetId || !stored) return false;
+            return stored.auditSessionId === auditSessionId
+              && stored.auditVersion === auditVersion;
+          }),
+        });
+        if (promotion.code === "PENDING_DRAFT_NOT_FOUND") {
+          setDraftStorageError("待审正文没有成功保存，已停止写入正式脚本；请先保留当前正文后重试。");
+        } else if (promotion.code === "PENDING_DRAFT_VERSION_MISMATCH") {
+          setDraftStorageError("待审正文与当前审计版本不一致，已停止写入正式脚本；请重新审计后再试。");
+        } else if (promotion.code === "FORMAL_WRITE_NOT_VERIFIED") {
+          throw new Error("正式脚本回读核对失败");
+        } else if (promotion.code === "COMMITTED_CLEANUP_PENDING") {
+          auditedData = { ...auditedData, scriptAssetId: promotion.formalAssetId };
+          setDraftStorageError("正式脚本已保存，但待审记录尚未完成清理标记；刷新后可重试收口。");
+        } else {
+          auditedData = { ...auditedData, scriptAssetId: promotion.formalAssetId };
+        }
+      } catch {
+        setDraftStorageError("团队审核已经通过，但正式脚本写入失败；待审正文仍保留，请重试。");
+      }
+    }
     setResult(auditedData);
     if (generatedData.generationStatus === "partial") {
       const draft = getPartialScriptDraft(requestIP.id);
@@ -1514,14 +1715,152 @@ export default function ScriptFactoryPage() {
     }
   }
 
+  async function handleConfirmFactPendingItem(pendingItemId: string): Promise<void> {
+    const currentResult = result;
+    const requestIP = activeIP;
+    const requestSequence = generationSequenceRef.current;
+    if (
+      !currentResult
+      || !requestIP
+      || !currentResult.auditSessionId
+      || !currentResult.auditVersion
+      || !currentResult.factAudit
+      || typeof window === "undefined"
+    ) {
+      setError("当前待核验记录不完整，不能安全登记人工决定。");
+      return;
+    }
+    const currentPendingItem = currentResult.factAudit.pendingItems.find(
+      (item): item is ScriptFactPendingItem => typeof item !== "string" && item.id === pendingItemId,
+    );
+    if (
+      !currentPendingItem
+      || currentPendingItem.subtype !== "unsupported_specific_claim"
+      || currentPendingItem.resolutionStatus !== "PENDING"
+    ) {
+      setError("这条待核验记录已变化，请以当前页面状态重新操作。");
+      return;
+    }
+    const auditSessionId = currentResult.auditSessionId;
+    const auditVersion = currentResult.auditVersion;
+    try {
+      setError(null);
+      const response = await apiFetch("/api/script-factory/audit/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          auditSessionId,
+          auditVersion,
+          pendingItemId,
+          resolutionStatus: "CONFIRMED_ALLOWED",
+          idempotencyKey: `confirm-allowed:${auditSessionId}:${auditVersion}:${pendingItemId}`,
+        }),
+      });
+      const rawResponse = await response.json();
+      if (!response.ok) {
+        const message = isRecord(rawResponse) && typeof rawResponse.error === "string"
+          ? rawResponse.error
+          : "人工决定登记失败";
+        throw new Error(message);
+      }
+      const resolution = parseScriptAuditResolutionResponse(rawResponse);
+      if (
+        !resolution
+        || resolution.auditSessionId !== auditSessionId
+        || resolution.auditVersion !== auditVersion
+        || resolution.pendingItem.id !== pendingItemId
+      ) {
+        throw new Error("服务端返回的人工处理记录与当前审计不一致");
+      }
+      if (generationSequenceRef.current !== requestSequence || activeIPIdRef.current !== requestIP.id) {
+        throw new Error("人工确认期间页面内容或当前IP已变化，旧结果未写入正式脚本");
+      }
+      const nextPendingItems = currentResult.factAudit.pendingItems.map(item => (
+          typeof item !== "string" && item.id === pendingItemId
+            ? resolution.pendingItem
+            : item
+        ));
+      const hasUnresolvedFact = nextPendingItems.some(item => (
+        typeof item === "string" || item.resolutionStatus === "PENDING"
+      ));
+      const caseEvidence = currentResult.factAudit.caseEvidence;
+      const nextFactAudit: ScriptFactAudit = {
+        ...currentResult.factAudit,
+        overallStatus: hasUnresolvedFact || (caseEvidence && !isFactCaseEvidenceConfirmed(caseEvidence))
+          ? "pending"
+          : caseEvidence || nextPendingItems.length > 0 ? "user_confirmed" : "not_checked",
+        pendingItems: nextPendingItems,
+      };
+      let nextResult: ScriptResult = {
+        ...currentResult,
+        factAudit: nextFactAudit,
+        deliveryGate: resolution.deliveryGate,
+      };
+      if (!saveScriptAuditDraft(window.sessionStorage, {
+        ipId: requestIP.id,
+        auditSessionId,
+        auditVersion,
+        result: nextResult,
+      })) {
+        setDraftStorageError("人工决定已在服务端登记，但待审记录未能在浏览器中更新；请勿关闭页面。");
+        return;
+      }
+      if (getScriptDeliveryBlockReason(nextResult) === null) {
+        const promotion = promoteScriptAuditDraft(window.sessionStorage, {
+          ipId: requestIP.id,
+          auditSessionId,
+          auditVersion,
+          findExistingAsset: () => {
+            const asset = getScriptAssets(requestIP.id).find(item => {
+              const stored = item.scriptResult as { auditSessionId?: string; auditVersion?: string } | undefined;
+              return stored?.auditSessionId === auditSessionId && stored.auditVersion === auditVersion;
+            });
+            return asset ? { id: asset.id, auditSessionId, auditVersion } : null;
+          },
+          createFormalAsset: () => addScriptAsset({
+            ipId: requestIP.id,
+            title: nextResult.titles?.find(item => item.recommended)?.title
+              || nextResult.titles?.[0]?.title
+              || nextResult.topic,
+            cover: nextResult.coverCopy?.[0] || "",
+            content: nextResult.outline.map(section => `【${section.label}】${section.content}`).join("\n\n"),
+            status: "草稿",
+            scriptResult: nextResult,
+          }).id,
+          verifyFormalAsset: assetId => getScriptAssets(requestIP.id).some(asset => {
+            const stored = asset.scriptResult as { auditSessionId?: string; auditVersion?: string } | undefined;
+            return asset.id === assetId
+              && stored?.auditSessionId === auditSessionId
+              && stored.auditVersion === auditVersion;
+          }),
+        });
+        if (promotion.code === "PENDING_DRAFT_NOT_FOUND") {
+          setDraftStorageError("待审正文没有成功保存，已停止写入正式脚本；请先保留当前正文后重试。");
+        } else if (promotion.code === "PENDING_DRAFT_VERSION_MISMATCH") {
+          setDraftStorageError("待审正文与当前审计版本不一致，已停止写入正式脚本；请重新审计后再试。");
+        } else if (promotion.code === "FORMAL_WRITE_NOT_VERIFIED") {
+          setDraftStorageError("人工决定已登记，但正式脚本回读核对失败；待审正文仍保留。");
+        } else {
+          nextResult = { ...nextResult, scriptAssetId: promotion.formalAssetId };
+          if (promotion.code === "COMMITTED_CLEANUP_PENDING") {
+            setDraftStorageError("正式脚本已保存，但待审记录尚未完成清理标记；刷新后可重试收口。");
+          }
+        }
+      }
+      setResult(nextResult);
+    } catch (resolutionError) {
+      setError(resolutionError instanceof Error ? resolutionError.message : "人工决定登记失败，请重试。");
+    }
+  }
+
   function handleManualRewrite(
     issue: SourceIntegrityIssue,
     action: ScriptManualRewriteAction,
     replacement: string,
     deleteConfirmed: boolean,
   ) {
-    if (!result || !activeIP || !result.auditVersion) {
-      setError("缺少当前审计版本，不能处理正文。");
+    if (!result || !activeIP || !result.auditSessionId || !result.auditVersion) {
+      setError("缺少当前审计会话或版本，不能处理正文。");
       return;
     }
     try {
@@ -1534,15 +1873,17 @@ export default function ScriptFactoryPage() {
         replacement,
         deleteConfirmed,
       });
-      const savedAsset = result.scriptAssetId
-        ? getScriptAssets(activeIP.id).find(asset => asset.id === result.scriptAssetId)
-        : undefined;
+      const auditSessionId = result.auditSessionId;
       const editedData: ScriptResult = {
         ...result,
         outline: applied.outline,
         manualRewrite: applied.rewrite,
         postGenerationAuditStatus: "pending",
         postGenerationAuditMessage: undefined,
+        auditSessionId: undefined,
+        auditVersion: undefined,
+        deliveryGate: undefined,
+        coverageAssessment: undefined,
         attributionAudit: undefined,
         sourceIntegrityAudit: undefined,
         factAudit: undefined,
@@ -1553,19 +1894,20 @@ export default function ScriptFactoryPage() {
         if (draft && isStoredScriptResult(draft.result)) {
           rewriteSaved = savePartialScriptDraft({ ...draft, result: editedData });
         }
-      } else if (savedAsset) {
-        rewriteSaved = updateScriptAssetResult(
-          savedAsset.id,
-          activeIP.id,
-          editedData,
-          editedData.outline.map(section => `【${section.label}】${section.content}`).join("\n\n"),
-        );
+      } else if (typeof window !== "undefined") {
+        rewriteSaved = saveScriptAuditDraft(window.sessionStorage, {
+          ipId: activeIP.id,
+          auditSessionId,
+          result: editedData,
+        });
       }
       if (!rewriteSaved) {
         setError("人工处理记录未能安全保存，本次没有修改正文，也没有发起复审。请检查浏览器存储空间后重试。");
         return;
       }
       setError(null);
+      const rewriteRequestSequence = generationSequenceRef.current + 1;
+      generationSequenceRef.current = rewriteRequestSequence;
       setResult(editedData);
       const caseEvidence = result.factAudit?.caseEvidence
         ? {
@@ -1578,12 +1920,36 @@ export default function ScriptFactoryPage() {
           }
         : null;
       void runPostGenerationAudit({
-        requestSequence: generationSequenceRef.current,
+        requestSequence: rewriteRequestSequence,
         requestIP: activeIP,
         sources: getIPSourceContext(activeIP.id),
         caseEvidence,
         generatedData: editedData,
-        savedAssetId: savedAsset?.id,
+        savedAssetId: undefined,
+        existingAuditSessionId: auditSessionId,
+        onDeliveryGateOpen: auditedData => {
+          if (!auditedData.auditSessionId || !auditedData.auditVersion) {
+            throw new Error("审计会话或版本缺失，无法安全写入正式脚本");
+          }
+          const auditSessionId = auditedData.auditSessionId;
+          const auditVersion = auditedData.auditVersion;
+          const existing = getScriptAssets(activeIP.id).find(asset => {
+            const stored = asset.scriptResult as { auditSessionId?: string; auditVersion?: string } | undefined;
+            return stored?.auditSessionId === auditSessionId
+              && stored.auditVersion === auditVersion;
+          });
+          if (existing) return existing.id;
+          return addScriptAsset({
+            ipId: activeIP.id,
+            title: auditedData.titles?.find(item => item.recommended)?.title
+              || auditedData.titles?.[0]?.title
+              || auditedData.topic,
+            cover: auditedData.coverCopy?.[0] || "",
+            content: auditedData.outline.map(section => `【${section.label}】${section.content}`).join("\n\n"),
+            status: "草稿",
+            scriptResult: auditedData,
+          }).id;
+        },
       });
     } catch (rewriteError) {
       setError(rewriteError instanceof Error ? rewriteError.message : "人工处理失败，请重新核对原文。");
@@ -1649,6 +2015,7 @@ export default function ScriptFactoryPage() {
       const data: ScriptResult = {
         ...generatedData,
         generationMode: requestMode,
+        coverageAssessment: undefined,
         attributionAudit: undefined,
         sourceIntegrityAudit: undefined,
         factAudit: undefined,
@@ -1673,7 +2040,10 @@ export default function ScriptFactoryPage() {
       let persistenceCompleted = false;
       let postGenerationAuditStarted = false;
       const recordedKnowledgeEntryIds = new Set<string>();
-      const startPostGenerationAudit = (savedAssetId?: string) => {
+      const startPostGenerationAudit = (
+        savedAssetId?: string,
+        onDeliveryGateOpen?: (auditedData: ScriptResult) => string | undefined,
+      ) => {
         if (requestMode !== "ip" || postGenerationAuditStarted) return;
         postGenerationAuditStarted = true;
         void runPostGenerationAudit({
@@ -1683,9 +2053,10 @@ export default function ScriptFactoryPage() {
           caseEvidence,
           generatedData: data,
           savedAssetId,
+          onDeliveryGateOpen,
         });
       };
-      const persistResult = () => {
+      const persistResult = (approvedData?: ScriptResult) => {
         if (persistenceCompleted) return;
         if (!persistedAssetId) {
           if (activeIPIdRef.current !== requestIP.id || generationSequenceRef.current !== requestSequence) {
@@ -1733,6 +2104,16 @@ export default function ScriptFactoryPage() {
             }
           }
         } else {
+          if (requestMode === "ip" && !approvedData) {
+            setError(null);
+            setPendingConstraintReview(null);
+            startPostGenerationAudit(undefined, auditedData => {
+              persistResult(auditedData);
+              return persistedAssetId;
+            });
+            return;
+          }
+          const dataToPersist = approvedData ?? data;
           const knowledgeTracking = knowledgeRefsAtRequest.length > 0
             ? {
                 status: "unavailable" as const,
@@ -1743,11 +2124,11 @@ export default function ScriptFactoryPage() {
             : undefined;
           const scriptInput = {
             ipId: requestIP.id,
-            title: data.titles?.find(item => item.recommended)?.title || data.titles?.[0]?.title || topic,
-            cover: data.coverCopy?.[0] || "",
-            content: data.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
+            title: dataToPersist.titles?.find(item => item.recommended)?.title || dataToPersist.titles?.[0]?.title || topic,
+            cover: dataToPersist.coverCopy?.[0] || "",
+            content: dataToPersist.outline.map(o => `【${o.label}】${o.content}`).join("\n\n"),
             status: "草稿" as const,
-            scriptResult: data,
+            scriptResult: dataToPersist,
             knowledgeTracking,
           };
           if (!savedAssetId && activeIPIdRef.current !== requestIP.id) {
@@ -2144,6 +2525,7 @@ export default function ScriptFactoryPage() {
               draftSavedAt={partialDraftSavedAt}
               onClearDraft={partialDraftSavedAt ? handleClearPartialDraft : undefined}
               onManualRewrite={handleManualRewrite}
+              onConfirmPendingItem={handleConfirmFactPendingItem}
             />
           </Card>
         </>

@@ -44,6 +44,7 @@ test("段落审计识别单换行段落并要求每一段返回可追溯来源",
     }, {
       paragraphId: "S1-P2",
       attributionType: "ai_reasoning",
+      reasoningSubtype: "unsupported_opinion",
       sourceReferences: [],
       reason: "原始内容没有这层解释。",
     }],
@@ -55,6 +56,7 @@ test("段落审计识别单换行段落并要求每一段返回可追溯来源",
     paragraphIndex: 0,
     excerpt: "持续输出不是每天更换话题。",
     attributionType: "teacher_explicit",
+    reasoningSubtype: undefined,
     sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
     reason: "与老师原始表达直接对应。",
   });
@@ -151,6 +153,7 @@ test("出处问题缺少真实素材编号时拒绝审计结果", () => {
     paragraphs: paragraphs.map(paragraph => ({
       paragraphId: paragraph.id,
       attributionType: "ai_reasoning",
+      reasoningSubtype: "unsupported_opinion",
       sourceReferences: [],
       reason: "没有老师出处。",
     })),

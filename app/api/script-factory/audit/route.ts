@@ -17,9 +17,12 @@ import type {
   ScriptFactCaseEvidence,
   ScriptPostGenerationAudit,
 } from "@/lib/script-factory-contract";
+import { isFactCaseEvidenceConfirmed } from "@/lib/script-factory-contract";
+import { createScriptAuditSession } from "@/lib/script-factory-audit-server";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
 
 interface AuditRequestBody {
+  auditSessionId?: unknown;
   sources?: unknown;
   content?: unknown;
   caseEvidence?: unknown;
@@ -146,10 +149,13 @@ export async function POST(req: NextRequest) {
   }
   const bodyObject = asObject(parsedBody);
   if (!bodyObject) return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
-  if (!hasOnlyKeys(bodyObject, ["sources", "content", "caseEvidence"])) {
+  if (!hasOnlyKeys(bodyObject, ["auditSessionId", "sources", "content", "caseEvidence"])) {
     return NextResponse.json({ error: "审计接口只接受正文与证据字段" }, { status: 400 });
   }
   const body = bodyObject as AuditRequestBody;
+  if (body.auditSessionId !== undefined && (typeof body.auditSessionId !== "string" || !body.auditSessionId)) {
+    return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
+  }
   if (hasForbiddenNestedAuditFields(body)) {
     return NextResponse.json({ error: "审计接口只接受正文与证据字段" }, { status: 400 });
   }
@@ -208,8 +214,76 @@ export async function POST(req: NextRequest) {
         timeoutMs: 60_000,
         maxRetries: 1,
       });
+      const pendingItems = attributionResult.data.paragraphAttributions
+        .filter(paragraph => paragraph.reasoningSubtype === "unsupported_specific_claim")
+        .map(paragraph => ({
+          id: `${auditVersion}:${paragraph.sectionIndex}:${paragraph.paragraphIndex}:unsupported_specific_claim`,
+          sectionIndex: paragraph.sectionIndex,
+          paragraphIndex: paragraph.paragraphIndex,
+          subtype: "unsupported_specific_claim" as const,
+          excerpt: paragraph.excerpt,
+          reason: paragraph.reason,
+          resolutionStatus: "PENDING" as const,
+        }));
+      const declaredPendingItems = factAudit.pendingItems
+        .filter((item): item is string => typeof item === "string")
+        .map((item, index) => ({
+          id: `${auditVersion}:pending-verification:${index}`,
+          sectionIndex: null,
+          paragraphIndex: index,
+          subtype: "declared_pending_verification" as const,
+          excerpt: item,
+          reason: "生成结果明确标记该事实仍需核验。",
+          resolutionStatus: "PENDING" as const,
+        }));
+      const unverifiedCasePendingItems = caseEvidence && !isFactCaseEvidenceConfirmed(caseEvidence)
+        ? [{
+            id: `${auditVersion}:case-evidence:0:declared_pending_verification`,
+            sectionIndex: null,
+            paragraphIndex: 0,
+            subtype: "declared_pending_verification" as const,
+            excerpt: caseEvidence.content?.trim() || caseEvidence.title.trim(),
+            reason: "人工补充案例尚未核实。",
+            resolutionStatus: "PENDING" as const,
+          }]
+        : [];
+      const allPendingItems = [
+        ...declaredPendingItems,
+        ...unverifiedCasePendingItems,
+        ...pendingItems,
+      ];
+      const pendingItemIds = allPendingItems.map(item => item.id);
+      const blockerCodes = [
+        ...(attributionResult.data.sourceIntegrityAudit.issues.length > 0
+          ? ["SOURCE_INTEGRITY_REVIEW_REQUIRED"]
+          : []),
+        ...(pendingItems.length > 0
+          ? ["UNRESOLVED_UNSUPPORTED_SPECIFIC_CLAIM"]
+          : []),
+        ...(declaredPendingItems.length > 0 || unverifiedCasePendingItems.length > 0
+          ? ["UNRESOLVED_FACT_VERIFICATION"]
+          : []),
+      ];
+      const completedFactAudit = {
+        ...factAudit,
+        pendingItems: allPendingItems,
+      };
+      const deliveryGate = {
+        status: blockerCodes.length > 0 ? "BLOCKED" as const : "OPEN" as const,
+        auditVersion,
+        blockerCodes,
+        pendingItemIds,
+      };
+      const { auditSessionId } = await createScriptAuditSession({
+        auditSessionId: body.auditSessionId as string | undefined,
+        auditVersion,
+        factAudit: completedFactAudit,
+        sourceIntegrityAudit: attributionResult.data.sourceIntegrityAudit,
+        deliveryGate,
+      });
       const result: ScriptPostGenerationAudit = {
         status: "completed",
+        auditSessionId,
         auditVersion,
         coverageAssessment,
         attributionAudit: buildAttributionAudit({
@@ -220,7 +294,8 @@ export async function POST(req: NextRequest) {
           auditCompleted: true,
         }),
         sourceIntegrityAudit: attributionResult.data.sourceIntegrityAudit,
-        factAudit,
+        factAudit: completedFactAudit,
+        deliveryGate,
       };
       return NextResponse.json(result);
     } catch {
