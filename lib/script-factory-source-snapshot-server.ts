@@ -198,3 +198,20 @@ export function createTeacherOriginalSourceSnapshot(input: {
     return source;
   });
 }
+
+export function getTeacherOriginalSourceSnapshot(input: {
+  sourceId: string;
+  ipId: string;
+  contentSha256: string;
+}): Promise<TeacherOriginalSourceSnapshot | null> {
+  return withLedgerLock(async () => {
+    const ledger = await loadLedger();
+    const source = ledger.sources.find(item => item.sourceId === input.sourceId);
+    if (!source
+      || source.ipId !== input.ipId
+      || source.contentSha256 !== input.contentSha256) {
+      return null;
+    }
+    return { ...source };
+  });
+}

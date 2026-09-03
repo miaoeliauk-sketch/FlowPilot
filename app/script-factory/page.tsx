@@ -86,6 +86,18 @@ interface TeacherOriginalSourceRegistration {
   createdAt: string;
 }
 
+interface TeacherOriginalSourceReference {
+  sourceId: string;
+  contentSha256: string;
+}
+
+interface NonEvidenceReference {
+  id: string;
+  title: string;
+  category: string;
+  reason: string;
+}
+
 // ── Types ──
 interface TitleOption { title: string; formula: string; platform: string; whyFitsIP: string; role?: "主推" | "流量" | "安全"; recommended?: boolean; }
 interface KeywordReply { keyword: string; reply: string; }
@@ -141,6 +153,9 @@ interface ScriptResult {
   auditVersion?: string;
   auditSessionId?: string;
   deliveryGate?: ScriptDeliveryGate;
+  teacherOriginalSources?: TeacherOriginalSourceReference[];
+  nonEvidenceReferences?: NonEvidenceReference[];
+  generationEvidenceProof?: string;
   deliveryPersistenceStatus?: "blocked";
   scriptAssetId?: string;
   manualRewrite?: ScriptManualRewriteRecord;
@@ -1559,6 +1574,7 @@ export default function ScriptFactoryPage() {
     caseEvidence: GenerationCaseEvidence | null,
     temporaryCognition: EphemeralCognitionContext | null,
     linkedTopicId: string | null,
+    teacherOriginalSources: TeacherOriginalSourceReference[],
   ) {
     let res: Response;
     try {
@@ -1566,6 +1582,8 @@ export default function ScriptFactoryPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           generationMode: requestMode,
+          activeIPId: ip.id,
+          teacherOriginalSources,
           directorRule: requestMode === "ip" ? activeDirectorRule : undefined,
           ipProfile: ip, topic: t,
           topicId: linkedTopicId ?? undefined,
@@ -1622,8 +1640,6 @@ export default function ScriptFactoryPage() {
   async function runPostGenerationAudit({
     requestSequence,
     requestIP,
-    sources,
-    caseEvidence,
     generatedData,
     savedAssetId,
     existingAuditSessionId,
@@ -1631,8 +1647,6 @@ export default function ScriptFactoryPage() {
   }: {
     requestSequence: number;
     requestIP: IPProfile;
-    sources: ReturnType<typeof getIPSourceContext>;
-    caseEvidence: GenerationCaseEvidence | null;
     generatedData: ScriptResult;
     savedAssetId: string | undefined;
     existingAuditSessionId?: string;
@@ -1645,15 +1659,8 @@ export default function ScriptFactoryPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(existingAuditSessionId ? { auditSessionId: existingAuditSessionId } : {}),
-          sources: sources.map(source => ({
-            sourceId: source.sourceId,
-            sourceTitle: source.sourceTitle,
-            itemId: source.itemId,
-            kind: source.kind,
-            content: source.content,
-            originalExcerpt: source.originalExcerpt,
-            extractionStatus: source.extractionStatus,
-          })),
+          activeIPId: requestIP.id,
+          generationEvidenceProof: generatedData.generationEvidenceProof,
           content: {
             outline: generatedData.outline.map(section => ({
               ...section,
@@ -1661,13 +1668,6 @@ export default function ScriptFactoryPage() {
             })),
             pendingVerification: generatedData.pendingVerification ?? [],
           },
-          caseEvidence: caseEvidence ? {
-            title: caseEvidence.title,
-            content: caseEvidence.content,
-            sourceType: caseEvidence.sourceType,
-            verificationStatus: caseEvidence.verificationStatus,
-            sourceUrl: caseEvidence.sourceUrl,
-          } : null,
         }),
       });
       const audit = parseScriptPostGenerationAudit(await response.json());
@@ -1987,21 +1987,9 @@ export default function ScriptFactoryPage() {
       const rewriteRequestSequence = generationSequenceRef.current + 1;
       generationSequenceRef.current = rewriteRequestSequence;
       setResult(editedData);
-      const caseEvidence = result.factAudit?.caseEvidence
-        ? {
-            title: result.factAudit.caseEvidence.title,
-            content: result.factAudit.caseEvidence.content ?? "",
-            sourceType: result.factAudit.caseEvidence.sourceType,
-            verificationStatus: result.factAudit.caseEvidence.verificationStatus,
-            sourceUrl: result.factAudit.caseEvidence.sourceUrl,
-            occurredAt: result.factAudit.caseEvidence.occurredAt,
-          }
-        : null;
       void runPostGenerationAudit({
         requestSequence: rewriteRequestSequence,
         requestIP: activeIP,
-        sources: getIPSourceContext(activeIP.id),
-        caseEvidence,
         generatedData: editedData,
         savedAssetId: undefined,
         existingAuditSessionId: auditSessionId,
@@ -2069,6 +2057,23 @@ export default function ScriptFactoryPage() {
     const requestMode = generationMode;
     const requestInputIntent = requestMode === "ip" ? inputIntent : null;
     const knowledgeRefsAtRequest = knowledgeRefs;
+    const voiceSamplesAtRequest = cognitionData.entries
+      .filter(entry => getNormalizedCategory(entry) === "IP表达语料" && entry.ipId === requestIP.id)
+      .slice(0, 5);
+    const nonEvidenceReferencesAtRequest: NonEvidenceReference[] = [
+      ...knowledgeRefsAtRequest.map(ref => ({
+        id: ref.id,
+        title: ref.entry.title,
+        category: getNormalizedCategory(ref.entry),
+        reason: ref.reason,
+      })),
+      ...voiceSamplesAtRequest.map(entry => ({
+        id: entry.id,
+        title: entry.title,
+        category: "IP表达语料",
+        reason: "仅参考表达风格",
+      })),
+    ];
     const requestSequence = generationSequenceRef.current + 1;
     generationSequenceRef.current = requestSequence;
     const sourceContext = requestMode === "ip" ? getIPSourceContext(requestIP.id) : [];
@@ -2090,8 +2095,13 @@ export default function ScriptFactoryPage() {
     }
     setError(null); setDraftStorageError(null); setResult(null); setPartialDraftSavedAt(null); setPendingConstraintReview(null); setLoading(true);
     try {
+      let teacherOriginalSources: TeacherOriginalSourceReference[] = [];
       if (requestMode === "ip" && requestInputIntent === "teacher_original") {
-        await registerTeacherOriginalSource(requestIP, requestedTopic);
+        const registeredSource = await registerTeacherOriginalSource(requestIP, requestedTopic);
+        teacherOriginalSources = [{
+          sourceId: registeredSource.sourceId,
+          contentSha256: registeredSource.contentSha256,
+        }];
         if (
           activeIPIdRef.current !== requestIP.id
           || generationSequenceRef.current !== requestSequence
@@ -2108,6 +2118,7 @@ export default function ScriptFactoryPage() {
         caseEvidence,
         temporaryCognition,
         linkedTopicAtRequest?.id ?? null,
+        teacherOriginalSources,
       );
       const data: ScriptResult = {
         ...generatedData,
@@ -2119,6 +2130,8 @@ export default function ScriptFactoryPage() {
         postGenerationAuditStatus: requestMode === "ip" ? "pending" : undefined,
         postGenerationAuditMessage: undefined,
         auditVersion: undefined,
+        teacherOriginalSources,
+        nonEvidenceReferences: nonEvidenceReferencesAtRequest,
       };
       if (data.ipId !== requestIP.id) {
         throw new Error("接口返回的脚本IP与发起请求时的IP不一致，已停止保存。");
@@ -2146,8 +2159,6 @@ export default function ScriptFactoryPage() {
         void runPostGenerationAudit({
           requestSequence,
           requestIP,
-          sources: sourceContext,
-          caseEvidence,
           generatedData: data,
           savedAssetId,
           onDeliveryGateOpen,

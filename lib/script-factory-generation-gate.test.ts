@@ -7,6 +7,7 @@ import { NextRequest } from "next/server";
 import { POST as issueGlobalConstraintChallenge } from "../app/api/global-content-constraint/challenge/route";
 import { POST as confirmGlobalConstraint } from "../app/api/global-content-constraint/confirm/route";
 import { POST } from "../app/api/script-factory/route";
+import { POST as auditGeneratedScript } from "../app/api/script-factory/audit/route";
 import type { IPProfile } from "./types";
 import {
   buildEphemeralCognitionProofClaims,
@@ -15,6 +16,7 @@ import {
 } from "./ip-boundary-interview-proof";
 import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 import { getIPSourceAnalysisProofSecret } from "./ip-source-analysis-proof";
+import { createTeacherOriginalSourceSnapshot } from "./script-factory-source-snapshot-server";
 
 const IP: IPProfile = {
   id: "ip-1", name: "测试IP", avatar: "测", positioning: "商业观察",
@@ -155,6 +157,258 @@ test("IP专属生成没有覆盖度结果也能直接生成正文", async () => 
     assert.equal(body.attributionAudit, undefined);
     assert.equal(body.factAudit, undefined);
   });
+});
+
+test("IP专属生成只按服务端来源编号读取老师原文而不接收浏览器重传正文", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-generation-source-snapshot-"));
+  const previous = process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE;
+  process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE = path.join(directory, "ledger.json");
+  try {
+    const source = await createTeacherOriginalSourceSnapshot({
+      ipId: IP.id,
+      title: "老师关于真实判断的原文",
+      rawContent: "老师明确说：真正需要观察的是需求、成本和人的选择如何重新组合。",
+      idempotencyKey: "generation-trusted-source-001",
+    });
+    await withSuccessfulModel(async prompts => {
+      const response = await POST(requestFor({
+        activeIPId: IP.id,
+        teacherOriginalSources: [{
+          sourceId: source.sourceId,
+          contentSha256: source.contentSha256,
+        }],
+      }));
+      const body = await response.json();
+
+      assert.equal(response.status, 200, body.error);
+      assert.ok(prompts[0]?.includes(source.rawContent));
+      assert.equal(JSON.stringify(body).includes(source.rawContent), false, "生成响应不应回传老师原文全文");
+      assert.equal(typeof body.generationEvidenceProof, "string");
+      assert.equal(body.generationEvidenceProof.split(".").length, 4);
+      assert.equal(
+        body.generationEvidenceProof.split(".").some((part: string) => (
+          Buffer.from(part, "base64url").toString("utf8").includes(source.rawContent)
+        )),
+        false,
+        "生成凭证必须保持不透明，不能让浏览器解码出老师原文",
+      );
+    });
+  } finally {
+    if (previous === undefined) delete process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE;
+    else process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("生成端使用25条合法来源时签发的凭证能够通过审计验签", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-generation-25-sources-"));
+  const previousAuditLedger = process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
+  process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = path.join(directory, "audit-ledger.json");
+  try {
+  const sourceContext: Awaited<ReturnType<typeof registeredLegacyContext>>[] = [];
+  for (let index = 0; index < 25; index += 1) {
+    sourceContext.push(await registeredLegacyContext());
+  }
+
+  let generated: Record<string, unknown> = {};
+  await withSuccessfulModel(async () => {
+    const response = await POST(requestFor({ ipSourceContext: sourceContext }));
+    generated = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 200);
+    assert.equal(typeof generated.generationEvidenceProof, "string");
+  });
+
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return deepSeekResponse(JSON.stringify({
+        coverage: "PARTIAL",
+        reason: "25条已核验来源共同支持生成正文。",
+        coveredDimensions: ["核心判断"],
+        missingDimensions: ["推理过程"],
+        sourceReferences: sourceContext.map(source => ({
+          sourceId: source.sourceId,
+          itemId: source.itemId,
+        })),
+        caseNeed: "NOT_ASSESSED",
+        caseReason: "推理过程尚未覆盖，暂不判断案例需求。",
+      }), "coverage-25-sources");
+    }
+    return deepSeekResponse(JSON.stringify({
+      paragraphs: (generated.outline as Array<unknown>).map((_section, index) => ({
+        paragraphId: `S${index + 1}-P1`,
+        attributionType: "ai_reasoning",
+        reasoningSubtype: "unsupported_opinion",
+        sourceReferences: [],
+        reason: "该段属于无来源分析性判断。",
+      })),
+      integrityIssues: [],
+    }), "attribution-25-sources");
+  };
+  try {
+    const response = await auditGeneratedScript(new NextRequest(
+      "http://localhost/api/script-factory/audit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+        body: JSON.stringify({
+          activeIPId: IP.id,
+          generationEvidenceProof: generated.generationEvidenceProof,
+          content: {
+            outline: generated.outline,
+            pendingVerification: generated.pendingVerification,
+          },
+        }),
+      },
+    ));
+    const result = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(calls, 2, JSON.stringify(result));
+    assert.equal(result.status, "completed", JSON.stringify(result));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  } finally {
+    if (previousAuditLedger === undefined) delete process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
+    else process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = previousAuditLedger;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("用来源A生成后不能替换为同一IP的合法来源B送审", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "flowpilot-generation-audit-binding-"));
+  const previousSourceLedger = process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE;
+  const previousAuditLedger = process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
+  process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE = path.join(directory, "source-ledger.json");
+  process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = path.join(directory, "audit-ledger.json");
+  try {
+    const sourceA = await createTeacherOriginalSourceSnapshot({
+      ipId: IP.id,
+      title: "来源A",
+      rawContent: "来源A明确提出：先观察真实需求，再判断变化是否持续。",
+      idempotencyKey: "generation-audit-binding-source-a",
+    });
+    const sourceB = await createTeacherOriginalSourceSnapshot({
+      ipId: IP.id,
+      title: "来源B",
+      rawContent: "来源B讨论的是另一个完全不同的判断。",
+      idempotencyKey: "generation-audit-binding-source-b",
+    });
+    let generated: Record<string, unknown> = {};
+    await withSuccessfulModel(async () => {
+      const response = await POST(requestFor({
+        activeIPId: IP.id,
+        teacherOriginalSources: [{
+          sourceId: sourceA.sourceId,
+          contentSha256: sourceA.contentSha256,
+        }],
+      }));
+      generated = await response.json() as Record<string, unknown>;
+      assert.equal(response.status, 200);
+    });
+
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return deepSeekResponse(JSON.stringify({
+          coverage: "NONE",
+          reason: "来源B不支持生成正文。",
+          coveredDimensions: [],
+          missingDimensions: ["核心判断", "推理过程"],
+          sourceReferences: [],
+          caseNeed: "NOT_ASSESSED",
+          caseReason: "需要先确认可信来源。",
+        }), "coverage-swapped-source");
+      }
+      return deepSeekResponse(JSON.stringify({
+        paragraphs: (generated.outline as Array<unknown>).map((_section, index) => ({
+          paragraphId: `S${index + 1}-P1`,
+          attributionType: "ai_reasoning",
+          reasoningSubtype: "unsupported_opinion",
+          sourceReferences: [],
+          reason: "来源B无法支持该段正文。",
+        })),
+        integrityIssues: [],
+      }), "attribution-swapped-source");
+    };
+    try {
+      const trustedResponse = await auditGeneratedScript(new NextRequest(
+        "http://localhost/api/script-factory/audit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+          body: JSON.stringify({
+            activeIPId: IP.id,
+            generationEvidenceProof: generated.generationEvidenceProof,
+            content: {
+              outline: generated.outline,
+              pendingVerification: generated.pendingVerification,
+            },
+          }),
+        },
+      ));
+      assert.equal(trustedResponse.status, 200, JSON.stringify(await trustedResponse.json()));
+
+      const changedContentResponse = await auditGeneratedScript(new NextRequest(
+        "http://localhost/api/script-factory/audit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+          body: JSON.stringify({
+            activeIPId: IP.id,
+            generationEvidenceProof: generated.generationEvidenceProof,
+            content: {
+              outline: [{
+                ...(generated.outline as Array<Record<string, unknown>>)[0],
+                content: "浏览器替换后的正文。",
+              }],
+              pendingVerification: generated.pendingVerification,
+            },
+          }),
+        },
+      ));
+      assert.equal(changedContentResponse.status, 400);
+      assert.equal((await changedContentResponse.json()).code, "GENERATION_EVIDENCE_MISMATCH");
+
+      const response = await auditGeneratedScript(new NextRequest(
+        "http://localhost/api/script-factory/audit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-DeepSeek-Key": "test-key" },
+          body: JSON.stringify({
+            activeIPId: IP.id,
+            sources: [],
+            teacherOriginalSources: [{
+              sourceId: sourceB.sourceId,
+              contentSha256: sourceB.contentSha256,
+            }],
+            nonEvidenceReferences: [],
+            content: {
+              outline: generated.outline,
+              pendingVerification: generated.pendingVerification,
+            },
+          }),
+        },
+      ));
+      const result = await response.json();
+
+      assert.equal(response.status, 400);
+      assert.equal(result.code, "GENERATION_EVIDENCE_MISMATCH");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    if (previousSourceLedger === undefined) delete process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE;
+    else process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE = previousSourceLedger;
+    if (previousAuditLedger === undefined) delete process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
+    else process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = previousAuditLedger;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("脚本工厂只使用服务端已确认规则并返回真实拦截结果", async () => {

@@ -196,6 +196,7 @@ function generatedScript(topic: string, compressionAudit?: Record<string, unknow
     shotPrompts: [],
     editingRhythm: { subtitleHighlights: [], soundEffects: [], screenRecordingCuts: [], caseInserts: [], pauses: [] },
     apiMeta: { apiCalled: true, calledAt: "2026-08-15T00:00:00.000Z", model: "test", ipUsed: SHUIMURAN.name, mockHit: false },
+    generationEvidenceProof: "test-generation-evidence-proof",
     globalConstraintReview: serverConstraintReview(false),
     compressionAudit,
   };
@@ -770,6 +771,7 @@ test("老师原文确认后先登记服务端来源编号，登记成功后才�
 
   try {
     const { render } = await import("@testing-library/react");
+    const { waitFor } = await import("@testing-library/dom");
     const userEvent = (await import("@testing-library/user-event")).default;
     const { IPProvider } = await import("./ip-context");
     const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
@@ -788,8 +790,11 @@ test("老师原文确认后先登记服务端来源编号，登记成功后才�
     assert.ok(await view.findByText("正文应该先展示，辅助审计随后补充。"));
     const sourceIndex = calls.findIndex(call => call.path === "/api/script-factory/sources");
     const generationIndex = calls.findIndex(call => call.path === "/api/script-factory");
+    await waitFor(() => assert.ok(calls.some(call => call.path === "/api/script-factory/audit")));
+    const auditIndex = calls.findIndex(call => call.path === "/api/script-factory/audit");
     assert.ok(sourceIndex >= 0);
     assert.ok(generationIndex > sourceIndex);
+    assert.ok(auditIndex > generationIndex);
     assert.deepEqual(calls[sourceIndex]?.body, {
       inputIntent: "teacher_original",
       confirmation: "TEACHER_ORIGINAL_CONFIRMED",
@@ -799,6 +804,14 @@ test("老师原文确认后先登记服务端来源编号，登记成功后才�
       idempotencyKey: calls[sourceIndex]?.body.idempotencyKey,
     });
     assert.equal(typeof calls[sourceIndex]?.body.idempotencyKey, "string");
+    const trustedSourceReference = {
+      sourceId: "ipsrc_11111111-1111-4111-8111-111111111111",
+      contentSha256: "a".repeat(64),
+    };
+    assert.deepEqual(calls[generationIndex]?.body.teacherOriginalSources, [trustedSourceReference]);
+    assert.equal(calls[generationIndex]?.body.activeIPId, SHUIMURAN.id);
+    assert.equal(calls[auditIndex]?.body.generationEvidenceProof, "test-generation-evidence-proof");
+    assert.equal(calls[auditIndex]?.body.activeIPId, SHUIMURAN.id);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2217,7 +2230,11 @@ test("人工替换复审时不会复用同一审计会话的旧版本正式稿",
     assert.ok(await view.findByText("责任主体失真"));
     assert.ok(view.getByText(/待审核稿 · 置信度高/));
     assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
-    assert.deepEqual(Object.keys(auditBodies[0] ?? {}).sort(), ["caseEvidence", "content", "sources"]);
+    assert.deepEqual(Object.keys(auditBodies[0] ?? {}).sort(), [
+      "activeIPId",
+      "content",
+      "generationEvidenceProof",
+    ]);
     assert.equal(getScriptAssets(SHUIMURAN.id).length, 1);
 
     await user.click(view.getByRole("button", { name: "人工替换" }));

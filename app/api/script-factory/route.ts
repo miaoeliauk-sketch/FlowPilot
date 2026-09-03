@@ -44,6 +44,7 @@ import {
   type ScriptFactoryIPSourceContextItem,
 } from "@/lib/script-factory-source-context";
 import { verifyScriptFactoryIPSourceContext } from "@/lib/script-factory-source-context-proof";
+import { getTeacherOriginalSourceSnapshot } from "@/lib/script-factory-source-snapshot-server";
 import {
   ARGUMENT_REVIEW_SYSTEM,
   buildArgumentReviewPrompt,
@@ -71,6 +72,7 @@ import {
 } from "@/lib/ip-source-analysis-v2";
 import { auditScriptFactoryGlobalConstraints } from "@/lib/script-factory-global-constraint-audit";
 import { loadServerGlobalConstraintRecords } from "@/lib/global-content-constraint-server";
+import { createScriptGenerationEvidenceProof } from "@/lib/script-factory-generation-evidence-proof";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -142,6 +144,8 @@ function getCompatibleGenerationRequirement(
 
 interface RequestBody {
   generationMode?: "standard" | "ip";
+  activeIPId?: string;
+  teacherOriginalSources?: unknown;
   ipProfile?: IPProfile;
   styleProfile?: IPStyleProfile | null;
   topic?: string;
@@ -171,8 +175,30 @@ interface RequestBody {
   directorRule?: unknown;
 }
 
+interface TeacherOriginalSourceReference {
+  sourceId: string;
+  contentSha256: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseTeacherOriginalSourceReferences(value: unknown): TeacherOriginalSourceReference[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 12) return null;
+  const references: TeacherOriginalSourceReference[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)
+      || Object.keys(raw).some(key => key !== "sourceId" && key !== "contentSha256")
+      || typeof raw.sourceId !== "string"
+      || !/^ipsrc_[0-9a-f-]{36}$/.test(raw.sourceId)
+      || typeof raw.contentSha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(raw.contentSha256)) return null;
+    references.push({ sourceId: raw.sourceId, contentSha256: raw.contentSha256 });
+  }
+  if (new Set(references.map(reference => reference.sourceId)).size !== references.length) return null;
+  return references;
 }
 
 // ── 内容形式配置：每种形式对应完全不同的内容架构指令，不是简单改字数 ──
@@ -759,7 +785,52 @@ export async function POST(req: NextRequest) {
       apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
     }, { status: 400 });
   }
-  const sourceReferences = [...persistentSourceReferences, ...temporarySourceReferences];
+  const teacherOriginalSourceReferences = parseTeacherOriginalSourceReferences(body.teacherOriginalSources);
+  if (!teacherOriginalSourceReferences
+    || (teacherOriginalSourceReferences.length > 0
+      && (generationMode !== "ip" || body.activeIPId !== ip.id))) {
+    return NextResponse.json({
+      error: "老师原文来源编号格式或归属无效，已拒绝生成。",
+      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+    }, { status: 400 });
+  }
+  const teacherOriginalSourceItems: ScriptFactoryIPSourceContextItem[] = [];
+  try {
+    for (const reference of teacherOriginalSourceReferences) {
+      const source = await getTeacherOriginalSourceSnapshot({
+        sourceId: reference.sourceId,
+        ipId: ip.id,
+        contentSha256: reference.contentSha256,
+      });
+      if (!source) {
+        return NextResponse.json({
+          error: "老师原文来源编号无效、已变化或不属于当前IP，已拒绝生成。",
+          apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+        }, { status: 400 });
+      }
+      teacherOriginalSourceItems.push({
+        parserVersion: 2,
+        ipId: source.ipId,
+        sourceId: source.sourceId,
+        sourceTitle: source.title,
+        itemId: "teacher-original",
+        kind: "claim",
+        content: source.rawContent,
+        originalExcerpt: source.rawContent,
+        extractionStatus: "人工确认",
+      });
+    }
+  } catch {
+    return NextResponse.json({
+      error: "老师原文来源账本读取失败或已损坏，已停止生成。",
+      apiMeta: { apiCalled: false, calledAt: new Date().toISOString(), model: MODEL, ipUsed: ip.name, mockHit: false },
+    }, { status: 500 });
+  }
+  const sourceReferences = [
+    ...persistentSourceReferences,
+    ...temporarySourceReferences,
+    ...teacherOriginalSourceItems,
+  ];
   const caseEvidenceResult = parseScriptFactoryCaseEvidence(
     isIPSpecificGeneration ? body.caseEvidence : undefined,
     ip.id,
@@ -1527,6 +1598,53 @@ ${rawIPBlock}
       },
       activeGlobalConstraints,
     );
+    const generationEvidenceProof = isIPSpecificGeneration
+      ? createScriptGenerationEvidenceProof({
+          ipId: ip.id,
+          content: {
+            outline: outline.map(section => ({
+              label: section.label,
+              timeRange: section.timeRange,
+              content: section.content,
+              subPoints: section.subPoints ?? [],
+            })),
+            pendingVerification: content.pendingVerification,
+          },
+          sources: sourceReferences.map(reference => ({
+            sourceId: reference.sourceId,
+            sourceTitle: reference.sourceTitle,
+            itemId: reference.itemId,
+            kind: reference.kind,
+            content: reference.content,
+            originalExcerpt: reference.originalExcerpt,
+            extractionStatus: reference.extractionStatus,
+          })),
+          caseEvidence: caseEvidence ? {
+            title: caseEvidence.title ?? "未命名案例",
+            content: caseEvidence.content,
+            sourceType: caseEvidence.sourceType ?? "未知",
+            verificationStatus: caseEvidence.verificationStatus ?? "未核实",
+            sourceUrl: caseEvidence.sourceUrl,
+            occurredAt: caseEvidence.occurredAt,
+          } : null,
+          nonEvidenceReferences: [
+            ...methodRefs.map(reference => ({
+              id: reference.id,
+              title: reference.title,
+              category: reference.category,
+              reason: reference.reason,
+              evidenceRole: "non_evidence" as const,
+            })),
+            ...injectedSamples.map(reference => ({
+              id: reference.id,
+              title: reference.title,
+              category: "IP表达语料",
+              reason: "仅参考表达风格",
+              evidenceRole: "non_evidence" as const,
+            })),
+          ],
+        }, await getIPSourceAnalysisProofSecret())
+      : undefined;
     return NextResponse.json({
       generationMode,
       outputMode: isShuimuranDedicatedGeneration ? "shuimuran-confirmed" : "default",
@@ -1563,6 +1681,7 @@ ${rawIPBlock}
         ...globalConstraintReview,
         source: "server_ledger",
       },
+      ...(generationEvidenceProof ? { generationEvidenceProof } : {}),
     });
   } catch (err) {
     const message = getErrorMessage(err);

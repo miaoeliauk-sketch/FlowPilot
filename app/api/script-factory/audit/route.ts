@@ -10,33 +10,33 @@ import {
 } from "@/lib/script-factory-attribution";
 import {
   analyzeScriptCoverage,
-  isCoverageSource,
 } from "@/lib/script-factory-coverage-analysis";
-import type { CoverageSourceReference } from "@/lib/script-factory-coverage";
 import type {
-  ScriptFactCaseEvidence,
   ScriptPostGenerationAudit,
 } from "@/lib/script-factory-contract";
 import { isFactCaseEvidenceConfirmed } from "@/lib/script-factory-contract";
-import { createScriptAuditSession } from "@/lib/script-factory-audit-server";
+import {
+  createScriptAuditSession,
+  ScriptAuditServerError,
+  verifyScriptAuditSessionGenerationEvidence,
+} from "@/lib/script-factory-audit-server";
+import {
+  digestScriptGenerationAuditContent,
+  digestScriptGenerationEvidenceProof,
+  readVerifiedScriptGenerationEvidenceProof,
+  type ScriptGenerationAuditContent,
+} from "@/lib/script-factory-generation-evidence-proof";
+import { getIPSourceAnalysisProofSecret } from "@/lib/ip-source-analysis-proof";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
 
 interface AuditRequestBody {
   auditSessionId?: unknown;
-  sources?: unknown;
+  activeIPId?: unknown;
+  generationEvidenceProof?: unknown;
   content?: unknown;
-  caseEvidence?: unknown;
 }
 
-interface AuditContent {
-  outline: Array<{
-    label: string;
-    timeRange: string;
-    content: string;
-    subPoints: string[];
-  }>;
-  pendingVerification: string[];
-}
+type AuditContent = ScriptGenerationAuditContent;
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -52,26 +52,7 @@ function hasOnlyKeys(
   return Object.keys(object).every(key => allowed.has(key));
 }
 
-const SOURCE_KEYS = [
-  "sourceId",
-  "sourceTitle",
-  "itemId",
-  "kind",
-  "content",
-  "originalExcerpt",
-  "extractionStatus",
-] as const;
-
 function hasForbiddenNestedAuditFields(body: AuditRequestBody): boolean {
-  if (Array.isArray(body.sources) && body.sources.some(source => {
-    const object = asObject(source);
-    return Boolean(object && !hasOnlyKeys(object, SOURCE_KEYS));
-  })) return true;
-  const caseEvidence = asObject(body.caseEvidence);
-  if (
-    caseEvidence &&
-    !hasOnlyKeys(caseEvidence, ["title", "content", "sourceType", "verificationStatus", "sourceUrl", "occurredAt"])
-  ) return true;
   const content = asObject(body.content);
   if (!content) return false;
   if (!hasOnlyKeys(content, ["outline", "pendingVerification"])) return true;
@@ -116,30 +97,6 @@ function parseContent(value: unknown): AuditContent | null {
   };
 }
 
-function parseCaseEvidence(value: unknown): ScriptFactCaseEvidence | null | undefined {
-  if (value === null || value === undefined) return null;
-  const object = asObject(value);
-  if (!object) return undefined;
-  if (!hasOnlyKeys(object, ["title", "content", "sourceType", "verificationStatus", "sourceUrl", "occurredAt"])) {
-    return undefined;
-  }
-  if (
-    typeof object.title !== "string" ||
-    typeof object.sourceType !== "string" ||
-    typeof object.verificationStatus !== "string"
-  ) return undefined;
-  const optionalFields = ["content", "sourceUrl", "occurredAt"] as const;
-  if (optionalFields.some(field => object[field] !== undefined && typeof object[field] !== "string")) return undefined;
-  return {
-    title: object.title,
-    content: object.content as string | undefined,
-    sourceType: object.sourceType,
-    verificationStatus: object.verificationStatus,
-    sourceUrl: object.sourceUrl as string | undefined,
-    occurredAt: object.occurredAt as string | undefined,
-  };
-}
-
 export async function POST(req: NextRequest) {
   let parsedBody: unknown;
   try {
@@ -149,7 +106,18 @@ export async function POST(req: NextRequest) {
   }
   const bodyObject = asObject(parsedBody);
   if (!bodyObject) return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
-  if (!hasOnlyKeys(bodyObject, ["auditSessionId", "sources", "content", "caseEvidence"])) {
+  if (["sources", "teacherOriginalSources", "nonEvidenceReferences", "caseEvidence"].some(key => key in bodyObject)) {
+    return NextResponse.json({
+      error: "审计来源必须来自生成服务端签发的凭证，不能由浏览器重新选择。",
+      code: "GENERATION_EVIDENCE_MISMATCH",
+    }, { status: 400 });
+  }
+  if (!hasOnlyKeys(bodyObject, [
+    "auditSessionId",
+    "activeIPId",
+    "generationEvidenceProof",
+    "content",
+  ])) {
     return NextResponse.json({ error: "审计接口只接受正文与证据字段" }, { status: 400 });
   }
   const body = bodyObject as AuditRequestBody;
@@ -160,18 +128,59 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "审计接口只接受正文与证据字段" }, { status: 400 });
   }
   const content = parseContent(body.content);
-  const caseEvidence = parseCaseEvidence(body.caseEvidence);
-  if (!content || caseEvidence === undefined) {
+  if (!content
+    || typeof body.generationEvidenceProof !== "string" || !body.generationEvidenceProof) {
     return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
   }
-  if (
-    !Array.isArray(body.sources) ||
-    body.sources.length > 120 ||
-    !body.sources.every(isCoverageSource)
-  ) {
-    return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
+  if (typeof body.activeIPId !== "string" || !body.activeIPId.trim()) {
+    return NextResponse.json({
+      error: "审计来源缺少可核验的IP归属，已拒绝使用。",
+      code: "UNTRUSTED_AUDIT_SOURCE",
+    }, { status: 400 });
   }
-  const sources = body.sources as CoverageSourceReference[];
+  let generationEvidence;
+  try {
+    generationEvidence = readVerifiedScriptGenerationEvidenceProof(
+      body.generationEvidenceProof,
+      await getIPSourceAnalysisProofSecret(),
+    );
+  } catch {
+    return NextResponse.json({
+      error: "生成证据凭证核验服务暂不可用，已停止审计。",
+      code: "GENERATION_EVIDENCE_VERIFICATION_UNAVAILABLE",
+    }, { status: 500 });
+  }
+  if (!generationEvidence || generationEvidence.ipId !== body.activeIPId.trim()) {
+    return NextResponse.json({
+      error: "生成证据凭证无效或与当前IP不一致，已停止审计。",
+      code: "GENERATION_EVIDENCE_MISMATCH",
+    }, { status: 400 });
+  }
+  const generationEvidenceDigest = digestScriptGenerationEvidenceProof(body.generationEvidenceProof);
+  if (body.auditSessionId) {
+    try {
+      await verifyScriptAuditSessionGenerationEvidence({
+        auditSessionId: body.auditSessionId as string,
+        generationEvidenceDigest,
+      });
+    } catch (error) {
+      if (error instanceof ScriptAuditServerError) {
+        return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+      }
+      return NextResponse.json({
+        error: "审计会话核验失败，已停止审计。",
+        code: "AUDIT_SESSION_VERIFICATION_UNAVAILABLE",
+      }, { status: 500 });
+    }
+  } else if (digestScriptGenerationAuditContent(content) !== generationEvidence.contentDigest) {
+    return NextResponse.json({
+      error: "送审正文与生成完成时的正文不一致，已停止审计。",
+      code: "GENERATION_EVIDENCE_MISMATCH",
+    }, { status: 400 });
+  }
+  const sources = generationEvidence.sources;
+  const caseEvidence = generationEvidence.caseEvidence;
+  const nonEvidenceReferences = generationEvidence.nonEvidenceReferences;
   const auditSubject = content.outline
     .map(section => `${section.label}：${section.content}`)
     .join("\n")
@@ -181,7 +190,7 @@ export async function POST(req: NextRequest) {
     caseEvidence,
   });
   const auditVersion = createHash("sha256")
-    .update(JSON.stringify({ content, sources, caseEvidence }))
+    .update(JSON.stringify({ content, sources, caseEvidence, nonEvidenceReferences }))
     .digest("hex");
 
   try {
@@ -277,6 +286,7 @@ export async function POST(req: NextRequest) {
       const { auditSessionId } = await createScriptAuditSession({
         auditSessionId: body.auditSessionId as string | undefined,
         auditVersion,
+        generationEvidenceDigest,
         factAudit: completedFactAudit,
         sourceIntegrityAudit: attributionResult.data.sourceIntegrityAudit,
         deliveryGate,
@@ -296,6 +306,7 @@ export async function POST(req: NextRequest) {
         sourceIntegrityAudit: attributionResult.data.sourceIntegrityAudit,
         factAudit: completedFactAudit,
         deliveryGate,
+        referenceMaterials: { nonEvidenceReferences },
       };
       return NextResponse.json(result);
     } catch {
@@ -312,6 +323,7 @@ export async function POST(req: NextRequest) {
           auditCompleted: false,
         }),
         factAudit,
+        referenceMaterials: { nonEvidenceReferences },
       };
       return NextResponse.json(result);
     }
@@ -321,6 +333,7 @@ export async function POST(req: NextRequest) {
       auditVersion,
       message: "本次归属分析暂未完成",
       factAudit,
+      referenceMaterials: { nonEvidenceReferences },
     };
     return NextResponse.json(result);
   }

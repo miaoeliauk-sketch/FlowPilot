@@ -6,6 +6,8 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { POST as audit } from "../app/api/script-factory/audit/route";
 import { POST as resolveAuditItem } from "../app/api/script-factory/audit/resolve/route";
+import { getIPSourceAnalysisProofSecret } from "./ip-source-analysis-proof";
+import { createScriptGenerationEvidenceProof } from "./script-factory-generation-evidence-proof";
 
 function request(url: string, body: unknown): NextRequest {
   return new NextRequest(url, {
@@ -28,6 +30,7 @@ async function createBlockedAudit(input?: {
   content?: string;
   reasoningSubtype?: "unsupported_opinion" | "unsupported_specific_claim";
   pendingVerification?: string[];
+  generationEvidenceProof?: string;
 }) {
   const originalFetch = globalThis.fetch;
   let calls = 0;
@@ -57,22 +60,31 @@ async function createBlockedAudit(input?: {
   };
 
   try {
+    const content = {
+      outline: [{
+        label: "案例说明",
+        timeRange: "0—20秒",
+        content: input?.content ?? "我见过一家企业，后来让销售参与设计才跑通。",
+        subPoints: [],
+      }],
+      pendingVerification: input?.pendingVerification ?? [],
+    };
+    const generationEvidenceProof = input?.generationEvidenceProof
+      ?? createScriptGenerationEvidenceProof({
+        ipId: "ip-shuimuran",
+        content,
+        sources: [],
+        caseEvidence: null,
+        nonEvidenceReferences: [],
+      }, await getIPSourceAnalysisProofSecret());
     const response = await audit(request("http://localhost/api/script-factory/audit", {
       ...(input?.auditSessionId ? { auditSessionId: input.auditSessionId } : {}),
-      sources: [],
-      content: {
-        outline: [{
-          label: "案例说明",
-          timeRange: "0—20秒",
-          content: input?.content ?? "我见过一家企业，后来让销售参与设计才跑通。",
-          subPoints: [],
-        }],
-        pendingVerification: input?.pendingVerification ?? [],
-      },
-      caseEvidence: null,
+      activeIPId: "ip-shuimuran",
+      generationEvidenceProof,
+      content,
     }));
     assert.equal(response.status, 200);
-    return response.json();
+    return { ...await response.json(), generationEvidenceProof };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -199,6 +211,7 @@ test("同一待审稿正文变化后沿用服务端会话并拒绝旧版本确�
     const firstAudit = await createBlockedAudit();
     const secondAudit = await createBlockedAudit({
       auditSessionId: firstAudit.auditSessionId,
+      generationEvidenceProof: firstAudit.generationEvidenceProof,
       content: "我见过另一家企业，后来让运营参与设计才跑通。",
     });
 
@@ -218,6 +231,45 @@ test("同一待审稿正文变化后沿用服务端会话并拒绝旧版本确�
     const result = await response.json();
     assert.equal(response.status, 409);
     assert.equal(result.code, "STALE_AUDIT_VERSION");
+  } finally {
+    if (previousLedger === undefined) delete process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
+    else process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = previousLedger;
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("同一审计会话拒绝替换成另一次生成的合法凭证", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "flowpilot-script-audit-proof-swap-"));
+  const previousLedger = process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
+  process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = path.join(fixtureDir, "ledger.json");
+  try {
+    const firstAudit = await createBlockedAudit();
+    const content = {
+      outline: [{
+        label: "案例说明",
+        timeRange: "0—20秒",
+        content: "我见过一家企业，后来让销售参与设计才跑通。",
+        subPoints: [],
+      }],
+      pendingVerification: [],
+    };
+    const otherValidProof = createScriptGenerationEvidenceProof({
+      ipId: "ip-shuimuran",
+      content,
+      sources: [],
+      caseEvidence: null,
+      nonEvidenceReferences: [],
+    }, await getIPSourceAnalysisProofSecret());
+    const response = await audit(request("http://localhost/api/script-factory/audit", {
+      auditSessionId: firstAudit.auditSessionId,
+      activeIPId: "ip-shuimuran",
+      generationEvidenceProof: otherValidProof,
+      content,
+    }));
+    const body = await response.json();
+
+    assert.equal(response.status, 409);
+    assert.equal(body.code, "GENERATION_EVIDENCE_MISMATCH");
   } finally {
     if (previousLedger === undefined) delete process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE;
     else process.env.FLOWPILOT_SCRIPT_AUDIT_LEDGER_FILE = previousLedger;

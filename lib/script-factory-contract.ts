@@ -124,6 +124,18 @@ export interface ScriptDeliveryGate {
   pendingItemIds: string[];
 }
 
+export interface ScriptNonEvidenceReference {
+  id: string;
+  title: string;
+  category: string;
+  reason: string;
+  evidenceRole: "non_evidence";
+}
+
+export interface ScriptReferenceMaterials {
+  nonEvidenceReferences: ScriptNonEvidenceReference[];
+}
+
 export type ScriptPostGenerationAudit =
   | { status: "pending" }
   | {
@@ -135,6 +147,7 @@ export type ScriptPostGenerationAudit =
       sourceIntegrityAudit: ScriptSourceIntegrityAudit;
       factAudit: ScriptFactAudit;
       deliveryGate: ScriptDeliveryGate;
+      referenceMaterials?: ScriptReferenceMaterials;
     }
   | {
       status: "unavailable";
@@ -144,6 +157,7 @@ export type ScriptPostGenerationAudit =
       attributionAudit?: ScriptAttributionAudit;
       sourceIntegrityAudit?: ScriptSourceIntegrityAudit;
       factAudit: ScriptFactAudit;
+      referenceMaterials?: ScriptReferenceMaterials;
     };
 
 function asRecord(value: unknown): Record<string, unknown> | null {

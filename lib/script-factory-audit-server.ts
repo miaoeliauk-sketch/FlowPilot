@@ -27,6 +27,7 @@ interface ResolutionRecord {
 interface AuditSessionRecord {
   auditSessionId: string;
   auditVersion: string;
+  generationEvidenceDigest: string;
   factAudit: ScriptFactAudit;
   sourceIntegrityAudit: ScriptSourceIntegrityAudit;
   deliveryGate: ScriptDeliveryGate;
@@ -97,6 +98,7 @@ function withLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
 export function createScriptAuditSession(input: {
   auditSessionId?: string;
   auditVersion: string;
+  generationEvidenceDigest: string;
   factAudit: ScriptFactAudit;
   sourceIntegrityAudit: ScriptSourceIntegrityAudit;
   deliveryGate: ScriptDeliveryGate;
@@ -110,9 +112,13 @@ export function createScriptAuditSession(input: {
     if (input.auditSessionId && !existing) {
       throw new ScriptAuditServerError("审计会话不存在", "AUDIT_SESSION_NOT_FOUND", 404);
     }
+    if (existing && existing.generationEvidenceDigest !== input.generationEvidenceDigest) {
+      throw new ScriptAuditServerError("生成证据凭证与审计会话不一致", "GENERATION_EVIDENCE_MISMATCH", 409);
+    }
     const nextSession: AuditSessionRecord = {
       auditSessionId,
       auditVersion: input.auditVersion,
+      generationEvidenceDigest: input.generationEvidenceDigest,
       factAudit: input.factAudit,
       sourceIntegrityAudit: input.sourceIntegrityAudit,
       deliveryGate: input.deliveryGate,
@@ -122,6 +128,23 @@ export function createScriptAuditSession(input: {
     else ledger.sessions.push(nextSession);
     await saveLedger(ledger);
     return { auditSessionId };
+  });
+}
+
+export function verifyScriptAuditSessionGenerationEvidence(input: {
+  auditSessionId: string;
+  generationEvidenceDigest: string;
+}): Promise<void> {
+  return withLedgerLock(async () => {
+    const ledger = await loadLedger();
+    const session = ledger.sessions.find(item => item.auditSessionId === input.auditSessionId);
+    if (!session) {
+      throw new ScriptAuditServerError("审计会话不存在", "AUDIT_SESSION_NOT_FOUND", 404);
+    }
+    if (!session.generationEvidenceDigest
+      || session.generationEvidenceDigest !== input.generationEvidenceDigest) {
+      throw new ScriptAuditServerError("生成证据凭证与审计会话不一致", "GENERATION_EVIDENCE_MISMATCH", 409);
+    }
   });
 }
 
