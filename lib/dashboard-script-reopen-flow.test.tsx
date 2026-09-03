@@ -220,6 +220,137 @@ test("脚本工厂兼容恢复没有生成状态字段的旧版完整草稿", as
   assert.equal(view.queryByText(/保存的脚本数据不完整/), null);
 });
 
+test("缺少新版证据链标识的旧脚本即使门禁为OPEN也诚实降级且不改写原数据", async () => {
+  const auditVersion = "a".repeat(64);
+  const legacyAuditedScript = {
+    ...script,
+    id: "script-before-evidence-chain-fix",
+    scriptResult: {
+      ...script.scriptResult,
+      generationMode: "ip",
+      postGenerationAuditStatus: "completed",
+      auditSessionId: "audit-session-before-evidence-chain-fix",
+      auditVersion,
+      coverageAssessment: {
+        coverage: "NONE",
+        reason: "旧审计声称没有可直接引用的老师原文。",
+        coveredDimensions: [],
+        missingDimensions: ["核心判断", "推理过程"],
+        sourceReferences: [],
+        caseNeed: "NOT_ASSESSED",
+        caseReason: "旧审计暂未判断案例需求。",
+      },
+      attributionAudit: {
+        outputStatus: "exploratory",
+        confidenceLevel: "low",
+        coveredDimensions: [],
+        missingDimensions: ["核心判断", "推理过程"],
+        recommendation: "旧审计认为可以作为探索稿查看。",
+        auditStatus: "completed",
+        paragraphAttributions: [{
+          sectionIndex: 0,
+          paragraphIndex: 0,
+          excerpt: "这是应该恢复的脚本正文",
+          attributionType: "ai_reasoning",
+          reasoningSubtype: "unsupported_opinion",
+          sourceReferences: [],
+          reason: "旧审计将它标记为无来源观点。",
+        }],
+      },
+      sourceIntegrityAudit: { status: "passed", deliveryBlocked: false, issues: [] },
+      factAudit: {
+        overallStatus: "not_checked",
+        systemVerified: false,
+        pendingItems: [],
+        caseEvidence: null,
+      },
+      deliveryGate: {
+        status: "OPEN",
+        auditVersion,
+        blockerCodes: [],
+        pendingItemIds: [],
+      },
+    },
+  };
+  const originalStoredValue = JSON.stringify([legacyAuditedScript]);
+  localStorage.setItem("ipwr:scriptAssets", originalStoredValue);
+  window.history.replaceState({}, "", `/script-factory?scriptId=${legacyAuditedScript.id}`);
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(
+    <IPProvider>
+      <ScriptFactoryPage />
+    </IPProvider>,
+  );
+
+  assert.ok(await view.findByText("生成于证据链缺口修复之前，审计结果不可信"));
+  assert.ok(view.getByRole("button", { name: "审核通过后可复制" }).hasAttribute("disabled"));
+  assert.equal(localStorage.getItem("ipwr:scriptAssets"), originalStoredValue);
+});
+
+test("旧OPEN脚本伪造新版证据链标识后仍须经服务端核验并诚实降级", async () => {
+  const auditVersion = "b".repeat(64);
+  const forgedScript = {
+    ...script,
+    id: "script-forged-evidence-chain-marker",
+    scriptResult: {
+      ...script.scriptResult,
+      generationMode: "ip",
+      generationEvidenceId: "11111111-1111-4111-8111-111111111111",
+      evidenceChainVersion: 1,
+      generationEvidenceProof: "forged-browser-proof",
+      postGenerationAuditStatus: "completed",
+      auditSessionId: "forged-audit-session",
+      auditVersion,
+      coverageAssessment: {
+        coverage: "FULL",
+        reason: "浏览器伪造的覆盖度结论。",
+        coveredDimensions: ["核心判断"],
+        missingDimensions: [],
+        sourceReferences: [],
+        caseNeed: "NOT_NEEDED",
+        caseReason: "浏览器声称不需要案例。",
+      },
+      attributionAudit: {
+        outputStatus: "formal",
+        confidenceLevel: "high",
+        coveredDimensions: ["核心判断"],
+        missingDimensions: [],
+        recommendation: "浏览器声称可以交付。",
+        auditStatus: "completed",
+        paragraphAttributions: [],
+      },
+      sourceIntegrityAudit: { status: "passed", deliveryBlocked: false, issues: [] },
+      factAudit: {
+        overallStatus: "not_checked",
+        systemVerified: false,
+        pendingItems: [],
+        caseEvidence: null,
+      },
+      deliveryGate: {
+        status: "OPEN",
+        auditVersion,
+        blockerCodes: [],
+        pendingItemIds: [],
+      },
+    },
+  };
+  const originalStoredValue = JSON.stringify([forgedScript]);
+  localStorage.setItem("ipwr:scriptAssets", originalStoredValue);
+  window.history.replaceState({}, "", `/script-factory?scriptId=${forgedScript.id}`);
+
+  const { render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  assert.ok(await view.findByText("生成于证据链缺口修复之前，审计结果不可信"));
+  assert.ok(view.getByRole("button", { name: "审核通过后可复制" }).hasAttribute("disabled"));
+  assert.equal(localStorage.getItem("ipwr:scriptAssets"), originalStoredValue);
+});
+
 test("目标脚本无法恢复时不展示同IP的另一条临时草稿", async () => {
   const damagedScript = { ...script, id: "script-damaged", scriptResult: {} };
   const stalePartialResult = {

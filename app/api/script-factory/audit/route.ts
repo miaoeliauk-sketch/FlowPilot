@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHash } from "node:crypto";
 import {
   ATTRIBUTION_AUDIT_SYSTEM,
   buildAttributionAudit,
@@ -23,8 +22,9 @@ import {
 import {
   digestScriptGenerationAuditContent,
   digestScriptGenerationEvidenceProof,
+  createScriptGenerationAuditVersion,
+  parseScriptGenerationAuditContent,
   readVerifiedScriptGenerationEvidenceProof,
-  type ScriptGenerationAuditContent,
 } from "@/lib/script-factory-generation-evidence-proof";
 import { getIPSourceAnalysisProofSecret } from "@/lib/ip-source-analysis-proof";
 import { callStructuredDeepSeek } from "@/lib/structured-deepseek";
@@ -35,8 +35,6 @@ interface AuditRequestBody {
   generationEvidenceProof?: unknown;
   content?: unknown;
 }
-
-type AuditContent = ScriptGenerationAuditContent;
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -60,41 +58,6 @@ function hasForbiddenNestedAuditFields(body: AuditRequestBody): boolean {
     const object = asObject(section);
     return Boolean(object && !hasOnlyKeys(object, ["label", "timeRange", "content", "subPoints"]));
   });
-}
-
-function parseContent(value: unknown): AuditContent | null {
-  const object = asObject(value);
-  if (
-    !object ||
-    !hasOnlyKeys(object, ["outline", "pendingVerification"]) ||
-    !Array.isArray(object.outline) ||
-    !Array.isArray(object.pendingVerification)
-  ) return null;
-  const outline = object.outline.map(rawSection => {
-    const section = asObject(rawSection);
-    if (
-      !section ||
-      !hasOnlyKeys(section, ["label", "timeRange", "content", "subPoints"]) ||
-      typeof section.label !== "string" ||
-      typeof section.timeRange !== "string" ||
-      typeof section.content !== "string" ||
-      !Array.isArray(section.subPoints) ||
-      !section.subPoints.every(item => typeof item === "string")
-    ) return null;
-    return {
-      label: section.label,
-      timeRange: section.timeRange,
-      content: section.content,
-      subPoints: section.subPoints as string[],
-    };
-  });
-  if (outline.some(section => section === null) || !object.pendingVerification.every(item => typeof item === "string")) {
-    return null;
-  }
-  return {
-    outline: outline as AuditContent["outline"],
-    pendingVerification: object.pendingVerification as string[],
-  };
 }
 
 export async function POST(req: NextRequest) {
@@ -127,7 +90,7 @@ export async function POST(req: NextRequest) {
   if (hasForbiddenNestedAuditFields(body)) {
     return NextResponse.json({ error: "审计接口只接受正文与证据字段" }, { status: 400 });
   }
-  const content = parseContent(body.content);
+  const content = parseScriptGenerationAuditContent(body.content);
   if (!content
     || typeof body.generationEvidenceProof !== "string" || !body.generationEvidenceProof) {
     return NextResponse.json({ error: "请求格式错误" }, { status: 400 });
@@ -189,9 +152,13 @@ export async function POST(req: NextRequest) {
     pendingItems: content.pendingVerification,
     caseEvidence,
   });
-  const auditVersion = createHash("sha256")
-    .update(JSON.stringify({ content, sources, caseEvidence, nonEvidenceReferences }))
-    .digest("hex");
+  const auditVersion = createScriptGenerationAuditVersion({
+    ipId: body.activeIPId.trim(),
+    content,
+    sources,
+    caseEvidence,
+    nonEvidenceReferences,
+  });
 
   try {
     const coverageAssessment = await analyzeScriptCoverage({

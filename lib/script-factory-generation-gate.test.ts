@@ -17,6 +17,10 @@ import {
 import { buildIPSourceAnalysisV2 } from "./ip-source-analysis-v2";
 import { getIPSourceAnalysisProofSecret } from "./ip-source-analysis-proof";
 import { createTeacherOriginalSourceSnapshot } from "./script-factory-source-snapshot-server";
+import {
+  readVerifiedScriptGenerationEvidenceProof,
+} from "./script-factory-generation-evidence-proof";
+import { SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION } from "./script-factory-contract";
 
 const IP: IPProfile = {
   id: "ip-1", name: "测试IP", avatar: "测", positioning: "商业观察",
@@ -183,6 +187,8 @@ test("IP专属生成只按服务端来源编号读取老师原文而不接收浏
       assert.equal(response.status, 200, body.error);
       assert.ok(prompts[0]?.includes(source.rawContent));
       assert.equal(JSON.stringify(body).includes(source.rawContent), false, "生成响应不应回传老师原文全文");
+      assert.match(body.generationEvidenceId, /^[0-9a-f-]{36}$/);
+      assert.equal(body.evidenceChainVersion, SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION);
       assert.equal(typeof body.generationEvidenceProof, "string");
       assert.equal(body.generationEvidenceProof.split(".").length, 4);
       assert.equal(
@@ -192,6 +198,12 @@ test("IP专属生成只按服务端来源编号读取老师原文而不接收浏
         false,
         "生成凭证必须保持不透明，不能让浏览器解码出老师原文",
       );
+      const claims = readVerifiedScriptGenerationEvidenceProof(
+        body.generationEvidenceProof,
+        await getIPSourceAnalysisProofSecret(),
+      );
+      assert.equal(claims?.generationEvidenceId, body.generationEvidenceId);
+      assert.equal(claims?.evidenceChainVersion, body.evidenceChainVersion);
     });
   } finally {
     if (previous === undefined) delete process.env.FLOWPILOT_SCRIPT_SOURCE_LEDGER_FILE;

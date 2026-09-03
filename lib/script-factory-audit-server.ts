@@ -148,6 +148,36 @@ export function verifyScriptAuditSessionGenerationEvidence(input: {
   });
 }
 
+export function verifyRestoredScriptAuditEvidenceBinding(input: {
+  auditSessionId: string;
+  auditVersion: string;
+  generationEvidenceDigest: string;
+}): Promise<{
+  sourceIntegrityAudit: ScriptSourceIntegrityAudit;
+  factAudit: ScriptFactAudit;
+  deliveryGate: ScriptDeliveryGate;
+}> {
+  return withLedgerLock(async () => {
+    const ledger = await loadLedger();
+    const session = ledger.sessions.find(item => item.auditSessionId === input.auditSessionId);
+    if (!session) {
+      throw new ScriptAuditServerError("审计会话不存在", "AUDIT_SESSION_NOT_FOUND", 404);
+    }
+    if (!session.generationEvidenceDigest
+      || session.generationEvidenceDigest !== input.generationEvidenceDigest) {
+      throw new ScriptAuditServerError("生成证据凭证与审计会话不一致", "GENERATION_EVIDENCE_MISMATCH", 409);
+    }
+    if (!session.auditVersion || session.auditVersion !== input.auditVersion) {
+      throw new ScriptAuditServerError("审计版本已过期", "STALE_AUDIT_VERSION", 409);
+    }
+    return {
+      sourceIntegrityAudit: structuredClone(session.sourceIntegrityAudit),
+      factAudit: structuredClone(session.factAudit),
+      deliveryGate: structuredClone(session.deliveryGate),
+    };
+  });
+}
+
 function requestHash(input: {
   auditSessionId: string;
   auditVersion: string;

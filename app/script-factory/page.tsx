@@ -31,6 +31,7 @@ import type {
 import {
   isFactCaseEvidenceConfirmed,
   parseScriptPostGenerationAudit,
+  SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION,
 } from "@/lib/script-factory-contract";
 import {
   getPendingScriptAuditDraft,
@@ -74,6 +75,9 @@ import {
 import { getScriptDeliveryBlockReason } from "@/lib/script-factory-delivery";
 
 const TOPIC_PLACEHOLDER = "输入选题，或粘贴一段需要按当前IP改写的原文";
+const LEGACY_EVIDENCE_CHAIN_MESSAGE = "生成于证据链缺口修复之前，审计结果不可信";
+const EVIDENCE_VERIFICATION_UNAVAILABLE_MESSAGE = "证据链核验服务暂不可用，当前审计状态无法确认";
+const EVIDENCE_VERIFICATION_FAILED_MESSAGE = "证据链核验失败，当前审计状态不可信";
 type GenerationMode = "standard" | "ip";
 type ScriptInputIntent = "topic_material" | "teacher_original";
 
@@ -156,6 +160,8 @@ interface ScriptResult {
   teacherOriginalSources?: TeacherOriginalSourceReference[];
   nonEvidenceReferences?: NonEvidenceReference[];
   generationEvidenceProof?: string;
+  generationEvidenceId?: string;
+  evidenceChainVersion?: number;
   deliveryPersistenceStatus?: "blocked";
   scriptAssetId?: string;
   manualRewrite?: ScriptManualRewriteRecord;
@@ -286,11 +292,32 @@ function normalizeStoredCompleteScriptResult(value: unknown): ScriptResult | nul
   };
 }
 
-function normalizeRestoredAuditState(result: ScriptResult): ScriptResult {
+function normalizeRestoredAuditState(
+  result: ScriptResult,
+  evidenceVerified = false,
+  unverifiedMessage = LEGACY_EVIDENCE_CHAIN_MESSAGE,
+): ScriptResult {
   const requiresV13Audit = result.generationMode === "ip"
     || result.outputMode === "shuimuran-confirmed"
     || result.postGenerationAuditStatus !== undefined
     || result.attributionAudit !== undefined;
+  const hasCurrentEvidenceChain = typeof result.generationEvidenceId === "string"
+    && Boolean(result.generationEvidenceId.trim())
+    && result.evidenceChainVersion === SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION;
+  if (requiresV13Audit && (!hasCurrentEvidenceChain || !evidenceVerified)) {
+    return {
+      ...result,
+      postGenerationAuditStatus: "unavailable",
+      postGenerationAuditMessage: unverifiedMessage,
+      auditSessionId: undefined,
+      auditVersion: undefined,
+      coverageAssessment: undefined,
+      attributionAudit: undefined,
+      sourceIntegrityAudit: undefined,
+      factAudit: undefined,
+      deliveryGate: undefined,
+    };
+  }
   const restoredAudit = result.postGenerationAuditStatus === "completed"
     ? parseScriptPostGenerationAudit({
         status: result.postGenerationAuditStatus,
@@ -1276,11 +1303,98 @@ export default function ScriptFactoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIP?.id]);
 
+  async function verifyAndRestoreAuditState(
+    candidate: ScriptResult,
+    expectedIPId: string,
+    restoreSequence: number,
+  ): Promise<void> {
+    if (
+      typeof candidate.generationEvidenceProof !== "string" || !candidate.generationEvidenceProof
+      || typeof candidate.generationEvidenceId !== "string" || !candidate.generationEvidenceId.trim()
+      || candidate.evidenceChainVersion !== SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION
+      || typeof candidate.auditSessionId !== "string" || !candidate.auditSessionId.trim()
+      || typeof candidate.auditVersion !== "string" || !candidate.auditVersion.trim()
+    ) return;
+    try {
+      const response = await apiFetch("/api/script-factory/audit/verify-evidence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          activeIPId: expectedIPId,
+          content: {
+            outline: candidate.outline.map(section => ({
+              label: section.label,
+              timeRange: section.timeRange,
+              content: section.content,
+              subPoints: section.subPoints ?? [],
+            })),
+            pendingVerification: candidate.pendingVerification ?? [],
+          },
+          generationEvidenceProof: candidate.generationEvidenceProof,
+          generationEvidenceId: candidate.generationEvidenceId,
+          evidenceChainVersion: candidate.evidenceChainVersion,
+          auditSessionId: candidate.auditSessionId,
+          auditVersion: candidate.auditVersion,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (generationSequenceRef.current !== restoreSequence) return;
+      if (
+        !response.ok
+        || !isRecord(payload)
+        || payload.status !== "verified"
+        || payload.auditSessionId !== candidate.auditSessionId
+        || payload.auditVersion !== candidate.auditVersion
+        || payload.generationEvidenceId !== candidate.generationEvidenceId
+        || payload.evidenceChainVersion !== candidate.evidenceChainVersion
+      ) {
+        const message = response.status >= 500
+          ? EVIDENCE_VERIFICATION_UNAVAILABLE_MESSAGE
+          : EVIDENCE_VERIFICATION_FAILED_MESSAGE;
+        setResult(normalizeRestoredAuditState(candidate, false, message));
+        setApiMeta(candidate.apiMeta);
+        return;
+      }
+      const trustedAudit = parseScriptPostGenerationAudit({
+        status: "completed",
+        auditSessionId: payload.auditSessionId,
+        auditVersion: payload.auditVersion,
+        coverageAssessment: candidate.coverageAssessment,
+        attributionAudit: candidate.attributionAudit,
+        sourceIntegrityAudit: payload.sourceIntegrityAudit,
+        factAudit: payload.factAudit,
+        deliveryGate: payload.deliveryGate,
+      });
+      if (!trustedAudit || trustedAudit.status !== "completed") {
+        setResult(normalizeRestoredAuditState(candidate, false, EVIDENCE_VERIFICATION_FAILED_MESSAGE));
+        setApiMeta(candidate.apiMeta);
+        return;
+      }
+      const trustedCandidate: ScriptResult = {
+        ...candidate,
+        sourceIntegrityAudit: trustedAudit.sourceIntegrityAudit,
+        factAudit: trustedAudit.factAudit,
+        deliveryGate: trustedAudit.deliveryGate,
+      };
+      setResult(normalizeRestoredAuditState(trustedCandidate, true));
+      setApiMeta(candidate.apiMeta);
+    } catch {
+      if (generationSequenceRef.current !== restoreSequence) return;
+      setResult(normalizeRestoredAuditState(
+        candidate,
+        false,
+        EVIDENCE_VERIFICATION_UNAVAILABLE_MESSAGE,
+      ));
+      setApiMeta(candidate.apiMeta);
+    }
+  }
+
   function restorePartialDraft(
     draft: PartialScriptDraft<ScriptResult>,
     expectedIPId: string,
   ): string | null {
     generationSequenceRef.current += 1;
+    const restoreSequence = generationSequenceRef.current;
     if (draft.ipId !== expectedIPId || draft.result.ipId !== expectedIPId) {
       return "本地临时草稿数据不完整，已停止自动恢复。";
     }
@@ -1305,11 +1419,13 @@ export default function ScriptFactoryPage() {
         return "临时草稿已恢复，但原关联选题已失效，本次不会继续建立选题关联。";
       }
     }
+    void verifyAndRestoreAuditState(draft.result, expectedIPId, restoreSequence);
     return null;
   }
 
   function restoreSavedScript(script: ScriptAsset, expectedIPId: string): string | null {
     generationSequenceRef.current += 1;
+    const restoreSequence = generationSequenceRef.current;
     if (script.ipId !== expectedIPId) {
       return "保存的脚本所属IP与当前操盘IP不一致，已停止恢复。";
     }
@@ -1345,6 +1461,7 @@ export default function ScriptFactoryPage() {
         // 已保存脚本仍可查看；原选题失效不应阻断脚本恢复。
       }
     }
+    void verifyAndRestoreAuditState({ ...storedResult, scriptAssetId: script.id }, expectedIPId, restoreSequence);
     return null;
   }
 
@@ -1379,12 +1496,14 @@ export default function ScriptFactoryPage() {
       : null;
     const draft = getPartialScriptDraft(activeIP.id);
     if (restoredAuditResult) {
-      const restored = restoredAuditResult;
+      const restoreSequence = generationSequenceRef.current;
+      const restored = normalizeRestoredAuditState(restoredAuditResult);
       setGenerationMode(restored.generationMode ?? "ip");
       setTopic(restored.topic);
       setResult(restored);
       setApiMeta(restored.apiMeta);
       setDraftStorageError(null);
+      void verifyAndRestoreAuditState(restoredAuditResult, activeIP.id, restoreSequence);
     } else if (draft && isStoredScriptResult(draft.result)) {
       setDraftStorageError(restorePartialDraft(draft as PartialScriptDraft<ScriptResult>, activeIP.id));
     }

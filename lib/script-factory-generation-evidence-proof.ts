@@ -9,9 +9,12 @@ import {
 } from "node:crypto";
 
 import type { CoverageSourceReference } from "./script-factory-coverage";
-import type { ScriptFactCaseEvidence } from "./script-factory-contract";
+import {
+  SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION,
+  type ScriptFactCaseEvidence,
+} from "./script-factory-contract";
 
-const PROOF_VERSION = 1;
+const PROOF_VERSION = SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION;
 
 export interface ScriptGenerationAuditContent {
   outline: Array<{
@@ -21,6 +24,51 @@ export interface ScriptGenerationAuditContent {
     subPoints: string[];
   }>;
   pendingVerification: string[];
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function hasOnlyKeys(object: Record<string, unknown>, allowedKeys: readonly string[]): boolean {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(object).every(key => allowed.has(key));
+}
+
+export function parseScriptGenerationAuditContent(value: unknown): ScriptGenerationAuditContent | null {
+  const object = asObject(value);
+  if (
+    !object
+    || !hasOnlyKeys(object, ["outline", "pendingVerification"])
+    || !Array.isArray(object.outline)
+    || !Array.isArray(object.pendingVerification)
+  ) return null;
+  const outline = object.outline.map(rawSection => {
+    const section = asObject(rawSection);
+    if (
+      !section
+      || !hasOnlyKeys(section, ["label", "timeRange", "content", "subPoints"])
+      || typeof section.label !== "string"
+      || typeof section.timeRange !== "string"
+      || typeof section.content !== "string"
+      || !Array.isArray(section.subPoints)
+      || !section.subPoints.every(item => typeof item === "string")
+    ) return null;
+    return {
+      label: section.label,
+      timeRange: section.timeRange,
+      content: section.content,
+      subPoints: section.subPoints as string[],
+    };
+  });
+  if (outline.some(section => section === null)
+    || !object.pendingVerification.every(item => typeof item === "string")) return null;
+  return {
+    outline: outline as ScriptGenerationAuditContent["outline"],
+    pendingVerification: object.pendingVerification as string[],
+  };
 }
 
 export interface ScriptGenerationNonEvidenceReference {
@@ -33,6 +81,7 @@ export interface ScriptGenerationNonEvidenceReference {
 
 export interface ScriptGenerationEvidenceClaims {
   generationEvidenceId: string;
+  evidenceChainVersion: number;
   ipId: string;
   contentDigest: string;
   sourcesDigest: string;
@@ -75,15 +124,38 @@ export function digestScriptGenerationEvidenceProof(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export function createScriptGenerationEvidenceProof(input: {
+export type ScriptGenerationEvidenceInput = {
   ipId: string;
   content: ScriptGenerationAuditContent;
   sources: CoverageSourceReference[];
   caseEvidence: ScriptFactCaseEvidence | null;
   nonEvidenceReferences: ScriptGenerationNonEvidenceReference[];
-}, secret: string): string {
+};
+
+export function createScriptGenerationAuditVersion(
+  input: ScriptGenerationEvidenceInput,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      content: input.content,
+      sources: input.sources,
+      caseEvidence: input.caseEvidence,
+      nonEvidenceReferences: input.nonEvidenceReferences,
+    }))
+    .digest("hex");
+}
+
+export function issueScriptGenerationEvidenceProof(
+  input: ScriptGenerationEvidenceInput,
+  secret: string,
+): {
+  generationEvidenceProof: string;
+  generationEvidenceId: string;
+  evidenceChainVersion: number;
+} {
   const claims: ScriptGenerationEvidenceClaims = {
     generationEvidenceId: randomUUID(),
+    evidenceChainVersion: SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION,
     ipId: input.ipId,
     contentDigest: digestScriptGenerationAuditContent(input.content),
     sourcesDigest: digest({ sources: input.sources, caseEvidence: input.caseEvidence }),
@@ -104,7 +176,18 @@ export function createScriptGenerationEvidenceProof(input: {
     ciphertext.toString("base64url"),
     cipher.getAuthTag().toString("base64url"),
   ].join(".");
-  return `${protectedPayload}.${signature(protectedPayload, secret)}`;
+  return {
+    generationEvidenceProof: `${protectedPayload}.${signature(protectedPayload, secret)}`,
+    generationEvidenceId: claims.generationEvidenceId,
+    evidenceChainVersion: claims.evidenceChainVersion,
+  };
+}
+
+export function createScriptGenerationEvidenceProof(
+  input: ScriptGenerationEvidenceInput,
+  secret: string,
+): string {
+  return issueScriptGenerationEvidenceProof(input, secret).generationEvidenceProof;
 }
 
 function isSourceReference(value: unknown): value is CoverageSourceReference {
@@ -169,6 +252,7 @@ export function readVerifiedScriptGenerationEvidenceProof(
     const decoded = JSON.parse(plaintext.toString("utf8")) as Record<string, unknown>;
     if (decoded.v !== PROOF_VERSION || decoded.kind !== "script_generation_evidence"
       || typeof decoded.generationEvidenceId !== "string" || !decoded.generationEvidenceId.trim()
+      || decoded.evidenceChainVersion !== SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION
       || typeof decoded.ipId !== "string" || !decoded.ipId.trim()
       || typeof decoded.contentDigest !== "string" || !/^[a-f0-9]{64}$/.test(decoded.contentDigest)
       || typeof decoded.sourcesDigest !== "string" || !/^[a-f0-9]{64}$/.test(decoded.sourcesDigest)
@@ -180,6 +264,7 @@ export function readVerifiedScriptGenerationEvidenceProof(
       || digest({ sources: decoded.sources, caseEvidence: decoded.caseEvidence }) !== decoded.sourcesDigest) return null;
     return {
       generationEvidenceId: decoded.generationEvidenceId,
+      evidenceChainVersion: decoded.evidenceChainVersion,
       ipId: decoded.ipId,
       contentDigest: decoded.contentDigest,
       sourcesDigest: decoded.sourcesDigest,

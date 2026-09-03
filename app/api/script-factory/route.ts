@@ -72,7 +72,7 @@ import {
 } from "@/lib/ip-source-analysis-v2";
 import { auditScriptFactoryGlobalConstraints } from "@/lib/script-factory-global-constraint-audit";
 import { loadServerGlobalConstraintRecords } from "@/lib/global-content-constraint-server";
-import { createScriptGenerationEvidenceProof } from "@/lib/script-factory-generation-evidence-proof";
+import { issueScriptGenerationEvidenceProof } from "@/lib/script-factory-generation-evidence-proof";
 
 const SCRIPT_STAGE_TIMEOUT_MS = 60_000;
 const SCRIPT_STAGE_MAX_RETRIES = 1;
@@ -1598,8 +1598,8 @@ ${rawIPBlock}
       },
       activeGlobalConstraints,
     );
-    const generationEvidenceProof = isIPSpecificGeneration
-      ? createScriptGenerationEvidenceProof({
+    const generationEvidence = isIPSpecificGeneration
+      ? issueScriptGenerationEvidenceProof({
           ipId: ip.id,
           content: {
             outline: outline.map(section => ({
@@ -1681,7 +1681,7 @@ ${rawIPBlock}
         ...globalConstraintReview,
         source: "server_ledger",
       },
-      ...(generationEvidenceProof ? { generationEvidenceProof } : {}),
+      ...(generationEvidence ?? {}),
     });
   } catch (err) {
     const message = getErrorMessage(err);

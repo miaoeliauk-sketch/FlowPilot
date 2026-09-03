@@ -3,7 +3,10 @@ import test, { after, afterEach, before, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 import React from "react";
 import type { IPProfile, KnowledgeEntry } from "./types";
-import type { ScriptFactPendingItem } from "./script-factory-contract";
+import {
+  SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION,
+  type ScriptFactPendingItem,
+} from "./script-factory-contract";
 
 const SHUIMURAN: IPProfile = {
   id: "ip-shuimuran",
@@ -197,6 +200,8 @@ function generatedScript(topic: string, compressionAudit?: Record<string, unknow
     editingRhythm: { subtitleHighlights: [], soundEffects: [], screenRecordingCuts: [], caseInserts: [], pauses: [] },
     apiMeta: { apiCalled: true, calledAt: "2026-08-15T00:00:00.000Z", model: "test", ipUsed: SHUIMURAN.name, mockHit: false },
     generationEvidenceProof: "test-generation-evidence-proof",
+    generationEvidenceId: "11111111-1111-4111-8111-111111111111",
+    evidenceChainVersion: SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION,
     globalConstraintReview: serverConstraintReview(false),
     compressionAudit,
   };
@@ -234,6 +239,15 @@ function blockedSpecificClaimScript(input: {
     postGenerationAuditStatus: "completed" as const,
     auditSessionId: input.auditSessionId,
     auditVersion: input.auditVersion,
+    coverageAssessment: {
+      coverage: "NONE" as const,
+      reason: "没有老师原始内容。",
+      coveredDimensions: [],
+      missingDimensions: ["核心判断"],
+      sourceReferences: [],
+      caseNeed: "NOT_ASSESSED" as const,
+      caseReason: "需要补充原始内容。",
+    },
     attributionAudit: {
       outputStatus: "exploratory" as const,
       confidenceLevel: "low" as const,
@@ -297,6 +311,27 @@ function blockedSpecificClaimAuditResponse(input: {
     factAudit: blocked.factAudit,
     deliveryGate: blocked.deliveryGate,
   };
+}
+
+function verifiedRestoredEvidenceResponse(result: {
+  auditSessionId: string;
+  auditVersion: string;
+  generationEvidenceId: string;
+  evidenceChainVersion: number;
+  sourceIntegrityAudit: unknown;
+  factAudit: unknown;
+  deliveryGate: unknown;
+}) {
+  return new Response(JSON.stringify({
+    status: "verified",
+    auditSessionId: result.auditSessionId,
+    auditVersion: result.auditVersion,
+    generationEvidenceId: result.generationEvidenceId,
+    evidenceChainVersion: result.evidenceChainVersion,
+    sourceIntegrityAudit: result.sourceIntegrityAudit,
+    factAudit: result.factAudit,
+    deliveryGate: result.deliveryGate,
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
 function serverConstraintReview(reviewRequired: boolean) {
@@ -1562,6 +1597,9 @@ test("人工处理响应声称OPEN但完整事实审计仍有待核验项时不�
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return verifiedRestoredEvidenceResponse(blockedResult);
+    }
     if (String(input) === "/api/script-factory/audit/resolve") {
       return new Response(JSON.stringify({
         status: "resolved",
@@ -1622,6 +1660,9 @@ test("人工处理响应声称OPEN但完整来源审计仍有问题时不得正�
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return verifiedRestoredEvidenceResponse(blockedResult);
+    }
     if (String(input) === "/api/script-factory/audit/resolve") {
       return new Response(JSON.stringify({
         status: "resolved",
@@ -1679,6 +1720,9 @@ test("人工决定登记后待审记录更新失败时停止正式入库", async
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return verifiedRestoredEvidenceResponse(blockedResult);
+    }
     if (String(input) === "/api/script-factory/audit/resolve") {
       return new Response(JSON.stringify({
         status: "resolved",
@@ -1741,51 +1785,13 @@ test("人工处理响应任一关键条件不合格时均不得正式入库或�
   const auditSessionId = "audit-session-contradictory-open";
   const auditVersion = "audit-contradictory-open-v1";
   const pendingItemId = "pending-contradictory-open-001";
-  const pendingItem = {
-    id: pendingItemId,
-    sectionIndex: 0,
-    paragraphIndex: 0,
-    subtype: "unsupported_specific_claim" as const,
-    excerpt: "正文应该先展示，辅助审计随后补充。",
-    reason: "模型新增了输入素材没有提供的具体经历。",
-    resolutionStatus: "PENDING" as const,
-  };
-  const blockedResult = {
-    ...generatedScript("矛盾门禁响应"),
-    postGenerationAuditStatus: "completed" as const,
+  const blockedResult = blockedSpecificClaimScript({
+    topic: "矛盾门禁响应",
     auditSessionId,
     auditVersion,
-    attributionAudit: {
-      outputStatus: "exploratory" as const,
-      confidenceLevel: "low" as const,
-      coveredDimensions: [],
-      missingDimensions: ["核心判断"],
-      recommendation: "请人工核对具体陈述。",
-      auditStatus: "completed" as const,
-      paragraphAttributions: [{
-        sectionIndex: 0,
-        paragraphIndex: 0,
-        excerpt: pendingItem.excerpt,
-        attributionType: "ai_reasoning" as const,
-        reasoningSubtype: "unsupported_specific_claim" as const,
-        sourceReferences: [],
-        reason: pendingItem.reason,
-      }],
-    },
-    sourceIntegrityAudit: { status: "passed" as const, deliveryBlocked: false, issues: [] },
-    factAudit: {
-      overallStatus: "pending" as const,
-      systemVerified: false as const,
-      pendingItems: [pendingItem],
-      caseEvidence: null,
-    },
-    deliveryGate: {
-      status: "BLOCKED" as const,
-      auditVersion,
-      blockerCodes: ["UNRESOLVED_UNSUPPORTED_SPECIFIC_CLAIM"],
-      pendingItemIds: [pendingItemId],
-    },
-  };
+    pendingItemId,
+  });
+  const pendingItem = blockedResult.factAudit.pendingItems[0]!;
   const validResolution = {
     status: "resolved",
     auditSessionId,
@@ -1862,6 +1868,9 @@ test("人工处理响应任一关键条件不合格时均不得正式入库或�
       }), true);
       const originalFetch = globalThis.fetch;
       globalThis.fetch = async input => {
+        if (String(input) === "/api/script-factory/audit/verify-evidence") {
+          return verifiedRestoredEvidenceResponse(blockedResult);
+        }
         if (String(input) === "/api/script-factory/audit/resolve") {
           return new Response(JSON.stringify(scenario.response), {
             status: 200,
@@ -1901,6 +1910,34 @@ test("门禁阻断的待审正文刷新后仍可恢复且不会进入正式脚�
   localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return new Response(JSON.stringify({
+        status: "verified",
+        auditSessionId: "audit-session-refresh",
+        auditVersion: "audit-refresh",
+        generationEvidenceId: "11111111-1111-4111-8111-111111111111",
+        evidenceChainVersion: SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION,
+        sourceIntegrityAudit: {
+          status: "needs_review",
+          deliveryBlocked: true,
+          issues: [{
+            code: "responsibility_subject_distortion",
+            sectionIndex: 0,
+            paragraphIndex: 0,
+            excerpt: "正文应该先展示，辅助审计随后补充。",
+            sourceReferences: [{ sourceId: "source-1", itemId: "claim-1" }],
+            reason: "责任主体发生变化。",
+          }],
+        },
+        factAudit: { overallStatus: "not_checked", systemVerified: false, pendingItems: [], caseEvidence: null },
+        deliveryGate: {
+          status: "BLOCKED",
+          auditVersion: "audit-refresh",
+          blockerCodes: ["SOURCE_INTEGRITY_REVIEW_REQUIRED"],
+          pendingItemIds: [],
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (String(input) === "/api/script-factory") {
       return new Response(JSON.stringify(generatedScript("刷新恢复待审稿")), { status: 200, headers: { "Content-Type": "application/json" } });
     }
@@ -1987,6 +2024,193 @@ test("门禁阻断的待审正文刷新后仍可恢复且不会进入正式脚�
   }
 });
 
+test("恢复时必须用服务端BLOCKED审计状态覆盖浏览器伪造的OPEN状态", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const blockedResult = blockedSpecificClaimScript({
+    topic: "服务端门禁优先",
+    auditSessionId: "audit-session-server-blocked",
+    auditVersion: "audit-server-blocked-v1",
+    pendingItemId: "audit-server-blocked-v1:0:0:unsupported_specific_claim",
+  });
+  const browserForgedOpenResult = {
+    ...blockedResult,
+    coverageAssessment: {
+      coverage: "FULL" as const,
+      reason: "浏览器伪造为完整覆盖。",
+      coveredDimensions: ["核心判断"],
+      missingDimensions: [],
+      sourceReferences: [],
+      caseNeed: "NOT_NEEDED" as const,
+      caseReason: "浏览器声称不需要案例。",
+    },
+    attributionAudit: {
+      outputStatus: "formal" as const,
+      confidenceLevel: "high" as const,
+      coveredDimensions: ["核心判断"],
+      missingDimensions: [],
+      recommendation: "浏览器伪造为可以交付。",
+      auditStatus: "completed" as const,
+      paragraphAttributions: [],
+    },
+    sourceIntegrityAudit: {
+      status: "passed" as const,
+      deliveryBlocked: false,
+      issues: [],
+    },
+    factAudit: {
+      ...blockedResult.factAudit,
+      pendingItems: [],
+    },
+    deliveryGate: {
+      status: "OPEN" as const,
+      auditVersion: blockedResult.auditVersion,
+      blockerCodes: [],
+      pendingItemIds: [],
+    },
+  };
+  const { saveScriptAuditDraft } = await import("./script-factory-audit-draft");
+  assert.equal(saveScriptAuditDraft(window.sessionStorage, {
+    ipId: SHUIMURAN.id,
+    auditSessionId: blockedResult.auditSessionId,
+    auditVersion: blockedResult.auditVersion,
+    result: browserForgedOpenResult,
+  }), true);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return new Response(JSON.stringify({
+        status: "verified",
+        auditSessionId: blockedResult.auditSessionId,
+        auditVersion: blockedResult.auditVersion,
+        generationEvidenceId: blockedResult.generationEvidenceId,
+        evidenceChainVersion: blockedResult.evidenceChainVersion,
+        coverageAssessment: blockedResult.coverageAssessment,
+        attributionAudit: blockedResult.attributionAudit,
+        sourceIntegrityAudit: blockedResult.sourceIntegrityAudit,
+        factAudit: blockedResult.factAudit,
+        deliveryGate: blockedResult.deliveryGate,
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    assert.ok(await view.findByText("模型新增了输入素材没有提供的具体经历。"));
+    assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("新版稿件恢复时核验服务故障应显示准确提示而不是旧稿提示", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const blockedResult = blockedSpecificClaimScript({
+    topic: "核验服务故障",
+    auditSessionId: "audit-session-service-unavailable",
+    auditVersion: "audit-service-unavailable-v1",
+    pendingItemId: "audit-service-unavailable-v1:0:0:unsupported_specific_claim",
+  });
+  const { saveScriptAuditDraft } = await import("./script-factory-audit-draft");
+  assert.equal(saveScriptAuditDraft(window.sessionStorage, {
+    ipId: SHUIMURAN.id,
+    auditSessionId: blockedResult.auditSessionId,
+    auditVersion: blockedResult.auditVersion,
+    result: blockedResult,
+  }), true);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return new Response(JSON.stringify({
+        error: "生成证据凭证核验服务暂不可用，已停止恢复。",
+        code: "GENERATION_EVIDENCE_VERIFICATION_UNAVAILABLE",
+      }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ results: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { render } = await import("@testing-library/react");
+    const { IPProvider } = await import("./ip-context");
+    const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+    const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+    assert.ok(await view.findByText("证据链核验服务暂不可用，当前审计状态无法确认"));
+    assert.equal(view.queryByText("生成于证据链缺口修复之前，审计结果不可信"), null);
+    assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("缺少新版证据链标识的旧待审稿即使门禁为OPEN也诚实降级且不改写原数据", async () => {
+  localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
+  localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
+  localStorage.setItem("ipwr:defaultIPsInitialized:v1", JSON.stringify(true));
+  const auditSessionId = "legacy-audit-session";
+  const auditVersion = "legacy-audit-version";
+  const currentResult = blockedSpecificClaimScript({
+    topic: "旧待审稿",
+    auditSessionId,
+    auditVersion,
+    pendingItemId: "legacy-pending-item",
+  });
+  const {
+    generationEvidenceId: _generationEvidenceId,
+    evidenceChainVersion: _evidenceChainVersion,
+    ...legacyResult
+  } = currentResult;
+  const legacyOpenResult = {
+    ...legacyResult,
+    factAudit: {
+      overallStatus: "not_checked" as const,
+      systemVerified: false as const,
+      pendingItems: [],
+      caseEvidence: null,
+    },
+    deliveryGate: {
+      status: "OPEN" as const,
+      auditVersion,
+      blockerCodes: [],
+      pendingItemIds: [],
+    },
+  };
+  const { saveScriptAuditDraft } = await import("./script-factory-audit-draft");
+  assert.equal(saveScriptAuditDraft(window.sessionStorage, {
+    ipId: SHUIMURAN.id,
+    auditSessionId,
+    auditVersion,
+    result: legacyOpenResult,
+  }), true);
+  const storedBeforeRestore = window.sessionStorage.getItem("ipwr:scriptAuditDrafts:v1");
+
+  const { cleanup, render } = await import("@testing-library/react");
+  const { IPProvider } = await import("./ip-context");
+  const ScriptFactoryPage = (await import("../app/script-factory/page")).default;
+  const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
+
+  assert.ok(await view.findByText("生成于证据链缺口修复之前，审计结果不可信"));
+  assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
+  assert.equal(window.sessionStorage.getItem("ipwr:scriptAuditDrafts:v1"), storedBeforeRestore);
+  cleanup();
+});
+
 test("人工确认等待期间正文被改写时迟到确认不得按旧内容生效", async () => {
   localStorage.setItem("ipwr:ips_v2", JSON.stringify([SHUIMURAN]));
   localStorage.setItem("ipwr:activeIpId", JSON.stringify(SHUIMURAN.id));
@@ -2014,6 +2238,9 @@ test("人工确认等待期间正文被改写时迟到确认不得按旧内容�
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
     const path = String(input);
+    if (path === "/api/script-factory/audit/verify-evidence") {
+      return verifiedRestoredEvidenceResponse(blockedResult);
+    }
     if (path === "/api/script-factory/audit/resolve") return confirmationResponse;
     if (path === "/api/script-factory/audit") return new Promise<Response>(() => undefined);
     return new Response(JSON.stringify({ results: [] }), {
@@ -2102,6 +2329,9 @@ test("人工改写在复审通过前不得覆盖原正式稿", async () => {
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async input => {
+    if (String(input) === "/api/script-factory/audit/verify-evidence") {
+      return verifiedRestoredEvidenceResponse(linkedBlockedResult);
+    }
     if (String(input) === "/api/script-factory/audit") return new Promise<Response>(() => undefined);
     return new Response(JSON.stringify({ results: [] }), {
       status: 200,
@@ -2772,13 +3002,13 @@ test("重新打开IP专属脚本时恢复对应生成模式", async () => {
 
   const modeButton = await view.findByRole("button", { name: "IP专属生成" });
   assert.equal(modeButton.getAttribute("aria-pressed"), "true");
-  assert.ok(view.getByText(/不得视为审计通过或正式交付/));
+  assert.ok(view.getByText("生成于证据链缺口修复之前，审计结果不可信"));
   assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
   assert.equal(view.queryByText(/正式稿 · 置信度高/), null);
   assert.equal(view.queryByRole("button", { name: "生成完整内容" }), null);
   await (await import("@testing-library/user-event")).default.setup({ document }).click(view.getByRole("button", { name: "固定脚本生成" }));
   assert.equal(view.queryByText("完整正文。"), null);
-  assert.equal(view.queryByText(/不得视为审计通过或正式交付/), null);
+  assert.equal(view.queryByText("生成于证据链缺口修复之前，审计结果不可信"), null);
   window.history.replaceState({}, "", "/script-factory");
 });
 
@@ -2831,7 +3061,7 @@ test("水木然IP专属结果只展示标题、完整口播文案和待核验内
   const view = render(<IPProvider><ScriptFactoryPage /></IPProvider>);
 
   assert.ok(await view.findByText("标题："));
-  assert.ok(view.getByText(/不得视为审计通过或正式交付/));
+  assert.ok(view.getByText("生成于证据链缺口修复之前，审计结果不可信"));
   assert.ok((view.getByRole("button", { name: "审核通过后可复制" }) as HTMLButtonElement).disabled);
   assert.ok(view.getByText("完整口播文案："));
   assert.ok(view.getByText("待核验内容："));

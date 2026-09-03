@@ -1,5 +1,7 @@
 import type { CoverageAssessment } from "./script-factory-coverage";
 
+export const SCRIPT_GENERATION_EVIDENCE_CHAIN_VERSION = 1;
+
 export type ScriptFactoryStage = "content" | "storyboard" | "execution";
 export type PartialScriptFailedStage = Exclude<ScriptFactoryStage, "content">;
 export type ScriptGenerationStatus = "complete" | "partial";
